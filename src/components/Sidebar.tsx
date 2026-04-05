@@ -13,7 +13,8 @@ import {
   Users,
   Inbox,
   Factory,
-  CheckSquare
+  CheckSquare,
+  Settings
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -29,6 +30,7 @@ const navigation = [
   { name: "Recipes", href: "/recipes", icon: ChefHat },
   { name: "Reports", href: "/reports", icon: BarChart4 },
   { name: "Users", href: "/users", icon: Users },
+  { name: "Settings", href: "/settings", icon: Settings },
 ];
 
 export function Sidebar() {

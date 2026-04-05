@@ -20,12 +20,7 @@ const getRelativeDate = (daysAgo: number) => {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 };
 
-export const defaultOrders = [
-  { id: "PO-1049", supplierId: 2, date: getRelativeDate(1), deliveryDate: "Pending", items: 4, total: 450.50, status: "Sent", location: "Downtown", createdBy: "Sarah J.", receivedBy: null, receivedAt: null, notes: "Please deliver to receiving dock." },
-  { id: "PO-1048", supplierId: 1, date: getRelativeDate(3), deliveryDate: getRelativeDate(1), items: 5, total: 1250.00, status: "Delivered", location: "HQ (All Locations)", createdBy: "Admin", receivedBy: "Sarah J.", receivedAt: "10:15 AM", notes: "" },
-  { id: "PO-1047", supplierId: 3, date: getRelativeDate(4), deliveryDate: "Pending", items: 3, total: 890.00, status: "Draft", location: "Uptown", createdBy: "David W.", receivedBy: null, receivedAt: null, notes: "Call before arrival." },
-  { id: "PO-1046", supplierId: 4, date: getRelativeDate(6), deliveryDate: getRelativeDate(4), items: 12, total: 2100.25, status: "Delivered", location: "Downtown", createdBy: "Sarah J.", receivedBy: "Mike T.", receivedAt: "08:30 AM", notes: "" },
-];
+export const defaultOrders: any[] = [];
 
 // Recipes Logic Persistence Map
 export const defaultRecipes = [
@@ -90,33 +85,7 @@ export function saveFinishedGoods(fgs: any[]) {
 }
 
 // Requisitions Data (FGs only)
-export const defaultRequisitions = [
-  {
-    id: "REQ-2001",
-    location: "Downtown",
-    requestedBy: "Mike T.",
-    date: getRelativeDate(0),
-    status: "Draft",
-    items: 2,
-    notes: "Running low for weekend prep.",
-    lineItems: [
-      { id: "FG-101", name: "Butter Chicken Base", unit: "kg", requestedQty: 10, fulfilledQty: 0, currentStock: 25 },
-      { id: "FG-104", name: "Garlic Sauce", unit: "Litre", requestedQty: 4, fulfilledQty: 0, currentStock: 2 }
-    ]
-  },
-  {
-    id: "REQ-2002",
-    location: "Uptown",
-    requestedBy: "David W.",
-    date: getRelativeDate(1),
-    status: "Submitted",
-    items: 1,
-    notes: "Need extra dough for the festival weekend.",
-    lineItems: [
-      { id: "FG-103", name: "Pizza Dough Batch", unit: "kg", requestedQty: 20, fulfilledQty: 0, currentStock: 40 }
-    ]
-  }
-];
+export const defaultRequisitions: any[] = [];
 
 export function loadRequisitions() {
   if (typeof window === "undefined") return defaultRequisitions;
@@ -140,57 +109,57 @@ export function saveRequisitions(data: any) {
 export const defaultInventory = [
   { 
     id: 101, name: "Tomatoes (Roma)", category: "Produce", itemType: "Raw", baseUnit: "kg", unit: "kg", 
-    inStock: 5, parLevel: 15, cost: 2.20, supplierId: 2, priceTrend: "steady", priceIncrease: false,
+    inStock: 0, parLevel: 15, cost: 2.20, supplierId: 2, priceTrend: "steady", priceIncrease: false,
     purchaseUnits: [{ name: "Case", conversion: 10, isPrimary: true }, { name: "Bag", conversion: 2, isPrimary: false }]
   },
   { 
     id: 102, name: "Chicken Breast", category: "Meat", itemType: "Raw", baseUnit: "kg", unit: "kg", 
-    inStock: 15, parLevel: 45, cost: 5.50, supplierId: 1, priceTrend: "up", priceIncrease: true,
+    inStock: 0, parLevel: 45, cost: 5.50, supplierId: 1, priceTrend: "up", priceIncrease: true,
     purchaseUnits: [{ name: "Box", conversion: 15, isPrimary: true }]
   },
   { 
     id: 103, name: "Olive Oil", category: "Pantry", itemType: "Raw", baseUnit: "Litre", unit: "Litre", 
-    inStock: 12, parLevel: 10, cost: 18.00, supplierId: 4, priceTrend: "steady", priceIncrease: false,
+    inStock: 0, parLevel: 10, cost: 18.00, supplierId: 4, priceTrend: "steady", priceIncrease: false,
     purchaseUnits: [{ name: "Jug", conversion: 4, isPrimary: true }]
   },
   { 
     id: 104, name: "Salmon Fillet", category: "Produce", itemType: "Raw", baseUnit: "kg", unit: "kg", 
-    inStock: 2, parLevel: 10, cost: 15.00, supplierId: 3, priceTrend: "down", priceIncrease: false,
+    inStock: 0, parLevel: 10, cost: 15.00, supplierId: 3, priceTrend: "down", priceIncrease: false,
     purchaseUnits: [{ name: "Case", conversion: 20, isPrimary: true }]
   },
   { 
     id: 105, name: "Lettuce (Romaine)", category: "Produce", itemType: "Raw", baseUnit: "piece", unit: "box", 
-    inStock: 12, parLevel: 30, cost: 24.50, supplierId: 2, priceTrend: "up", priceIncrease: true,
+    inStock: 0, parLevel: 30, cost: 24.50, supplierId: 2, priceTrend: "up", priceIncrease: true,
     purchaseUnits: [{ name: "Box", conversion: 12, isPrimary: true }, { name: "Single", conversion: 1, isPrimary: false }]
   },
   { 
     id: 106, name: "Onions (Yellow)", category: "Produce", itemType: "Raw", baseUnit: "kg", unit: "kg", 
-    inStock: 25, parLevel: 20, cost: 1.10, supplierId: 2, priceTrend: "steady", priceIncrease: false,
+    inStock: 0, parLevel: 20, cost: 1.10, supplierId: 2, priceTrend: "steady", priceIncrease: false,
     purchaseUnits: [{ name: "Sack", conversion: 25, isPrimary: true }]
   },
   { 
     id: 107, name: "Ground Beef 80/20", category: "Meat", itemType: "Raw", baseUnit: "lb", unit: "lb", 
-    inStock: 10, parLevel: 40, cost: 3.20, supplierId: 1, priceTrend: "steady", priceIncrease: false,
+    inStock: 0, parLevel: 40, cost: 3.20, supplierId: 1, priceTrend: "steady", priceIncrease: false,
     purchaseUnits: [{ name: "Chub", conversion: 10, isPrimary: true }]
   },
   {
     id: "FG-101", name: "Butter Chicken Base", category: "Kitchen Prep", itemType: "Preparation", baseUnit: "kg", unit: "kg",
-    inStock: 25, parLevel: 50, cost: 8.55, supplierId: null, priceTrend: "steady", priceIncrease: false,
+    inStock: 0, parLevel: 50, cost: 8.55, supplierId: null, priceTrend: "steady", priceIncrease: false,
     purchaseUnits: [{ name: "kg", conversion: 1, isPrimary: true }]
   },
   {
     id: "FG-102", name: "Chole", category: "Kitchen Prep", itemType: "Preparation", baseUnit: "kg", unit: "kg",
-    inStock: 10, parLevel: 30, cost: 3.01, supplierId: null, priceTrend: "steady", priceIncrease: false,
+    inStock: 0, parLevel: 30, cost: 3.01, supplierId: null, priceTrend: "steady", priceIncrease: false,
     purchaseUnits: [{ name: "kg", conversion: 1, isPrimary: true }]
   },
   {
     id: "FG-103", name: "Pizza Dough Batch", category: "Kitchen Prep", itemType: "Preparation", baseUnit: "kg", unit: "kg",
-    inStock: 40, parLevel: 20, cost: 0.75, supplierId: null, priceTrend: "steady", priceIncrease: false,
+    inStock: 0, parLevel: 20, cost: 0.75, supplierId: null, priceTrend: "steady", priceIncrease: false,
     purchaseUnits: [{ name: "kg", conversion: 1, isPrimary: true }]
   },
   {
     id: "FG-104", name: "Garlic Sauce", category: "Kitchen Prep", itemType: "Preparation", baseUnit: "Litre", unit: "Litre",
-    inStock: 2, parLevel: 5, cost: 2.46, supplierId: null, priceTrend: "steady", priceIncrease: false,
+    inStock: 0, parLevel: 5, cost: 2.46, supplierId: null, priceTrend: "steady", priceIncrease: false,
     purchaseUnits: [{ name: "Litre", conversion: 1, isPrimary: true }]
   }
 ];
@@ -497,12 +466,7 @@ export function saveOrders(data: any) {
 
 // Counts Data Logic
 
-export const defaultCounts = [
-  { id: "CNT-001", name: "Weekly Pantry Count", type: "Weekly", status: "Draft", date: getRelativeDate(0), location: "Downtown", items: [], totalVarianceValue: 0 },
-  { id: "CNT-002", name: "End of Month Full Count", type: "Monthly", status: "Submitted", date: getRelativeDate(1), location: "HQ (All Locations)", items: [], totalVarianceValue: -45.20 },
-  { id: "CNT-003", name: "Dairy Daily Check", type: "Daily", status: "Approved", date: getRelativeDate(2), location: "Uptown", items: [], totalVarianceValue: -4.50 },
-  { id: "CNT-004", name: "Produce Daily Check", type: "Daily", status: "Approved", date: getRelativeDate(2), location: "Downtown", items: [], totalVarianceValue: +2.20 },
-];
+export const defaultCounts: any[] = [];
 
 export function loadCounts() {
   if (typeof window === "undefined") return defaultCounts;
