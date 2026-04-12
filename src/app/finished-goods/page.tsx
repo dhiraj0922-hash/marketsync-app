@@ -39,12 +39,32 @@ export default function FinishedGoods() {
   const [produceBatches, setProduceBatches] = useState<number>(1);
   const [isAutoFulfillMode, setIsAutoFulfillMode] = useState<boolean>(false);
 
+  const [isLoading, setIsLoading] = useState(true);
+
   useEffect(() => {
-    setRecipes(loadRecipes());
-    setInventoryData(loadInventory());
-    setRequisitions(loadRequisitions());
-    setProductionHistory(loadProductionHistory());
+    async function fetchData() {
+       setIsLoading(true);
+       try {
+          const [rec, inv, req, hist] = await Promise.all([
+             loadRecipes(),
+             loadInventory(),
+             loadRequisitions(),
+             loadProductionHistory()
+          ]);
+          setRecipes(Array.isArray(rec) ? rec : []);
+          setInventoryData(Array.isArray(inv) ? inv : []);
+          setRequisitions(Array.isArray(req) ? req : []);
+          setProductionHistory(Array.isArray(hist) ? hist : []);
+       } catch (err) {
+          console.error(err);
+       } finally {
+          setIsLoading(false);
+       }
+    }
+    fetchData();
   }, []);
+
+  if (isLoading) return <div className="p-12 flex justify-center text-neutral-400 animate-pulse">Loading Finished Goods...</div>;
 
   const finishedGoods = inventoryData.filter(i => i.itemType === "Finished Good" || i.itemType === "Preparation");
 
@@ -171,7 +191,7 @@ export default function FinishedGoods() {
 
   const activeConstraints = selectedFG ? getProductionConstraints(selectedFG, produceBatches) : null;
 
-  const executeProduction = (fg: any, targetBatches: number, autoFulfill: boolean) => {
+  const executeProduction = async (fg: any, targetBatches: number, autoFulfill: boolean) => {
      const rule = getProductionConstraints(fg, targetBatches);
      const recipe = recipes.find(r => r.outputItemId?.toString() === fg.id.toString());
      if (!recipe || !rule) return;
@@ -214,8 +234,12 @@ export default function FinishedGoods() {
      };
 
      const _hist = [newLog, ...productionHistory];
+     const histRes = await saveProductionHistory(_hist);
+     if (!histRes?.success) {
+        alert(`Database Error (Save Production log): ${histRes?.error?.message}`);
+        return;
+     }
      setProductionHistory(_hist);
-     saveProductionHistory(_hist);
 
      let alertMsg = `Successfully produced ${targetBatches} batches of ${fg.name} yielding ${yieldAmount} ${recipe.yieldUnit}!`;
 
@@ -262,13 +286,21 @@ export default function FinishedGoods() {
            }
         });
 
+        const reqRes = await saveRequisitions(_reqs);
+        if (!reqRes?.success) {
+           alert(`Database Error (Save Requisitions): ${reqRes?.error?.message}`);
+           return;
+        }
         setRequisitions(_reqs);
-        saveRequisitions(_reqs);
         alertMsg += ` Auto-fulfilled ${fulfilledTotal} ${recipe.yieldUnit} directly to lingering Requisitions.`;
      }
 
+     const invRes = await saveInventory(_inv);
+     if (!invRes?.success) {
+        alert(`Database Error (Save Inventory): ${invRes?.error?.message}`);
+        return;
+     }
      setInventoryData(_inv);
-     saveInventory(_inv);
      
      
      setSelectedFG(null);

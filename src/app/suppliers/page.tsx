@@ -84,21 +84,40 @@ export default function Suppliers() {
     notes: ""
   });
 
+  const [isLoading, setIsLoading] = useState(true);
+
   useEffect(() => {
-    setSuppliersData(loadSuppliers());
-    setInventoryData(loadInventory());
-    setOrdersData(loadOrders());
+    async function fetchData() {
+       setIsLoading(true);
+       try {
+         const [ldSup, ldInv, ldOrd] = await Promise.all([
+            loadSuppliers(),
+            loadInventory(),
+            loadOrders()
+         ]);
+         setSuppliersData(Array.isArray(ldSup) ? ldSup : []);
+         setInventoryData(Array.isArray(ldInv) ? ldInv : []);
+         setOrdersData(Array.isArray(ldOrd) ? ldOrd : []);
+       } catch (err) {
+         console.error(err);
+       } finally {
+         setIsLoading(false);
+       }
+    }
+    fetchData();
   }, []);
 
-  const handleSaveSupplier = () => {
+  if (isLoading) return <div className="p-12 flex justify-center text-neutral-400 animate-pulse">Loading Suppliers...</div>;
+
+  const handleSaveSupplier = async () => {
     if (!newSupplier.name) {
       alert("Supplier name is required.");
       return;
     }
 
     const testName = newSupplier.name.trim();
-    const resolvedId = resolveSupplier(testName);
-    const freshData = loadSuppliers();
+    const resolvedId = await resolveSupplier(testName);
+    const freshData = await loadSuppliers();
     const existing = freshData.find((s: any) => s.id === resolvedId);
 
     // Prevent duplicates if already actively managed
@@ -124,14 +143,18 @@ export default function Suppliers() {
     };
 
     const finalSuppliersList = freshData.map((s: any) => s.id === resolvedId ? finalItem : s);
+    const res = await saveSuppliers(finalSuppliersList);
+    if (!res?.success) {
+       alert(`Database Error (Save Supplier): ${res?.error?.message}`);
+       return;
+    }
     setSuppliersData(finalSuppliersList);
-    saveSuppliers(finalSuppliersList);
 
     setNewSupplier({ name: "", category: "General", contact: "", email: "", phone: "", leadTime: "", minOrder: "", paymentTerms: "", notes: "" });
     setIsAddDrawerOpen(false);
   };
 
-  const handleUpdateSupplier = () => {
+  const handleUpdateSupplier = async () => {
      if (!editForm.name) return;
      
      const newArr = suppliersData.map(s => {
@@ -141,15 +164,19 @@ export default function Suppliers() {
         return s;
      });
      
+     const res = await saveSuppliers(newArr);
+     if (!res?.success) {
+        alert(`Database Error (Update Supplier): ${res?.error?.message}`);
+        return;
+     }
      setSuppliersData(newArr);
-     saveSuppliers(newArr);
      setIsEditing(false);
      
      const updatedSelection = newArr.find(s => s.id === selectedSupplier.id);
      setSelectedSupplier(updatedSelection);
   };
 
-  const handleQuickReorder = () => {
+  const handleQuickReorder = async () => {
      if (!selectedSupplier) return;
      
      const supplierItems = inventoryData.filter(i => i.supplierId === selectedSupplier.id);
@@ -186,7 +213,7 @@ export default function Suppliers() {
      };
 
      const updatedOrders = [draftPO, ...ordersData];
-     saveOrders(updatedOrders);
+     await saveOrders(updatedOrders);
      setOrdersData(updatedOrders);
 
      // Route explicitly with the preload target parameter

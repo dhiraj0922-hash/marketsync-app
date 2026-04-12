@@ -7,11 +7,21 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Drawer } from "@/components/ui/drawer";
 import { Calendar, CheckCircle2, Clock, Smartphone, Play, Save, Send, ShieldCheck, FileEdit, Calculator, ArrowRight } from "lucide-react";
 import { loadCounts, saveCounts, loadInventory, saveInventory } from "@/lib/storage";
+import { useAuth } from "@/components/AuthProvider";
 
-const locationsData = ["Downtown", "Uptown", "Westside", "HQ (All Locations)"];
+
+const locationsData = ["Downtown", "Uptown", "Westside", "HQ"];
 const countTypes = ["Daily", "Weekly", "Monthly", "Spot Check"];
 
 export default function Counts() {
+  const { user } = useAuth();
+  // writeLocationId: used when inserting rows — always a real DB location_id (NOT NULL)
+  const writeLocationId: string =
+    user?.role === "hq_admin" ? "LOC-HQ" : (user?.locationId ?? "");
+  // queryLocationId: used when loading — null for hq_admin (see all), scoped for store managers
+  const queryLocationId: string | null =
+    user?.role === "hq_admin" ? null : (user?.locationId ?? null);
+
   const [counts, setCounts] = useState<any[]>([]);
   const [inventoryData, setInventoryData] = useState<any[]>([]);
   
@@ -27,10 +37,28 @@ export default function Counts() {
   const [notes, setNotes] = useState("");
   const [step, setStep] = useState<1|2>(1);
 
+  const [isLoading, setIsLoading] = useState(true);
+
   useEffect(() => {
-    setCounts(loadCounts());
-    setInventoryData(loadInventory());
+    async function fetchData() {
+      setIsLoading(true);
+      try {
+        const [loadedCounts, loadedInv] = await Promise.all([
+          loadCounts(queryLocationId),
+          loadInventory()
+        ]);
+        setCounts(loadedCounts);
+        setInventoryData(loadedInv);
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setIsLoading(false);
+      }
+    }
+    fetchData();
   }, []);
+
+  if (isLoading) return <div className="animate-pulse flex p-12 text-neutral-400 justify-center">Loading Active Counts...</div>;
 
   const totalVarianceMTD = counts
     .filter(c => c.status === "Approved")
@@ -61,16 +89,18 @@ export default function Counts() {
   };
 
   const beginCounting = () => {
-    // Scaffold line items directly from live inventory baseline
-    // If activeCount already has items, we just use those (resuming draft)
     if (countItems.length === 0) {
-      const liveSnapshot = inventoryData.map(inv => ({
+      // Scope snapshot to this user's location so only relevant items are counted
+      const scopedInv = writeLocationId
+        ? inventoryData.filter((inv: any) => inv.locationId === writeLocationId)
+        : inventoryData;
+      const liveSnapshot = scopedInv.map((inv: any) => ({
         id: inv.id,
         name: inv.name,
         unit: inv.unit,
         cost: inv.cost,
         theoreticalQty: inv.inStock,
-        physicalQty: "", // Blank input initially
+        physicalQty: "",
         variance: 0,
         varianceValue: 0
       }));
@@ -98,7 +128,7 @@ export default function Counts() {
 
   const currentTotalVariance = countItems.reduce((sum, item) => sum + (item.varianceValue || 0), 0);
 
-  const saveCountSession = (status: "Draft" | "Submitted" | "Approved") => {
+  const saveCountSession = async (status: "Draft" | "Submitted" | "Approved") => {
     let newCountsList = [...counts];
     const finalDate = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
@@ -109,6 +139,7 @@ export default function Counts() {
       status: status,
       date: finalDate,
       location: countLocation,
+      locationId: writeLocationId,   // required NOT NULL in counts table
       items: countItems,
       totalVarianceValue: currentTotalVariance,
       notes: notes
@@ -131,12 +162,20 @@ export default function Counts() {
            }
          }
       });
+      const invRes = await saveInventory(newInventory);
+      if (!invRes?.success) {
+         alert(`Database Error (Inventory Update): ${invRes?.error?.message}`);
+         return;
+      }
       setInventoryData(newInventory);
-      saveInventory(newInventory);
     }
 
+    const countsRes = await saveCounts(newCountsList);
+    if (!countsRes?.success) {
+       alert(`Database Error (Save Counts): ${countsRes?.error?.message}`);
+       return;
+    }
     setCounts(newCountsList);
-    saveCounts(newCountsList);
     setDrawerOpen(false);
   };
 

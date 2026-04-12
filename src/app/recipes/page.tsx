@@ -5,19 +5,72 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
-import { loadRecipes, saveRecipes, loadInventory, saveInventory } from "@/lib/storage";
-import { normalizeUnit } from "@/lib/units";
-import { Plus, Search, SplitSquareVertical, Calculator, Trash2 } from "lucide-react";
+import { loadRecipes, saveRecipes, loadInventory, saveInventory, upsertRecipe, updateInventoryItemCost } from "@/lib/storage";
+
+import { normalizeUnit, canonicalizeUnit } from "@/lib/units";
+
+import { Plus, Search, SplitSquareVertical, Calculator, Trash2, Sparkles } from "lucide-react";
+import { HQOnlyGuard } from "@/components/HQOnlyGuard";
+import { AIRecipeImport } from "@/components/AIRecipeImport";
+
+// ─── Utility: race a promise against a cancellable deadline ───────────────────
+//
+// withAbortableTimeout: passes an AbortSignal to the factory so the underlying
+// fetch is actually cancelled (not just orphaned) when the timer fires.
+// This prevents zombie Supabase requests from sitting on the connection pool
+// and causing subsequent saves to queue behind a dead request.
+//
+// withTimeout: legacy shim for non-fetch promises that don't take a signal.
+//
+// Root cause of the 12 s timeout: Supabase free-tier PostgREST cold-starts
+// (after ~5 min inactivity) legitimately take 10–20 s. The previous 12 s
+// deadline was firing during valid, slow-but-correct cold-start responses.
+// Payload optimization (sanitizeIngredientForDB) reduces actual latency;
+// timeout raised to 30 s as the safety net.
+function withAbortableTimeout<T>(
+  factory: (signal: AbortSignal) => Promise<T>,
+  ms: number,
+  timeoutMsg: string
+): Promise<T> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(timeoutMsg));
+    }, ms);
+  });
+  return Promise.race([factory(controller.signal), deadline])
+    .finally(() => clearTimeout(timer));
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, timeoutMsg: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(timeoutMsg)), ms);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
 
 export default function Recipes() {
+  return (
+    <HQOnlyGuard>
+      <RecipesPageContent />
+    </HQOnlyGuard>
+  );
+}
+
+function RecipesPageContent() {
   const [recipes, setRecipes] = useState<any[]>([]);
   const [inventory, setInventory] = useState<any[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
-  
+
   // Builder State
   const [isBuilderOpen, setIsBuilderOpen] = useState(false);
   const [editingRecipe, setEditingRecipe] = useState<any>(null);
-  
+
+  // AI Import State
+  const [isImportOpen, setIsImportOpen] = useState(false);
   const [recipeName, setRecipeName] = useState("");
   const [recipeCategory, setRecipeCategory] = useState("Mains");
   const [yieldQty, setYieldQty] = useState<number>(1);
@@ -28,10 +81,30 @@ export default function Recipes() {
   const [ingredients, setIngredients] = useState<any[]>([]);
   const [selectedInvId, setSelectedInvId] = useState<string>("");
 
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [builderError, setBuilderError] = useState<string | null>(null);
+
   useEffect(() => {
-    setRecipes(loadRecipes());
-    setInventory(loadInventory());
+    async function fetchData() {
+      setIsLoading(true);
+      try {
+        const [loadedRec, loadedInv] = await Promise.all([
+          loadRecipes(),
+          loadInventory()
+        ]);
+        setRecipes(loadedRec);
+        setInventory(loadedInv);
+      } catch(e) {
+        console.error(e);
+      } finally {
+        setIsLoading(false);
+      }
+    }
+    fetchData();
   }, []);
+
+  if (isLoading) return <div className="animate-pulse flex p-12 justify-center text-neutral-400">Loading Recipes...</div>;
 
   const openBuilder = (recipe: any = null) => {
     if (recipe) {
@@ -57,24 +130,74 @@ export default function Recipes() {
     setIsBuilderOpen(true);
   };
 
+  /**
+   * Called when user confirms an AI import.
+   * Pre-populates the recipe builder with the extracted header and ingredients.
+   * The user still goes through the full builder UI before final save.
+   */
+  const handleAIImportConfirm = (
+    header: { name: string; category: string; yieldQty: number; yieldUnit: string; notes: string },
+    importedIngredients: any[]   // renamed param to avoid shadowing the state variable
+  ) => {
+    // 1. Write all recipe-builder form state first — while the import drawer is still open.
+    //    This guarantees every setter is batched in the same React render that has the
+    //    correct imported values, so the builder never sees a stale empty ingredients array.
+    setEditingRecipe(null);
+    setRecipeName(header.name);
+    setRecipeCategory(header.category || "Mains");
+    setYieldQty(header.yieldQty || 1);
+    setYieldUnit(header.yieldUnit || "portions");
+    setTargetMargin(80);          // default margin — user sets in builder
+    setOutputItemId("");
+    setIngredients(importedIngredients);   // AI-matched ingredients pre-loaded
+    setSelectedInvId("");
+
+    // 2. Close the import drawer and open the recipe builder in the next animation
+    //    frame. By this point, React has committed all the state above. The builder
+    //    Drawer will mount with the full importedIngredients array already in place.
+    requestAnimationFrame(() => {
+      setIsImportOpen(false);
+      setIsBuilderOpen(true);
+    });
+  };
+
   const addIngredient = () => {
     if (!selectedInvId) return;
-    
+
+    // selectedInvId comes from the dropdown which uses item.id.toString() as value.
+    // ALWAYS match by row PK (id) here — the row renderer also looks up by i.id.
     const invItem = inventory.find(i => i.id.toString() === selectedInvId);
     if (!invItem) return;
-    
-    // Prevent duplicates
-    if (ingredients.some(ing => ing.inventoryId?.toString() === selectedInvId)) {
+
+    // For duplicate-prevention we compare by shared itemId so two location rows
+    // for the same product don't both get added.
+    const sharedId = invItem.itemId || invItem.id;
+    if (ingredients.some(ing => {
+      const stored = ing.inventoryId || ing.fgId || "";
+      return stored.toString() === invItem.id.toString() ||
+             stored.toString() === sharedId.toString();
+    })) {
       alert("Ingredient is already in the recipe.");
       return;
     }
 
+    // Canonicalize the native unit so it always matches a <select> option.
+    // DB values like "LIT", "lit", "LITRE", "FL OZ", "pcs" are non-canonical
+    // and don't match any <option value=...> in the unit dropdown. When there
+    // is no match the browser silently resets to the first option ("g") —
+    // this was why Agni Sauce (LIT) always landed on grams.
+    const rawUnit = invItem.baseUnit || invItem.unit || "ea";
+    const nativeUnit = canonicalizeUnit(rawUnit) ?? rawUnit;
+
     const newIng = {
       type: 'inventory',
-      inventoryId: invItem.id,
-      name: invItem.name, 
+      // Store the row PK so the ingredient row renderer can find the item with
+      // a direct i.id lookup. calculateCost uses dual-path (itemId + id) so it
+      // works with either value.
+      inventoryId: invItem.id.toString(),
+      name: invItem.name,
       qty: 1,
-      unit: invItem.baseUnit || invItem.unit 
+      unit: nativeUnit,   // canonical unit — always matches a dropdown option
     };
 
     setIngredients([...ingredients, newIng]);
@@ -101,16 +224,26 @@ export default function Recipes() {
       try {
         const targetId = ing.inventoryId || ing.fgId;
         if (targetId) {
-          const invItem = inventory.find(i => i.id.toString() === targetId.toString());
+          // Dual-path lookup: row PK first, then shared itemId (same as row renderer)
+          const invItem = inventory.find(i =>
+            i.id.toString() === targetId.toString() ||
+            (i.itemId && i.itemId.toString() === targetId.toString())
+          );
           if (invItem) {
             const baseTargetUnit = invItem.baseUnit || invItem.unit;
             const normQty = normalizeUnit(ing.qty, ing.unit, baseTargetUnit);
-            
+
+            // Consistent cost derivation — single source of truth:
+            //   purchaseUnits present → effectiveBaseCost = purchaseCost / conversion
+            //   purchaseCost null (legacy) → reconstruct: cost * conversion / conversion = cost
+            //   no purchaseUnits → item.cost is already the base-unit cost
             let effectiveBaseCost = invItem.cost;
             if (invItem.purchaseUnits && invItem.purchaseUnits.length > 0) {
-                const primary = invItem.purchaseUnits.find((u: any) => u.isPrimary) || invItem.purchaseUnits[0];
-                const explicitPurchaseTarget = (invItem.purchaseCost !== undefined && invItem.purchaseCost !== null) ? invItem.purchaseCost : invItem.cost;
-                effectiveBaseCost = explicitPurchaseTarget / primary.conversion;
+              const primary = invItem.purchaseUnits.find((u: any) => u.isPrimary) || invItem.purchaseUnits[0];
+              const purchCost = (invItem.purchaseCost !== undefined && invItem.purchaseCost !== null)
+                ? invItem.purchaseCost
+                : invItem.cost * primary.conversion; // reconstruct for legacy rows
+              effectiveBaseCost = purchCost / primary.conversion;
             }
             total += (normQty * effectiveBaseCost);
           }
@@ -123,62 +256,127 @@ export default function Recipes() {
     return { total, errors };
   };
 
-  const saveRecipeData = () => {
+  const saveRecipeData = async () => {
+    // ── Guard: prevent double submission ─────────────────────────────────────
+    if (isSaving) return;
+
+    // ── Validation — inline errors, no alert() ──────────────────────────────
+    setBuilderError(null);
+
     if (!recipeName.trim()) {
-      alert("Recipe name is required.");
+      setBuilderError("Recipe name is required.");
       return;
     }
     if (ingredients.length === 0) {
-      alert("Recipes require at least one ingredient mapped from active inventory.");
+      setBuilderError("Recipes require at least one ingredient mapped from active inventory.");
       return;
     }
 
     const costData = calculateCost();
     if (costData.errors > 0) {
-      alert("Cannot save recipe. Some ingredients have incompatible unit mappings that cannot be resolved computationally (e.g., liters to kilograms without a density metric).");
+      setBuilderError("Cannot save recipe — some ingredients have incompatible unit mappings. Hover the \"Unit Error\" badge to see the reason.");
       return;
     }
 
-    const cost = costData.total;
-    // Price = Cost / (1 - Margin) => e.g. Margin 80% => Price = Cost / 0.20
-    const marginDec = targetMargin / 100;
-    const price = (marginDec >= 1) ? 0 : cost / (1 - marginDec);
+    setIsSaving(true);
+    const t0 = Date.now();
+    console.debug("[saveRecipe] START", { recipeName, ingredients: ingredients.length });
 
-    const recipeData = {
-      id: editingRecipe ? editingRecipe.id : `REC-${Math.floor(1000 + Math.random() * 9000)}`,
-      name: recipeName,
-      category: recipeCategory,
-      yieldQty: yieldQty,
-      yieldUnit: yieldUnit,
-      theoreticalCost: cost,
-      margin: targetMargin,
-      price: price,
-      outputItemId: outputItemId,
-      ingredients: ingredients
-    };
+    try {
+      const cost = costData.total;
+      const marginDec = targetMargin / 100;
+      const price = (marginDec >= 1) ? 0 : cost / (1 - marginDec);
 
-    let updatedRecipes = [...recipes];
-    if (editingRecipe) {
-      const idx = updatedRecipes.findIndex(r => r.id === editingRecipe.id);
-      if (idx > -1) updatedRecipes[idx] = recipeData;
-    } else {
-      updatedRecipes.push(recipeData);
+      const recipeData = {
+        // Keep existing id on edit; generate a stable new one on create.
+        // Math.random() is fine here — human-readable prefix only, not a DB PK UUID.
+        id: editingRecipe ? editingRecipe.id : `REC-${Date.now().toString(36).toUpperCase()}`,
+        name: recipeName,
+        category: recipeCategory,
+        yieldQty,
+        yieldUnit,
+        theoreticalCost: cost,
+        margin: targetMargin,
+        price,
+        outputItemId,
+        ingredients,
+      };
+
+      // ── Step 1: upsert the single recipe row ────────────────────────────────
+      // Uses withAbortableTimeout so the underlying fetch() is actually cancelled
+      // (not just orphaned) when the 30 s deadline fires.
+      //
+      // KEY FIX: upsertRecipe now uses raw fetch() and accepts the AbortSignal.
+      // Previously: supabase.from().upsert() ignores signals → zombie TCP request
+      //   blocked the NEXT save attempt, causing cascading timeouts.
+      // Now: abort() tears down the HTTP connection immediately.
+      console.debug("[saveRecipe] step 1: upsertRecipe", recipeData.id,
+        "| ingredients:", ingredients.length);
+      const t1 = Date.now();
+      const res = await withAbortableTimeout(
+        (signal) => upsertRecipe(recipeData, signal),
+        30_000,
+        `Recipe save timed out after ${Math.round((Date.now() - t0) / 1000)}s. ` +
+        `Supabase may be cold-starting — please retry in a few seconds.`
+      );
+      console.debug(`[saveRecipe] step 1 done in ${Date.now() - t1}ms (total: ${Date.now() - t0}ms)`, res);
+
+      if (!res.success) {
+        const dbMsg = res.error?.message ?? res.error?.hint ?? JSON.stringify(res.error) ?? "Unknown DB error";
+        setBuilderError(`Database error on step 1 (recipe upsert): ${dbMsg}`);
+        return;
+      }
+
+      // ── Update local state immediately after DB confirms ─────────────────────
+      setRecipes(prev => {
+        if (editingRecipe) {
+          return prev.map(r => r.id === editingRecipe.id ? recipeData : r);
+        }
+        return [recipeData, ...prev];
+      });
+
+      // ── Step 2 (non-blocking): patch output inventory item cost ──────────────
+      // This runs AFTER the drawer closes — recipe is already saved above.
+      // Awaiting this was adding sequential latency to every save unnecessarily.
+      // Any failure is logged to console; user sees the recipe was saved correctly.
+      if (outputItemId) {
+        const invItem = inventory.find(i =>
+          (i.itemId && i.itemId.toString() === outputItemId.toString()) ||
+          i.id.toString() === outputItemId.toString()
+        );
+        if (invItem) {
+          const newCost = cost / yieldQty;
+          // Optimistically patch local state immediately
+          setInventory(prev =>
+            prev.map(i => i.id === invItem.id ? { ...i, cost: newCost } : i)
+          );
+          // Fire DB patch in background — don't await, don't block close
+          withTimeout(
+            updateInventoryItemCost(invItem.id, newCost),
+            15_000,
+            "Inventory cost patch timed out"
+          ).then(invRes => {
+            if (!invRes.success) {
+              console.warn("[saveRecipe] inventory cost patch failed:", invRes.error);
+            } else {
+              console.debug(`[saveRecipe] step 2 (bg) done in ${Date.now() - t0}ms`);
+            }
+          }).catch(err => {
+            console.warn("[saveRecipe] inventory cost patch error:", err?.message);
+          });
+        }
+      }
+
+      console.debug(`[saveRecipe] COMPLETE in ${Date.now() - t0}ms (drawer closing)`);
+      setIsBuilderOpen(false);
+      setBuilderError(null);
+    } catch (err: any) {
+      console.error("[saveRecipe] CAUGHT ERROR", err);
+      setBuilderError(err?.message ?? "An unexpected error occurred. Please try again.");
+    } finally {
+      console.debug(`[saveRecipe] finally: resetting isSaving (${Date.now() - t0}ms total)`);
+      setIsSaving(false);
     }
-
-    // Dynamic Central Kitchen Option B Mapping
-    if (outputItemId) {
-       const _inv = [...inventory];
-       const matchKey = _inv.findIndex(i => i.id.toString() === outputItemId);
-       if (matchKey !== -1) {
-          _inv[matchKey].cost = cost / yieldQty;
-          setInventory(_inv);
-          saveInventory(_inv);
-       }
-    }
-
-    setRecipes(updatedRecipes);
-    saveRecipes(updatedRecipes);
-    setIsBuilderOpen(false);
   };
 
   const filteredRecipes = recipes.filter(r => r.name.toLowerCase().includes(searchQuery.toLowerCase()));
@@ -195,13 +393,22 @@ export default function Recipes() {
           </div>
           <p className="text-neutral-500">Construct BOM outputs mathematically linking units natively to raw inventory tracking.</p>
         </div>
-        <button 
-          onClick={() => openBuilder()}
-          className="flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 shadow-sm w-full sm:w-auto"
-        >
-          <Plus className="h-4 w-4" />
-          Create Recipe Wrapper
-        </button>
+        <div className="flex items-center gap-3 w-full sm:w-auto">
+          <button
+            onClick={() => setIsImportOpen(true)}
+            className="flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium bg-violet-600 text-white rounded-lg hover:bg-violet-700 shadow-sm w-full sm:w-auto"
+          >
+            <Sparkles className="h-4 w-4" />
+            Import from Image
+          </button>
+          <button
+            onClick={() => openBuilder()}
+            className="flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 shadow-sm w-full sm:w-auto"
+          >
+            <Plus className="h-4 w-4" />
+            Create Recipe Wrapper
+          </button>
+        </div>
       </div>
 
       <Card className="shadow-sm border-neutral-200">
@@ -273,24 +480,29 @@ export default function Recipes() {
           <div className="w-full flex items-center justify-between">
             <div className="flex flex-col gap-0.5">
                <span className="text-[10px] uppercase tracking-wider text-neutral-500 font-bold">Calculation Output</span>
-               {currentCalc.errors > 0 ? (
+               {builderError ? (
+                 <span className="text-sm font-bold text-danger-600">{builderError}</span>
+               ) : currentCalc.errors > 0 ? (
                  <span className="text-sm font-bold text-danger-600">Unresolvable Unit Constraints</span>
                ) : (
                  <span className="text-sm font-bold text-brand-700">${currentCalc.total.toFixed(2)} Target Cost</span>
                )}
             </div>
             <div className="flex gap-2">
-              <button 
-                className="px-4 py-2 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 transition-colors shadow-sm"
-                onClick={() => setIsBuilderOpen(false)}
+              <button
+                className="px-4 py-2 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 transition-colors shadow-sm disabled:opacity-50"
+                onClick={() => { setIsBuilderOpen(false); setBuilderError(null); }}
+                disabled={isSaving}
               >
                 Discard
               </button>
-              <button 
-                className="px-4 py-2 text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors shadow-sm"
+              <button
+                className="px-4 py-2 text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors shadow-sm disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
                 onClick={saveRecipeData}
+                disabled={isSaving}
               >
-                Compile Sequence
+                {isSaving && <span className="h-3.5 w-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />}
+                {isSaving ? "Saving…" : "Compile Sequence"}
               </button>
             </div>
           </div>
@@ -393,30 +605,53 @@ export default function Recipes() {
                {ingredients.map((ing, idx) => {
                   let lineCost = 0;
                   let hasError = false;
-                  
+                  let costErrorMsg = "";
+
                   const targetId = ing.inventoryId || ing.fgId;
-                  const invItem = inventory.find(i => i.id.toString() === targetId?.toString());
-                  
+
+                  // ── Item lookup — dual-path identical to calculateCost ──────────────────
+                  // Bug fix: previously only matched by i.id, but addIngredient was storing
+                  // itemId (shared cross-location id) instead of row PK. Now we match both
+                  // so saved recipes load correctly regardless of which id was stored.
+                  const invItem = inventory.find(i =>
+                    (targetId != null) && (
+                      i.id.toString() === targetId.toString() ||
+                      (i.itemId && i.itemId.toString() === targetId.toString())
+                    )
+                  );
+
                   if (invItem) {
                      try {
                         const baseTargetUnit = invItem.baseUnit || invItem.unit;
                         const normQty = normalizeUnit(ing.qty, ing.unit, baseTargetUnit);
-                        
+
+                        // ── Consistent cost derivation ────────────────────────────────────
+                        // Source of truth hierarchy (same in calculateCost + row render):
+                        //   1. If purchaseUnits exist: effectiveBaseCost = purchaseCost / primary.conversion
+                        //      purchaseCost now round-trips from DB (fixed in storage.ts)
+                        //   2. Otherwise: item.cost is already the base-unit cost
+                        // This matches what the inventory drawer calculates on save.
                         let effectiveBaseCost = invItem.cost;
                         if (invItem.purchaseUnits && invItem.purchaseUnits.length > 0) {
                             const primary = invItem.purchaseUnits.find((u: any) => u.isPrimary) || invItem.purchaseUnits[0];
-                            const explicitPurchaseTarget = (invItem.purchaseCost !== undefined && invItem.purchaseCost !== null) ? invItem.purchaseCost : invItem.cost;
-                            effectiveBaseCost = explicitPurchaseTarget / primary.conversion;
+                            const purchCost = (invItem.purchaseCost !== undefined && invItem.purchaseCost !== null)
+                              ? invItem.purchaseCost
+                              : invItem.cost * primary.conversion; // reconstruct if missing
+                            effectiveBaseCost = purchCost / primary.conversion;
                         }
                         lineCost = normQty * effectiveBaseCost;
-                     } catch (e) {
+                     } catch (e: any) {
                         hasError = true;
+                        costErrorMsg = e?.message ?? "Unit conversion error";
                      }
                   }
 
                   const mappedName = invItem ? invItem.name : "Unknown Item";
-                  const mappedUnit = invItem?.unit || 'N/A';
-                  
+                  // Bug fix: show baseUnit as the native constraint, fall back to unit.
+                  // Previously showed invItem?.unit which could be a display alias ("lit")
+                  // while baseUnit held the canonical cosing unit ("l").
+                  const mappedUnit = invItem ? (invItem.baseUnit || invItem.unit || 'N/A') : 'N/A';
+
                   // Extract visual type indicator if properly tagged in the native inventory ledger
                   const isPrepNode = invItem && (invItem.itemType === 'Preparation' || invItem.itemType === 'Finished Good');
 
@@ -448,20 +683,51 @@ export default function Recipes() {
                           onChange={e => updateIngredient(idx, 'unit', e.target.value)}
                           className="w-full p-1.5 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
                         >
-                           <option value="g">Grams (g)</option>
-                           <option value="kg">Kilograms (kg)</option>
-                           <option value="oz">Ounces (oz)</option>
-                           <option value="lb">Pounds (lb)</option>
-                           <option value="ml">Milliliters (ml)</option>
-                           <option value="litre">Liters (L)</option>
-                           <option value="piece">Pieces</option>
-                           <option value="box">Boxes</option>
+                          <optgroup label="Weight">
+                            <option value="g">Grams (g)</option>
+                            <option value="kg">Kilograms (kg)</option>
+                            <option value="mg">Milligrams (mg)</option>
+                            <option value="oz">Ounces (oz)</option>
+                            <option value="lb">Pounds (lb)</option>
+                          </optgroup>
+                          <optgroup label="Volume">
+                            <option value="ml">Milliliters (ml)</option>
+                            <option value="l">Liters (l)</option>
+                            <option value="tsp">Teaspoon (tsp)</option>
+                            <option value="tbsp">Tablespoon (tbsp)</option>
+                            <option value="cup">Cup</option>
+                            <option value="fl oz">Fl. Oz.</option>
+                          </optgroup>
+                          <optgroup label="Count / Each">
+                            <option value="ea">Each (ea)</option>
+                            <option value="each">Each (each)</option>
+                            <option value="pcs">Pieces (pcs)</option>
+                            <option value="piece">Piece</option>
+                          </optgroup>
+                          <optgroup label="Packaging">
+                            <option value="pack">Pack</option>
+                            <option value="box">Box</option>
+                            <option value="bag">Bag</option>
+                            <option value="can">Can / Tin</option>
+                            <option value="bottle">Bottle</option>
+                            <option value="bunch">Bunch</option>
+                            <option value="clove">Clove</option>
+                            <option value="sprig">Sprig</option>
+                            <option value="slice">Slice</option>
+                            <option value="knob">Knob</option>
+                          </optgroup>
                         </select>
                       </div>
                       
                       <div className="w-20 text-right shrink-0">
                          {hasError ? (
-                           <Badge variant="danger" className="text-[10px] px-1.5 py-0 border-none">Math Error</Badge>
+                           <Badge
+                             variant="danger"
+                             className="text-[10px] px-1.5 py-0 border-none cursor-help"
+                             title={costErrorMsg}
+                           >
+                             Unit Error
+                           </Badge>
                          ) : (
                            <span className="text-sm font-semibold text-neutral-600">${lineCost.toFixed(2)}</span>
                          )}
@@ -511,6 +777,14 @@ export default function Recipes() {
           </div>
         </div>
       </Drawer>
+
+      {/* ── AI Recipe Import Drawer ──────────────────────────────── */}
+      <AIRecipeImport
+        isOpen={isImportOpen}
+        onClose={() => setIsImportOpen(false)}
+        inventory={inventory}
+        onConfirm={handleAIImportConfirm}
+      />
     </div>
   );
 }

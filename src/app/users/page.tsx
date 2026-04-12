@@ -5,10 +5,19 @@ import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
-import { Plus, Search, UserCog, Mail, Edit, ShieldBan, MapPin, CheckCircle2 } from "lucide-react";
-import { loadUsers, saveUsers, loadLocations, saveLocations } from "@/lib/storage";
+import { Plus, Search, UserCog, Mail, Edit, ShieldBan, MapPin, CheckCircle2, Loader2 } from "lucide-react";
+import { loadUsers, saveUsers, loadLocations, saveLocations, insertLocation } from "@/lib/storage";
+import { HQOnlyGuard } from "@/components/HQOnlyGuard";
 
 export default function Users() {
+  return (
+    <HQOnlyGuard>
+      <UsersPageContent />
+    </HQOnlyGuard>
+  );
+}
+
+function UsersPageContent() {
   const [users, setUsers] = useState<any[]>([]);
   const [locations, setLocations] = useState<any[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
@@ -32,13 +41,33 @@ export default function Users() {
   const [newLocType, setNewLocType] = useState("Store");
   const [newLocStatus, setNewLocStatus] = useState("Active");
   const [locError, setLocError] = useState("");
+  const [locSaving, setLocSaving] = useState(false);
+  const [locSuccess, setLocSuccess] = useState(""); // display name of newly added location
 
   const ROLES_LIST = ["HQ Admin", "HQ Manager", "Location Manager", "Kitchen Staff", "Finance / Purchasing"];
 
+  const [isLoading, setIsLoading] = useState(true);
+
   useEffect(() => {
-    setUsers(loadUsers());
-    setLocations(loadLocations());
+    async function fetchData() {
+       setIsLoading(true);
+       try {
+           const [usrs, locs] = await Promise.all([
+               loadUsers(),
+               loadLocations()
+           ]);
+           setUsers(Array.isArray(usrs) ? usrs : []);
+           setLocations(Array.isArray(locs) ? locs : []);
+       } catch (err) {
+           console.error(err);
+       } finally {
+           setIsLoading(false);
+       }
+    }
+    fetchData();
   }, []);
+
+  if (isLoading) return <div className="p-12 flex justify-center text-neutral-400 animate-pulse">Loading Identity Matrix...</div>;
 
   const resolveLocationName = (locId: string) => {
      if (locId === "All") return "All";
@@ -88,42 +117,54 @@ export default function Users() {
     }
   };
 
-  const saveUserAction = () => {
-    if (!name.trim() || !email.trim() || assignedLocations.length === 0) {
-      alert("Name, Email, and at least one active Location mapping restriction is required computationally.");
+  const saveUserAction = async () => {
+    if (!name || !email) {
+      alert("Name and email are required constraints.");
       return;
     }
+    
+    // Exact mapping validation logic safely 
+    const pUsers = Array.isArray(users) ? users : [];
 
     const payload = {
-      id: editingUserId || `USR-${Math.floor(1000 + Math.random() * 9000)}`,
+      id: editingUserId || `U-${1000 + pUsers.length + 1}`,
       name,
       email,
       role,
       assignedLocations,
-      status,
+      status: editingUserId ? users.find(u => u.id === editingUserId)?.status : "Active",
       notes,
       lastActive: editingUserId ? users.find(u => u.id === editingUserId)?.lastActive : "Pending"
     };
 
-    let updated = [...users];
+    let updated = [...pUsers];
     if (editingUserId) {
       const idx = updated.findIndex(u => u.id === editingUserId);
       if (idx !== -1) updated[idx] = payload;
     } else {
-      updated.push(payload);
+      updated.unshift(payload);
     }
 
+    const res = await saveUsers(updated);
+    if (!res?.success) {
+       alert(`Database Error (Save User): ${res?.error?.message}`);
+       return;
+    }
     setUsers(updated);
-    saveUsers(updated);
     setIsDrawerOpen(false);
   };
 
-  const disableUser = (id: string, e: any) => {
+  const disableUser = async (id: string, e: any) => {
      e.stopPropagation();
      if(confirm("Confirm revoking all authenticated access limits for this mapped identity instantly?")) {
-        const updated = users.map(u => u.id === id ? { ...u, status: "Disabled" } : u);
+        const pUsers = Array.isArray(users) ? users : [];
+        const updated = pUsers.map(u => u.id === id ? { ...u, status: "Disabled" } : u);
+        const res = await saveUsers(updated);
+        if (!res?.success) {
+           alert(`Database Error (Disable User): ${res?.error?.message}`);
+           return;
+        }
         setUsers(updated);
-        saveUsers(updated);
      }
   };
 
@@ -132,47 +173,66 @@ export default function Users() {
      alert(`Password initialization protocol sequence dispatched securely back to ${email}.`);
   };
 
-  const saveNewLocation = () => {
+  const resetLocForm = () => {
+    setNewLocName(""); setNewLocCode("");
+    setNewLocType("Store"); setNewLocStatus("Active");
+    setLocError(""); setLocSuccess("");
+  };
+
+  const saveNewLocation = async () => {
       setLocError("");
+      setLocSuccess("");
       const cleanName = newLocName.trim();
       const cleanCode = newLocCode.trim();
 
-      if (!cleanName) {
-         setLocError("Location name requirement structurally failed.");
-         return;
+      if (!cleanName) { setLocError("Location name is required."); return; }
+
+      // ── Uniqueness guards ─────────────────────────────────────────────────
+      if (locations.some(l => l.name.toLowerCase() === cleanName.toLowerCase())) {
+         setLocError(`A location named "${cleanName}" already exists.`); return;
+      }
+      if (cleanCode && locations.some(l => l.code && l.code.toLowerCase() === cleanCode.toLowerCase())) {
+         setLocError(`Location code "${cleanCode}" is already in use.`); return;
+      }
+      const idSlug    = cleanName.toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-|-$/g, '');
+      const canonicalId = `LOC-${idSlug}`.substring(0, 30);
+      if (locations.some(l => l.id === canonicalId)) {
+         setLocError(`Canonical ID "${canonicalId}" is already in use. Choose a more specific name.`); return;
       }
 
-      // Exact strict collision tracking
-      const isDuplicateName = locations.some(l => l.name.toLowerCase() === cleanName.toLowerCase());
-      if (isDuplicateName) {
-         setLocError("Location structural name already mapped natively.");
-         return;
+      // ── Insert single row ─────────────────────────────────────────────────
+      setLocSaving(true);
+      const res = await insertLocation({
+        id:      canonicalId,
+        name:    cleanName,
+        code:    cleanCode,
+        type:    newLocType,    // mapLocationToDB translates to hq/branch/warehouse
+        subtype: newLocType,
+        status:  newLocStatus,
+      });
+      setLocSaving(false);
+
+      if (!res.success) {
+        setLocError(res.error ?? "Save failed. Check DB connection and try again.");
+        return;
       }
 
-      if (cleanCode) {
-         const isDuplicateCode = locations.some(l => l.code && l.code.toLowerCase() === cleanCode.toLowerCase());
-         if (isDuplicateCode) {
-            setLocError("Hardware tracking codes must remain uniquely identifiable globally.");
-            return;
-         }
-      }
-
-      const newLoc = {
-         id: `LOC-${Math.floor(1000 + Math.random() * 9000)}`,
-         name: cleanName,
-         code: cleanCode,
-         type: newLocType,
-         status: newLocStatus,
-         createdAt: new Date().toISOString()
-      };
-
-      const _locs = [...locations, newLoc];
-      setLocations(_locs);
-      saveLocations(_locs);
-      setIsAddLocationOpen(false);
-      setNewLocName("");
-      setNewLocCode("");
+      // ── Success: merge new location into local state, auto-select the chip ──
+      const created = res.location ?? { id: canonicalId, name: cleanName, code: cleanCode, type: newLocType, subtype: newLocType, status: newLocStatus };
+      setLocations(prev => [...prev, created]);
+      // Auto-select: toggle the new chip in (mirrors toggleLocation logic)
+      setAssignedLocations(prev => {
+        const without = prev.filter(l => l !== "All");
+        return without.includes(created.id) ? without : [...without, created.id];
+      });
+      setLocSuccess(cleanName);  // triggers success message in UI
+      // Close form after short delay so user sees the success state
+      setTimeout(() => {
+        setIsAddLocationOpen(false);
+        resetLocForm();
+      }, 1200);
   };
+
 
   const filteredUsers = users.filter(u => 
     u.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
@@ -401,29 +461,98 @@ export default function Users() {
              </div>
 
              {isAddLocationOpen && (
-                <div className="bg-neutral-50 border border-neutral-200 rounded-lg p-3 mt-3 shadow-inner">
-                   <h4 className="text-xs font-bold text-neutral-800 uppercase tracking-wider mb-2">Design New Shared Physical Location</h4>
-                   <div className="grid grid-cols-2 gap-3 mb-3">
-                     <input type="text" placeholder="Location Name (e.g. Hudson Yards)" value={newLocName} onChange={e => setNewLocName(e.target.value)} className="w-full p-1.5 text-xs border border-neutral-300 rounded" />
-                     <input type="text" placeholder="Location Code (e.g. HY1) Optional" value={newLocCode} onChange={e => setNewLocCode(e.target.value)} className="w-full p-1.5 text-xs border border-neutral-300 rounded" />
+                <div className="bg-neutral-50 border border-neutral-200 rounded-lg p-3 mt-3 shadow-inner space-y-3">
+                   <h4 className="text-xs font-bold text-neutral-800 uppercase tracking-wider">New Location</h4>
+
+                   {/* Name + Code */}
+                   <div className="grid grid-cols-2 gap-3">
+                     <div>
+                       <label className="text-[10px] font-semibold text-neutral-500 uppercase tracking-wider mb-1 block">Name *</label>
+                       <input
+                         type="text"
+                         placeholder="e.g. Hudson Yards"
+                         value={newLocName}
+                         onChange={e => { setNewLocName(e.target.value); setLocError(""); }}
+                         className="w-full p-1.5 text-xs border border-neutral-300 rounded focus:outline-none focus:ring-1 focus:ring-brand-500"
+                       />
+                     </div>
+                     <div>
+                       <label className="text-[10px] font-semibold text-neutral-500 uppercase tracking-wider mb-1 block">Code (optional)</label>
+                       <input
+                         type="text"
+                         placeholder="e.g. HY1"
+                         value={newLocCode}
+                         onChange={e => { setNewLocCode(e.target.value); setLocError(""); }}
+                         className="w-full p-1.5 text-xs border border-neutral-300 rounded focus:outline-none focus:ring-1 focus:ring-brand-500"
+                       />
+                     </div>
                    </div>
-                   <div className="grid grid-cols-2 gap-3 mb-3">
-                     <select value={newLocType} onChange={e => setNewLocType(e.target.value)} className="w-full p-1.5 text-xs border border-neutral-300 rounded bg-white">
-                        <option value="HQ">HQ</option>
-                        <option value="Store">Store</option>
-                        <option value="Airport">Airport</option>
-                        <option value="Mall">Mall</option>
-                        <option value="Other">Other</option>
-                     </select>
-                     <select value={newLocStatus} onChange={e => setNewLocStatus(e.target.value)} className="w-full p-1.5 text-xs border border-neutral-300 rounded bg-white">
-                        <option value="Active">Active</option>
-                        <option value="Inactive">Inactive</option>
-                     </select>
+
+                   {/* Live canonical ID preview */}
+                   {newLocName.trim() && (
+                     <div className="flex items-center gap-2">
+                       <span className="text-[10px] font-semibold text-neutral-500 uppercase tracking-wider shrink-0">Canonical ID:</span>
+                       <code className="text-[11px] font-mono bg-neutral-900 text-green-400 px-2 py-0.5 rounded tracking-widest">
+                         {`LOC-${newLocName.trim().toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-|-$/g, '')}`.substring(0, 30)}
+                       </code>
+                       <span className="text-[10px] text-neutral-400 italic">auto-assigned · read-only</span>
+                     </div>
+                   )}
+
+                   {/* Type + Status */}
+                   <div className="grid grid-cols-2 gap-3">
+                     <div>
+                       <label className="text-[10px] font-semibold text-neutral-500 uppercase tracking-wider mb-1 block">Type (classification only)</label>
+                       <select value={newLocType} onChange={e => setNewLocType(e.target.value)} className="w-full p-1.5 text-xs border border-neutral-300 rounded bg-white focus:outline-none focus:ring-1 focus:ring-brand-500">
+                          <option value="HQ">HQ</option>
+                          <option value="Store">Store</option>
+                          <option value="Airport">Airport</option>
+                          <option value="Mall">Mall</option>
+                          <option value="Other">Other</option>
+                       </select>
+                     </div>
+                     <div>
+                       <label className="text-[10px] font-semibold text-neutral-500 uppercase tracking-wider mb-1 block">Status</label>
+                       <select value={newLocStatus} onChange={e => setNewLocStatus(e.target.value)} className="w-full p-1.5 text-xs border border-neutral-300 rounded bg-white focus:outline-none focus:ring-1 focus:ring-brand-500">
+                          <option value="Active">Active</option>
+                          <option value="Inactive">Inactive</option>
+                       </select>
+                     </div>
                    </div>
-                   {locError && <p className="text-[10px] text-danger-600 font-bold mb-3">{locError}</p>}
-                   <div className="flex justify-end gap-2">
-                     <button onClick={() => setIsAddLocationOpen(false)} className="text-xs px-2 py-1 rounded bg-white border shadow-sm">Cancel</button>
-                     <button onClick={saveNewLocation} className="text-xs px-3 py-1 rounded bg-brand-600 text-white shadow-sm hover:bg-brand-700">Save Location</button>
+
+                   {/* Success */}
+                   {locSuccess && (
+                     <div className="flex items-center gap-2 p-2 bg-success-50 border border-success-200 rounded-lg">
+                       <CheckCircle2 className="h-3.5 w-3.5 text-success-600 shrink-0" />
+                       <p className="text-[11px] font-semibold text-success-700">
+                         "{locSuccess}" added and selected — you can now Deploy Identity Constraints.
+                       </p>
+                     </div>
+                   )}
+
+                   {/* Error */}
+                   {locError && <p className="text-[10px] text-danger-600 font-bold">{locError}</p>}
+
+                   {/* Actions */}
+                   <div className="flex justify-end gap-2 pt-1">
+                     <button
+                       onClick={() => { setIsAddLocationOpen(false); resetLocForm(); }}
+                       disabled={locSaving}
+                       className="text-xs px-2 py-1 rounded bg-white border shadow-sm hover:bg-neutral-50 disabled:opacity-50"
+                     >
+                       Cancel
+                     </button>
+                     <button
+                       onClick={saveNewLocation}
+                       disabled={locSaving || !!locSuccess}
+                       className="text-xs px-3 py-1 rounded bg-brand-600 text-white shadow-sm hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
+                     >
+                       {locSaving
+                         ? <><Loader2 className="h-3 w-3 animate-spin" /> Saving…</>
+                         : locSuccess
+                         ? <><CheckCircle2 className="h-3 w-3" /> Saved</>
+                         : "Save Location"}
+                     </button>
                    </div>
                 </div>
              )}

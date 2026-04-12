@@ -2,15 +2,17 @@
 
 import { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
+import { useAuth } from "@/components/AuthProvider";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
-import { Search, Plus, Upload, MoreHorizontal, ShoppingCart, History, Save, Trash2, ArrowDown, ArrowUp, AlertTriangle, X, Download } from "lucide-react";
-import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, saveCategories, loadImportBatches, saveImportBatches, loadSuppliers, saveSuppliers, resolveSupplier } from "@/lib/storage";
+import { Search, Plus, Upload, MoreHorizontal, ShoppingCart, History, Save, Trash2, ArrowDown, ArrowUp, AlertTriangle, X, Download, Loader2 } from "lucide-react";
+import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, loadSuppliers, saveSuppliers, resolveSupplier, saveCategories, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId } from "@/lib/storage";
 
 export default function Inventory() {
   const router = useRouter();
+  const { user } = useAuth();   // role + locationId from user_profiles
   const [inventoryData, setInventoryData] = useState<any[]>([]);
   const [activityData, setActivityData] = useState<Record<string, any[]>>({});
   const [categories, setCategories] = useState<string[]>([]);
@@ -50,6 +52,7 @@ export default function Inventory() {
   // Import Drawer States
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isImportDrawerOpen, setIsImportDrawerOpen] = useState(false);
+  const [isCommitting, setIsCommitting] = useState(false);
   const [importPreview, setImportPreview] = useState<any[]>([]);
   const [importErrors, setImportErrors] = useState<string[]>([]);
   const [overwriteExisting, setOverwriteExisting] = useState(false);
@@ -62,25 +65,53 @@ export default function Inventory() {
   const [selectedItemIds, setSelectedItemIds] = useState<number[]>([]);
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
 
-  useEffect(() => {
-    setInventoryData(loadInventory());
-    setActivityData(loadInventoryActivity());
-    setCategories(loadCategories());
-    setImportBatches(loadImportBatches());
-    setSuppliersData(loadSuppliers());
+  const [isLoading, setIsLoading] = useState(true);
 
-    if (typeof window !== "undefined") {
-      const saved = localStorage.getItem("inventory_filters");
-      if (saved) {
-        try {
-          const p = JSON.parse(saved);
-          if (p.searchQuery !== undefined) setSearchQuery(p.searchQuery);
-          if (p.filterStatus !== undefined) setFilterStatus(p.filterStatus);
-          if (p.filterCategory !== undefined) setFilterCategory(p.filterCategory);
-          if (p.filterSupplier !== undefined) setFilterSupplier(p.filterSupplier);
-        } catch (e) {}
-      }
+  useEffect(() => {
+    async function fetchData() {
+       setIsLoading(true);
+       try {
+          const [inv, act, cats, batches, sups] = await Promise.all([
+             loadInventory(),
+             loadInventoryActivity(),
+             loadCategories(),
+             loadImportBatches(),
+             loadSuppliers()
+          ]);
+          // Scope to current user's location — loadInventory() returns all rows across
+          // all locations. Without filtering, HQ users would see store rows and vice-versa.
+          const userLocationId: string =
+            user?.role === "hq_admin" ? "LOC-HQ" : (user?.locationId ?? "");
+
+          const scopedInv = userLocationId
+            ? inv.filter((item: any) => item.locationId === userLocationId)
+            : inv;
+
+          setInventoryData(scopedInv);
+          setActivityData(act);
+          setCategories(cats);
+          setImportBatches(batches);
+          setSuppliersData(sups);
+
+          if (typeof window !== "undefined") {
+            const saved = localStorage.getItem("inventory_filters");
+            if (saved) {
+              try {
+                const p = JSON.parse(saved);
+                if (p.searchQuery !== undefined) setSearchQuery(p.searchQuery);
+                if (p.filterStatus !== undefined) setFilterStatus(p.filterStatus);
+                if (p.filterCategory !== undefined) setFilterCategory(p.filterCategory);
+                if (p.filterSupplier !== undefined) setFilterSupplier(p.filterSupplier);
+              } catch (e) {}
+            }
+          }
+       } catch (e) {
+          console.error(e);
+       } finally {
+          setIsLoading(false);
+       }
     }
+    fetchData();
   }, []);
 
   useEffect(() => {
@@ -167,9 +198,9 @@ export default function Inventory() {
     setFilterSupplier("All");
   };
 
-  const handleQuickReorder = (item: any, e: React.MouseEvent) => {
+  const handleQuickReorder = async (item: any, e: React.MouseEvent) => {
     e.stopPropagation();
-    const currentOrders = loadOrders();
+    const currentOrders = await loadOrders();
     const qtyNeeded = Math.max(1, item.parLevel - item.inStock);
     
     const newDraft = {
@@ -193,7 +224,7 @@ export default function Inventory() {
     };
 
     const newMatrix = [newDraft, ...currentOrders];
-    saveOrders(newMatrix);
+    await saveOrders(newMatrix);
     alert(`Successfully staged a Draft PO for ${qtyNeeded} ${item.unit} of ${item.name}! Redirecting to Orders...`);
     router.push("/orders");
   };
@@ -217,7 +248,7 @@ export default function Inventory() {
     setIsDrawerOpen(true);
   };
 
-  const saveAdjustment = () => {
+  const saveAdjustment = async () => {
     if (!selectedItem || !adjQty) return;
     const numericQty = parseFloat(adjQty);
     if (isNaN(numericQty) || numericQty <= 0) return;
@@ -242,7 +273,7 @@ export default function Inventory() {
       time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
       type: adjType,
       qty: `${numericQty} ${adjUnit}`,
-      baseTransacted: variance, // raw base delta
+      baseTransacted: variance,
       notes: adjNotes,
       user: userRole
     };
@@ -253,16 +284,20 @@ export default function Inventory() {
       [selectedItem.id]: [logEntry, ...currentHistoryList]
     };
 
+    const res = await saveInventory(newInventory);
+    if (!res.success) {
+       alert(`Save Failed: ${res.error?.message || "Database rejected the adjustment."}`);
+       return;
+    }
     setInventoryData(newInventory);
-    saveInventory(newInventory);
     setActivityData(newActivityData);
-    saveInventoryActivity(newActivityData);
+    await saveInventoryActivity(newActivityData);
     setSelectedItem(updatedItem); 
     setAdjQty("");
     setAdjNotes("");
   };
 
-  const saveUnitInfo = () => {
+  const saveUnitInfo = async () => {
     if (!selectedItem) return;
     if (!editBaseUnit) return alert("Base unit is required.");
     if (editPurchaseUnits.some(u => !u.name || !u.conversion || isNaN(parseFloat(u.conversion)))) return alert("All purchase units must have a valid name and conversion multiplier.");
@@ -298,8 +333,12 @@ export default function Inventory() {
     };
     const newInventory = inventoryData.map(i => i.id === selectedItem.id ? updatedItem : i);
     
+    const res = await saveInventory(newInventory);
+    if (!res.success) {
+       alert(`Save Failed: ${res.error?.message || "Database rejected unit update."}`);
+       return;
+    }
     setInventoryData(newInventory);
-    saveInventory(newInventory);
     setSelectedItem(updatedItem); 
     
     if (pUnits.length > 0) {
@@ -311,7 +350,7 @@ export default function Inventory() {
     alert("Unit map schema updated effectively.");
   };
 
-  const saveParLevel = () => {
+  const saveParLevel = async () => {
     if (!selectedItem || !newParLevel) return;
     const numPar = parseFloat(newParLevel);
     if (isNaN(numPar) || numPar <= 0 || numPar === selectedItem.parLevel) return;
@@ -334,25 +373,42 @@ export default function Inventory() {
       [selectedItem.id]: [logEntry, ...currentHistoryList]
     };
 
+    const res = await saveInventory(newInventory);
+    if (!res.success) {
+       alert(`Save Failed: ${res.error?.message || "Database rejected supplier match."}`);
+       return;
+    }
     setInventoryData(newInventory);
-    saveInventory(newInventory);
     setActivityData(newActivityData);
-    saveInventoryActivity(newActivityData);
+    await saveInventoryActivity(newActivityData);
     setSelectedItem(updatedItem); 
     setParNotes("");
   };
 
-  // Add Item Logic
-  const handleAddNewItem = () => {
+  const handleAddNewItem = async () => {
     if(!newItem.name || !newItem.inStock || !newItem.parLevel || !newItem.cost) {
       alert("Please fill in all required fields.");
       return;
     }
-    
+
+    // Determine location_id: HQ admins write to LOC-HQ, location managers write to their location
+    const locationId: string =
+      user?.role === "hq_admin" ? "LOC-HQ" : (user?.locationId ?? "");
+
+    if (!locationId) {
+      alert("Your profile has no location assigned. Cannot add item.");
+      return;
+    }
+
     let suppText = newItem.supplier.trim();
     let suppIdCode = null;
     if (suppText) {
-       suppIdCode = resolveSupplier(suppText);
+      try {
+        suppIdCode = await resolveSupplier(suppText);
+      } catch (e: any) {
+        alert(e.message ?? `Supplier "${suppText}" not found in HQ master. Ask HQ to create it first.`);
+        return;
+      }
     }
 
     let pUnits = [...newItem.purchaseUnits];
@@ -360,8 +416,7 @@ export default function Inventory() {
     if (pUnits.length > 0 && !pUnits.some((u: any) => u.isPrimary)) {
         pUnits[0].isPrimary = true;
     }
-    
-    // strip empty ones
+
     pUnits = pUnits.filter((u: any) => u.name.trim() !== "");
 
     const primaryUnit = pUnits.find(u => u.isPrimary) || pUnits[0];
@@ -383,7 +438,6 @@ export default function Inventory() {
       purchaseUnits: pUnits,
       purchaseCost: purchaseCost,
       supplierId: suppIdCode,
-      id: Math.floor(Math.random() * 900000) + 100000,
       inStock: parseFloat(newItem.inStock as string),
       parLevel: parseFloat(newItem.parLevel as string),
       cost: baseCost,
@@ -391,16 +445,20 @@ export default function Inventory() {
       priceIncrease: false,
       updatedAt: Date.now()
     };
-    
-    const newInventory = [finalItem, ...inventoryData];
-    setInventoryData(newInventory);
-    saveInventory(newInventory);
 
+    const res = await insertInventoryItem(finalItem, locationId);
+    if (!res.success) {
+      alert(`Add Item Failed: ${res.error?.message || "Database rejected insertion."}`);
+      return;
+    }
+
+    // Use the returned UUID as the canonical id for local state
+    const localItem = { ...finalItem, id: res.id };
+    setInventoryData([localItem, ...inventoryData]);
     setNewItem({ name: "", category: "Produce", itemType: "Raw", unit: "kg", supplier: "", inStock: "", parLevel: "", cost: "", purchaseUnits: [{ name: "", conversion: '1', isPrimary: true }] });
     setIsAddDrawerOpen(false);
   };
 
-  // Import Logic
   const handleCSVUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -421,7 +479,7 @@ export default function Inventory() {
       const errors = [];
 
       for (const [idx, row] of dataRows.entries()) {
-        const cols = row.split(',').map(c => c.trim().replace(/^"|"$/g, '')); // Strip quotes
+        const cols = row.split(',').map(c => c.trim().replace(/^"|"$/g, ''));
         if (cols.length < 7) {
           errors.push(`Row ${idx+2} is missing required standard columns.`);
           continue;
@@ -449,126 +507,182 @@ export default function Inventory() {
     reader.readAsText(file);
   };
 
-  const commitImport = () => {
-    const validItemsInput = importPreview.filter(p => !p.isDuplicate || (p.isDuplicate && overwriteExisting));
-    if (validItemsInput.length === 0) {
-      alert("No valid items tracked. Import cancelled.");
-      setIsImportDrawerOpen(false);
-      return;
-    }
-
-    const currentCategoriesLower = categories.map(c => c.toLowerCase());
-    const newlyCreatedCategories: string[] = [];
-    const finalCategoriesList = [...categories];
-
-    const currentSuppliersLower = suppliersData.map(s => s.name.toLowerCase());
-    const newlyCreatedSuppliers: any[] = [];
-    const finalSuppliersList = [...suppliersData];
-
-    const currentInventoryMap = new Map(inventoryData.map(i => [i.name.toLowerCase(), i]));
-    const timestamp = Date.now();
-    
-    const newItems: any[] = [];
-    const updatedItems: any[] = [];
-    const rollbackData: Record<number, any> = {};
-    const newlyCreatedIds: number[] = [];
-    let skipped = 0;
-
-    for (const p of importPreview) {
-        let cat = p.payload.category.trim();
-        const catLower = cat.toLowerCase();
-        
-        const existingIdx = currentCategoriesLower.indexOf(catLower);
-        if (existingIdx !== -1) {
-           cat = categories[existingIdx];
-        } else {
-           if (!newlyCreatedCategories.includes(cat)) {
-              newlyCreatedCategories.push(cat);
-              finalCategoriesList.push(cat);
-              currentCategoriesLower.push(catLower);
-           }
-        }
-
-        let suppText = p.payload.supplierText ? p.payload.supplierText.trim() : "";
-        let suppIdVal = suppText ? resolveSupplier(suppText) : null;
-
-        const matchingItem = currentInventoryMap.get(p.payload.name.toLowerCase());
-        
-        if (matchingItem) {
-            if (!overwriteExisting) {
-                skipped++;
-                continue;
-            }
-            rollbackData[matchingItem.id] = { ...matchingItem }; // Struct clone
-            updatedItems.push({
-                ...matchingItem,
-                ...p.payload,
-                category: cat,
-                supplierId: suppIdVal,
-                updatedAt: timestamp
-            });
-        } else {
-            const newId = Math.floor(Math.random() * 900000) + 100000;
-            newlyCreatedIds.push(newId);
-            newItems.push({
-                ...p.payload,
-                category: cat,
-                supplierId: suppIdVal,
-                id: newId,
-                updatedAt: timestamp
-            });
-        }
-    }
-
-    if (newItems.length === 0 && updatedItems.length === 0) {
-      alert("No valid items tracked after duplicate check isolation.");
-      setIsImportDrawerOpen(false);
-      return;
-    }
-
-    let unifiedInventory = [...inventoryData];
-    for (const u of updatedItems) {
-       const ix = unifiedInventory.findIndex(i => i.id === u.id);
-       if (ix > -1) unifiedInventory[ix] = u;
-    }
-    unifiedInventory = [...newItems, ...unifiedInventory];
-
-    setInventoryData(unifiedInventory);
-    saveInventory(unifiedInventory);
-
-    if (newlyCreatedCategories.length > 0) {
-       setCategories(finalCategoriesList);
-       saveCategories(finalCategoriesList);
-    }
-    
-    if (newlyCreatedSuppliers.length > 0) {
-       setSuppliersData(finalSuppliersList);
-       saveSuppliers(finalSuppliersList);
-    }
-
-    const newBatch = {
-       batchId: `IMP-${timestamp}`,
-       timestamp,
-       fileName: fileInputRef.current?.files?.[0]?.name || "Unknown Array",
-       totalRowsProcessed: importPreview.length,
-       metrics: { new: newItems.length, updated: updatedItems.length, skipped },
-       newlyCreatedIds,
-       rollbackData,
-       status: "Active"
-    };
-
-    const newBatchesList = [newBatch, ...importBatches];
-    setImportBatches(newBatchesList);
-    saveImportBatches(newBatchesList);
-
-    alert(`Successfully committed block!\n\nNew items: ${newItems.length}\nUpdated fields: ${updatedItems.length}\nSkipped: ${skipped}\nAuto-created ${newlyCreatedCategories.length} categories.\nAuto-created ${newlyCreatedSuppliers.length} suppliers.`);
-
-    setImportPreview([]);
+  const commitImport = async () => {
+    setIsCommitting(true);
     setImportErrors([]);
-    setIsImportDrawerOpen(false);
+
+    try {
+      const validItemsInput = importPreview.filter(p => !p.isDuplicate || (p.isDuplicate && overwriteExisting));
+      if (validItemsInput.length === 0) {
+        setImportErrors(["No valid items tracked. Import cancelled."]);
+        setIsCommitting(false);
+        return;
+      }
+
+      console.log("[Commit Import] Phase A: Pre-flight Validation");
+      const currentCategoriesLower = categories.map(c => c.toLowerCase());
+      const newlyCreatedCategories: string[] = [];
+      const finalCategoriesList = [...categories];
+
+      const currentSuppliersLower = suppliersData.map(s => s.name.toLowerCase());
+      const newlyCreatedSuppliers: any[] = [];
+      const finalSuppliersList = [...suppliersData];
+
+      const currentInventoryMap = new Map(inventoryData.map(i => [i.name.toLowerCase(), i]));
+      const timestamp = Date.now();
+      
+      const newItems: any[] = [];
+      const updatedItems: any[] = [];
+      const rollbackData: Record<number, any> = {};
+      const newlyCreatedIds: string[] = [];  // UUID PKs for rollback
+      let skipped = 0;
+      
+      const phaseAErrors: string[] = [];
+
+      for (const [idx, p] of importPreview.entries()) {
+          if (!p.payload.name || p.payload.name.trim() === "") {
+             phaseAErrors.push(`Row ${idx+1}: Missing required field 'Item Name'.`);
+          }
+          if (isNaN(parseFloat(p.payload.inStock)) || isNaN(parseFloat(p.payload.cost))) {
+             phaseAErrors.push(`Row ${idx+1} [${p.payload.name}]: Pricing/Stock bounds are invalid. Numeric limits required.`);
+          }
+
+          let cat = (p.payload.category || 'General').trim();
+          const catLower = cat.toLowerCase();
+          
+          const existingIdx = currentCategoriesLower.indexOf(catLower);
+          if (existingIdx !== -1) {
+             cat = categories[existingIdx];
+          } else {
+             if (!newlyCreatedCategories.includes(cat)) {
+                newlyCreatedCategories.push(cat);
+                finalCategoriesList.push(cat);
+                currentCategoriesLower.push(catLower);
+             }
+          }
+
+          let suppText = p.payload.supplierText ? p.payload.supplierText.trim() : "";
+          let suppIdVal = null;
+          try {
+             suppIdVal = suppText ? await resolveSupplier(suppText) : null;
+          } catch (e: any) {
+             phaseAErrors.push(`Row ${idx+1} [${p.payload.name}]: Failed resolving supplier '${suppText}'. ${e.message}`);
+          }
+
+          const matchingItem = currentInventoryMap.get(p.payload.name.toLowerCase());
+          
+          if (matchingItem) {
+              if (!overwriteExisting) {
+                  skipped++;
+                  continue;
+              }
+              rollbackData[matchingItem.id] = { ...matchingItem };
+              updatedItems.push({
+                  ...matchingItem,
+                  ...p.payload,
+                  category: cat,
+                  supplierId: suppIdVal,
+                  updatedAt: timestamp
+              });
+          } else {
+              // Determine location for this import (HQ admin → LOC-HQ, else current user location)
+              const importLocationId: string =
+                user?.role === "hq_admin" ? "LOC-HQ" : (user?.locationId ?? "LOC-HQ");
+              const newRowId = crypto.randomUUID(); // always unique per location row
+
+              // Reuse shared item_id if same product name exists on the other side of HQ/store boundary
+              let resolvedItemId: string;
+              if (p.payload.name) {
+                const existingId = await resolveSharedItemId(p.payload.name, importLocationId);
+                resolvedItemId = existingId ?? crypto.randomUUID();
+              } else {
+                resolvedItemId = crypto.randomUUID();
+              }
+
+              newlyCreatedIds.push(newRowId);
+              newItems.push({
+                  ...p.payload,
+                  category:    cat,
+                  supplierId:  suppIdVal,
+                  id:          newRowId,
+                  item_id:     resolvedItemId,
+                  itemId:      resolvedItemId,
+                  location_id: importLocationId,
+                  locationId:  importLocationId,
+                  updatedAt:   timestamp
+              });
+          }
+
+      }
+
+      if (phaseAErrors.length > 0) {
+         console.warn("[Commit Import] Phase A Validation Failed. Committing halt.");
+         setImportErrors(phaseAErrors);
+         setIsCommitting(false);
+         return; 
+      }
+
+      if (newItems.length === 0 && updatedItems.length === 0) {
+        setImportErrors(["No valid items tracked after duplicate check isolation."]);
+        setIsCommitting(false);
+        return;
+      }
+
+      console.log("[Commit Import] Phase B: Database Schema Commits");
+      let unifiedInventory = [...inventoryData];
+      for (const u of updatedItems) {
+         const ix = unifiedInventory.findIndex(i => i.id === u.id);
+         if (ix > -1) unifiedInventory[ix] = u;
+      }
+      unifiedInventory = [...newItems, ...unifiedInventory];
+
+      const res = await saveInventory(unifiedInventory);
+      if (!res.success) {
+         setImportErrors([`Database Rejected Bulk Upsert: ${res.error?.message || JSON.stringify(res.error)}`]);
+         setIsCommitting(false);
+         return;
+      }
+      setInventoryData(unifiedInventory);
+
+      if (newlyCreatedCategories.length > 0) {
+         setCategories(finalCategoriesList);
+         await saveCategories(finalCategoriesList);
+      }
+      
+      const newBatch = {
+         batchId: `IMP-${timestamp}`,
+         timestamp,
+         fileName: fileInputRef.current?.files?.[0]?.name || "Unknown Array",
+         totalRowsProcessed: importPreview.length,
+         metrics: { new: newItems.length, updated: updatedItems.length, skipped },
+         newlyCreatedIds,
+         rollbackData,
+         status: "Active"
+      };
+
+      const newBatchesList = [newBatch, ...importBatches];
+      const batchRes = await saveImportBatches(newBatchesList);
+      if (!batchRes?.success) {
+         setImportErrors([`Failed to append history ledger: ${batchRes?.error?.message}`]);
+         // Do not fail the entire commit if history fails, just alert the user because inventory was already saved.
+      } else {
+         setImportBatches(newBatchesList);
+      }
+
+      alert(`Successfully committed block!\n\nNew items: ${newItems.length}\nUpdated fields: ${updatedItems.length}\nSkipped: ${skipped}\nAuto-created ${newlyCreatedCategories.length} categories.`);
+
+      setImportPreview([]);
+      setImportErrors([]);
+      setIsImportDrawerOpen(false);
+    } catch (err: any) {
+      console.error("[Commit Import] FATAL EXECUTION CRASH:", err);
+      setImportErrors([`Fatal Workflow Engine Error: ${err.message || 'Check Console for Trace'}`]);
+    } finally {
+      setIsCommitting(false);
+    }
   };
 
-  const revertBatch = (batchId: string) => {
+  const revertBatch = async (batchId: string) => {
     const batchIdx = importBatches.findIndex(b => b.batchId === batchId);
     const batch = importBatches[batchIdx];
     if(!batch || batch.status === "Reverted") return;
@@ -578,13 +692,12 @@ export default function Inventory() {
      
     for (const id of allIds) {
        const liveItem = inventoryData.find(i => i.id === id);
-       if (liveItem && liveItem.updatedAt > batch.timestamp) {
+       if (liveItem && (liveItem as any).updatedAt > batch.timestamp) {
           alert("Conflict Detected! System lock engaged. Items inside this bulk process were modified natively afterwards.");
           return;
        }
     }
 
-    // Execution sequence
     let safeInventory = inventoryData.filter(i => !batch.newlyCreatedIds.includes(i.id));
     for (const rId of updatedIds) {
       const previousState = batch.rollbackData[rId];
@@ -592,13 +705,21 @@ export default function Inventory() {
       if (ix > -1) safeInventory[ix] = previousState;
     }
 
+    const res = await saveInventory(safeInventory);
+    if (!res.success) {
+       alert(`Rollback Failed: ${res.error?.message || "Database rejected state sequence revert."}`);
+       return;
+    }
     setInventoryData(safeInventory);
-    saveInventory(safeInventory);
 
     const mBatches = [...importBatches];
     mBatches[batchIdx].status = "Reverted";
+    const resBatches = await saveImportBatches(mBatches);
+    if (!resBatches?.success) {
+       alert(`Batch Status Revert Failed: ${resBatches?.error?.message}`);
+       return;
+    }
     setImportBatches(mBatches);
-    saveImportBatches(mBatches);
     alert(`Rollback Complete: Native array sequence ${batch.batchId} systematically purged and reverted.`);
   };
 
@@ -612,6 +733,8 @@ export default function Inventory() {
     link.click();
     document.body.removeChild(link);
  };
+
+  if (isLoading) return <div className="animate-pulse flex items-center justify-center p-12 text-neutral-400">Loading Inventory Module...</div>;
 
   return (
     <div className="space-y-6">
@@ -1158,7 +1281,10 @@ export default function Inventory() {
         footer={
            <div className="flex items-center gap-3">
              <button onClick={downloadTemplate} className="px-4 py-2 text-sm font-medium bg-neutral-100 text-neutral-700 border border-neutral-200 rounded-lg hover:bg-neutral-200 transition-colors w-full flex items-center justify-center gap-2"><Download className="h-4 w-4" /> Template.csv</button>
-             <button onClick={commitImport} disabled={importPreview.length === 0} className="px-4 py-2 text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors shadow-sm w-full disabled:opacity-50 flex items-center justify-center gap-2"><Save className="h-4 w-4" /> Commit Import</button>
+             <button onClick={commitImport} disabled={importPreview.length === 0 || isCommitting} className="px-4 py-2 text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors shadow-sm w-full disabled:opacity-50 flex items-center justify-center gap-2">
+               {isCommitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+               {isCommitting ? "Committing..." : "Commit Import"}
+             </button>
            </div>
         }
       >
@@ -1251,7 +1377,22 @@ export default function Inventory() {
                 No past operations to map.
              </div>
           ) : (
-             importBatches.map((batch, idx) => (
+             <div className="space-y-4">
+               <div className="flex justify-end mb-2">
+                 <button 
+                    onClick={async () => {
+                       if (confirm("Are you sure you want to clear all history? This will NOT revert the uploads, but simply wipe this log.")) {
+                          const res = await saveImportBatches([]);
+                          if (!res?.success) alert(`Failed to wipe: ${res?.error?.message}`);
+                          else setImportBatches([]);
+                       }
+                    }}
+                    className="text-xs font-semibold text-red-600 hover:text-red-700 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded-md transition-colors"
+                 >
+                    Clear History Logs
+                 </button>
+               </div>
+               {importBatches.map((batch, idx) => (
                 <div key={idx} className={`p-4 border rounded-xl space-y-3 ${batch.status === "Reverted" ? 'bg-neutral-50 border-neutral-200 opacity-75' : 'bg-white border-neutral-200 shadow-sm'}`}>
                   <div className="flex justify-between items-start">
                      <div>
@@ -1288,7 +1429,8 @@ export default function Inventory() {
                     </button>
                   )}
                 </div>
-             ))
+             ))}
+             </div>
           )}
         </div>
       </Drawer>
@@ -1303,10 +1445,14 @@ export default function Inventory() {
            <div className="flex items-center gap-3">
              <button onClick={() => setIsDeleteModalOpen(false)} className="px-4 py-2 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 transition-colors w-full">Abort Task</button>
              <button 
-               onClick={() => {
+               onClick={async () => {
                   let safeInventory = inventoryData.filter(i => !selectedItemIds.includes(i.id));
+                  const res = await saveInventory(safeInventory);
+                  if (!res.success) {
+                     alert(`Delete Failed: ${res.error?.message || "Database rejected row destruction."}`);
+                     return;
+                  }
                   setInventoryData(safeInventory);
-                  saveInventory(safeInventory);
                   setSelectedItemIds([]);
                   setIsDeleteModalOpen(false);
                }} 

@@ -6,19 +6,28 @@ import {
    loadRecipes,
    loadInventory,
    loadOrders,
-   saveOrders
- } from "./storage";
+   saveOrders,
+   generateOrderId,
+} from "./storage";
  import { normalizeUnit } from "./units";
  
- export function runAutomationEngine() {
-   if (typeof window === "undefined") return;
- 
-   const requisitions = loadRequisitions();
-   const finishedGoods = loadFinishedGoods();
-   const productionPlans = loadProductionPlans();
-   const recipes = loadRecipes();
-   const inventory = loadInventory();
-   const orders = loadOrders();
+ export async function runAutomationEngine() {
+  if (typeof window === "undefined") return;
+
+  const rawRequisitions = await loadRequisitions();
+  const rawFinishedGoods = await loadFinishedGoods();
+  const rawProductionPlans = await loadProductionPlans();
+  const rawRecipes = await loadRecipes();
+  const rawInventory = await loadInventory();
+  const rawOrders = await loadOrders();
+
+  // Explicit safety limits globally guarding null states directly
+  const requisitions = Array.isArray(rawRequisitions) ? rawRequisitions : [];
+  const finishedGoods = Array.isArray(rawFinishedGoods) ? rawFinishedGoods : [];
+  const productionPlans = Array.isArray(rawProductionPlans) ? rawProductionPlans : [];
+  const recipes = Array.isArray(rawRecipes) ? rawRecipes : [];
+  const inventory = Array.isArray(rawInventory) ? rawInventory : [];
+  const orders = Array.isArray(rawOrders) ? rawOrders : [];
  
    let plansChanged = false;
    let ordersChanged = false;
@@ -51,8 +60,8 @@ import {
      const fg = finishedGoods.find((f: any) => f.id === fgId);
      if (!fg) return;
  
-     if (demandData.totalQty > fg.currentStock) {
-       const shortage = demandData.totalQty - fg.currentStock;
+     if (demandData.totalQty > fg.inStock) {
+       const shortage = demandData.totalQty - fg.inStock;
  
        // Check if there is already an active (non-completed/rejected) plan for this FG today
        const existingPlan = productionPlans.find((p: any) => p.fgId === fgId && p.date === today && p.status !== "Completed" && p.status !== "Rejected");
@@ -63,21 +72,28 @@ import {
            date: today,
            fgId: fg.id,
            fgName: fg.name,
-           requiredQty: demandData.totalQty,
-           availableFgStock: fg.currentStock,
-           shortageQty: shortage,
-           suggestedProductionQty: shortage,
+           quantity: shortage,
+           unit: fg.unit,
            status: 'Draft (Auto)',
-           unit: fg.unit
+           priority: 'Normal',
+           location: 'System Generated',
+           assignedTo: '',
+           notes: '',
+           ingredients: [],
+           // Extension DOM limits:
+           requiredQty: demandData.totalQty,
+           availableFgStock: fg.inStock,
+           shortageQty: shortage,
+           suggestedProductionQty: shortage
          };
-         productionPlans.push(newPlan);
+         productionPlans.push(newPlan as any);
          plansChanged = true;
-       } else if (existingPlan.status === "Draft (Auto)" && existingPlan.requiredQty !== demandData.totalQty) {
+       } else if (existingPlan.status === "Draft (Auto)" && (existingPlan as any).requiredQty !== demandData.totalQty) {
          // Update existing auto-draft if the math changed and it hasn't been touched yet
-         existingPlan.requiredQty = demandData.totalQty;
-         existingPlan.availableFgStock = fg.currentStock;
-         existingPlan.shortageQty = shortage;
-         existingPlan.suggestedProductionQty = shortage;
+         (existingPlan as any).requiredQty = demandData.totalQty;
+         (existingPlan as any).availableFgStock = fg.inStock;
+         (existingPlan as any).shortageQty = shortage;
+         (existingPlan as any).suggestedProductionQty = shortage;
          plansChanged = true;
        }
      }
@@ -98,7 +114,11 @@ import {
      const batchesNeeded = plan.suggestedProductionQty / recipe.yieldQty;
  
      recipe.ingredients.forEach((ing: any) => {
-       const item = inventory.find((i: any) => i.id.toString() === ing.inventoryId.toString());
+       // Match by shared itemId first (new rows), fall back to row id (legacy)
+       const item = inventory.find((i: any) =>
+         (i.itemId && i.itemId.toString() === ing.inventoryId.toString()) ||
+         i.id.toString() === ing.inventoryId.toString()
+       );
        if (item) {
           try {
             const normalizedQty = normalizeUnit(ing.qty, ing.unit, item.baseUnit || item.unit);
@@ -113,16 +133,22 @@ import {
  
    // Compare required sub-ingredients against inventory
    Object.entries(rawMaterialDeficits).forEach(([invId, requiredQty]: [string, any]) => {
-     const item = inventory.find((i: any) => i.id.toString() === invId.toString());
+     // Match by shared itemId first, fall back to row id for legacy rows
+     const item = inventory.find((i: any) =>
+       (i.itemId && i.itemId.toString() === invId.toString()) ||
+       i.id.toString() === invId.toString()
+     );
      if (!item) return;
  
      if (requiredQty > item.inStock) {
        const rawShortage = requiredQty - item.inStock;
-       
-       // Does a pending PO already cover this?
-       const hasOpenPO = orders.some((o: any) => 
+
+       // Does a pending PO already cover this? Match by itemId or row id.
+       const hasOpenPO = orders.some((o: any) =>
           (o.status === "Draft" || o.status === "Draft (Auto)" || o.status === "Pending Approval" || o.status === "Sent") &&
-          o.lineItems?.some((li: any) => li.id === item.id)
+          o.lineItems?.some((li: any) =>
+            (item.itemId && li.itemId === item.itemId) || li.id === item.id
+          )
        );
  
        if (!hasOpenPO) {
@@ -130,53 +156,60 @@ import {
           let targetPO = orders.find((o: any) => o.supplierId === item.supplierId && o.status === "Draft (Auto)" && o.date === today);
           
           if (!targetPO) {
-             targetPO = {
-               id: `PO-AUTO-${1000 + orders.length + 1}`,
-               supplierId: item.supplierId,
-               date: today,
-               deliveryDate: "Pending",
-               items: 0,
-               total: 0,
-               status: "Draft (Auto)",
-               location: "HQ (All Locations)",
-               createdBy: "Auto Engine",
-               receivedBy: null,
-               receivedAt: null,
-               notes: "Auto-generated to cover Production Plan raw material shortages.",
-               lineItems: []
-             };
-             orders.push(targetPO);
+             const { id, poNumber } = generateOrderId();
+             const newOrder = {
+              id,
+              poNumber,
+              supplierId: item.supplierId,
+              supplierName: "System Automation",
+              date: today,
+              deliveryDate: "Pending",
+              items: 0,
+              total: 0,
+              status: "Draft (Auto)",
+              location: "Main HQ",
+              locationId: "LOC-HQ",
+              createdBy: "System Automation",
+              receivedBy: "",
+              receivedAt: "",
+              notes: "Generated by Demand Automation rules.",
+              lineItems: []
+          };
+          orders.push(newOrder as any);
+          targetPO = newOrder;
              ordersChanged = true;
           }
  
           // add line item using primary purchase unit fallback
-          if (!targetPO.lineItems.some((li: any) => li.id === item.id)) {
-             let pUnit = { name: item.baseUnit || item.unit, conversion: 1 };
-             if (item.purchaseUnits && item.purchaseUnits.length > 0) {
-                 pUnit = item.purchaseUnits.find((u: any) => u.isPrimary) || item.purchaseUnits[0];
-             }
-             
-             const draftQty = Math.ceil(rawShortage / pUnit.conversion);
-
-             targetPO.lineItems.push({
-               id: item.id,
-               name: item.name,
-               qty: draftQty,
-               unit: pUnit.name,
-               baseEquivalent: draftQty * pUnit.conversion,
-               baseUnit: item.baseUnit || item.unit,
-               cost: item.cost
+          const existingItem = (targetPO as any).lineItems.find((li: any) =>
+            (item.itemId && li.itemId === item.itemId) || li.id === item.id
+          );
+          if (existingItem) {
+             // Update math logic bounds structurally preserving JSONB blocks organically
+             const oldQty = existingItem.qty || 0;
+             const newQty = oldQty + rawShortage;
+             existingItem.qty = newQty;
+             existingItem.subtotal = newQty * (item.cost || 0);
+          } else {
+             (targetPO as any).lineItems.push({
+                id:        item.id,
+                itemId:    item.itemId || item.id,   // carry shared identity forward
+                name:      item.name,
+                qty:       rawShortage,
+                unit:      item.unit,
+                unitPrice: item.cost || 0,
+                subtotal:  rawShortage * (item.cost || 0)
              });
-             targetPO.items = targetPO.lineItems.length;
-             targetPO.total = targetPO.lineItems.reduce((sum: number, li: any) => sum + (li.qty * li.cost), 0);
-             ordersChanged = true;
           }
+          (targetPO as any).items = (targetPO as any).lineItems.length;
+          (targetPO as any).total = (targetPO as any).lineItems.reduce((sum: number, i: any) => sum + (i.subtotal || 0), 0);
+          ordersChanged = true;
        }
      }
    });
  
-   if (plansChanged) saveProductionPlans(productionPlans);
-   if (ordersChanged) saveOrders(orders);
+   if (plansChanged) await saveProductionPlans(productionPlans);
+   if (ordersChanged) await saveOrders(orders);
  }
  
  function fgIdToRecipeId(fgId: string, finishedGoods: any[]) {

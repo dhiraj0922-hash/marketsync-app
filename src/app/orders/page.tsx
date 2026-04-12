@@ -30,50 +30,79 @@ import {
   Trash,
   X
 } from "lucide-react";
-import { loadOrders, saveOrders, loadInventory, saveInventory, loadSuppliers, resolveSupplier } from "@/lib/storage";
+import { loadOrders, saveOrders, insertOrder, updateOrder, deleteOrder, generateOrderId, loadInventory, saveInventory, loadSuppliers, resolveSupplier, loadLocations } from "@/lib/storage";
+import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/components/AuthProvider";
 
-const locationsData = ["Downtown", "Uptown", "Westside", "HQ (All Locations)"];
+const HQ_LOCATION_ID = "LOC-HQ";
 
 export default function Orders() {
+  const { user } = useAuth();
+  // queryLocationId: scopes the loadOrders query
+  // Recomputed each render — safe as a render-time value (only used in useEffect deps)
+  const queryLocationId: string | null =
+    user?.role === "hq_admin" ? null : (user?.locationId ?? null);
+
+  // NOTE: writeLocationId is intentionally NOT a render-time constant.
+  // Computing it from user at render captures user=null before the profile loads,
+  // causing saveOrder to write LOC-HQ instead of the user's real location.
+  // It is now computed inside saveOrder at call time (see below).
+
   const [orders, setOrders] = useState<any[]>([]);
   const [inventoryData, setInventoryData] = useState<any[]>([]);
   const [suppliersData, setSuppliersData] = useState<any[]>([]);
-  
+  const [locations, setLocations] = useState<any[]>([]);  // live from DB — replaces hardcoded locationsData
+  const [isLoading, setIsLoading] = useState(true);
+
+  // Resolve a location_id to its display name (falls back to the id itself)
+  const locationDisplayName = (locationId: string | null | undefined): string => {
+    if (!locationId) return "";
+    return locations.find(l => l.id === locationId)?.name ?? locationId;
+  };
+
   useEffect(() => {
-    const loadedOrders = loadOrders();
-    const loadedInv = loadInventory();
-    const loadedSup = loadSuppliers();
-    
-    setOrders(loadedOrders);
-    setInventoryData(loadedInv);
-    setSuppliersData(loadedSup);
+    async function fetchData() {
+      setIsLoading(true);
+      try {
+        const [loadedOrders, loadedInv, loadedSup, loadedLocs] = await Promise.all([
+           loadOrders(queryLocationId),   // DB-level scoped by location_id
+           loadInventory(),
+           loadSuppliers(),
+           loadLocations(),
+        ]);
 
-    if (typeof window !== "undefined") {
-       const params = new URLSearchParams(window.location.search);
-       const draftId = params.get("openDraft");
-       if (draftId) {
-          const target = loadedOrders.find((o: any) => o.id === draftId);
-          if (target) {
-            const supp = loadedSup.find((s: any) => s.id === target.supplierId);
-            setSelectedSupplier(supp || { id: target.supplierId, name: target.supplierId });
-            setSelectedLocation(target.location);
-            setNotes(target.notes || "");
-            
-            let lineItems = target.lineItems && target.lineItems.length > 0
-               ? target.lineItems 
-               : loadedInv.filter((i: any) => i.supplierId === target.supplierId).map((i: any) => ({
-                    ...i, qty: Math.max(1, i.parLevel - i.inStock), expectedPrice: i.cost
-                 }));
+        setOrders(loadedOrders);
+        setInventoryData(loadedInv);
+        setSuppliersData(loadedSup);
+        setLocations(loadedLocs);
 
-            setDraftItems(lineItems);
-            setEditorState({ isOpen: true, orderId: target.id, readOnly: false });
-            
-            // Clean up url bar seamlessly
-            window.history.replaceState({}, document.title, window.location.pathname);
-          }
-       }
+        if (typeof window !== "undefined") {
+           const params = new URLSearchParams(window.location.search);
+           const draftId = params.get("openDraft");
+           if (draftId) {
+              const target = loadedOrders.find((o: any) => o.id === draftId);
+              if (target) {
+                const supp = loadedSup.find((s: any) => s.id === target.supplierId);
+                setSelectedSupplier(supp || { id: target.supplierId, name: target.supplierId });
+                setSelectedLocation(target.location);
+                setNotes(target.notes || "");
+                setDraftItems(target.lineItems || []);
+                setEditorState({ isOpen: true, orderId: target.id, readOnly: false });
+                
+                window.history.replaceState({}, '', '/orders');
+              }
+           }
+        }
+      } catch (err) {
+         console.error(err);
+      } finally {
+         setIsLoading(false);
+      }
     }
+    
+    fetchData();
   }, []);
+
   
   // Editor / Draft State
   const [editorState, setEditorState] = useState<{ isOpen: boolean, orderId: string | null, readOnly: boolean }>({ isOpen: false, orderId: null, readOnly: false });
@@ -82,6 +111,8 @@ export default function Orders() {
   const [draftItems, setDraftItems] = useState<any[]>([]);
   const [notes, setNotes] = useState("");
   const [isCatalogOpen, setIsCatalogOpen] = useState(false);
+  const [isSavingOrder, setIsSavingOrder] = useState(false);
+  const [orderSaveError, setOrderSaveError] = useState<string | null>(null);
 
   // Receive PO State
   const [receivingOrder, setReceivingOrder] = useState<any>(null);
@@ -193,13 +224,23 @@ export default function Orders() {
 
   const openCreatePO = () => {
     setSelectedSupplier(null);
-    setSelectedLocation("");
+    setOrderSaveError(null);
+    // location_manager: lock to their canonical locationId.
+    // Store the raw locationId (not the display name) — saveOrder reads it from
+    // the user profile anyway, but selectedLocation drives the disabled check on
+    // Send Order. If we called locationDisplayName() here while locations is still
+    // loading it returns "" → Send is permanently disabled. Use locationId directly.
+    setSelectedLocation(
+      user?.role === "location_manager"
+        ? (user.locationId ?? "")
+        : ""
+    );
     setDraftItems([]);
     setNotes("");
     setEditorState({ isOpen: true, orderId: null, readOnly: false });
   };
 
-  const autoGeneratePOs = () => {
+  const autoGeneratePOs = async () => {
     const lowStockItems = inventoryData.filter(i => i.inStock < i.parLevel);
     if (lowStockItems.length === 0) {
       alert("All inventory items are currently at or above their Par Levels. No orders needed!");
@@ -234,8 +275,11 @@ export default function Orders() {
 
        const total = lineItems.reduce((sum, i) => sum + (i.expectedPrice * i.qty), 0);
        
+       const { id, poNumber } = generateOrderId();  // UUID pk + human label — guaranteed unique
+
        const draftPO = {
-         id: `PO-${1050 + _currentOrders.length + newPOs.length}`,
+         id,           // UUID — DB primary key, no collision possible
+         poNumber,     // "PO-XXXXXXXX" — display label only
          supplierId: parseInt(supplierName, 10),
          date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
          deliveryDate: "Pending",
@@ -243,7 +287,8 @@ export default function Orders() {
          lineItems: lineItems,
          total: total,
          status: "Draft",
-         location: "HQ (System)",
+         location: "HQ",
+         locationId: user?.role === "hq_admin" ? HQ_LOCATION_ID : (user?.locationId ?? HQ_LOCATION_ID),  // resolved fresh at call time
          notes: "Auto-generated from low stock metrics",
          createdBy: "System",
          receivedBy: null,
@@ -253,8 +298,12 @@ export default function Orders() {
     });
 
     const finalMatrix = [...newPOs, ..._currentOrders];
+    const res = await saveOrders(finalMatrix);
+    if (!res?.success) {
+       alert(`DB Order Save Error: ${res?.error}`);
+       return;
+    }
     setOrders(finalMatrix);
-    saveOrders(finalMatrix);
     alert(`Successfully generated ${newPOs.length} Draft POs from low-stock inventory!`);
   };
 
@@ -289,59 +338,105 @@ export default function Orders() {
     setEditorState({ isOpen: true, orderId: order.id, readOnly: isReadOnly });
   };
 
-  const deleteDraft = () => {
+  const deleteDraft = async () => {
     if (!editorState.orderId) return;
-    const newOrders = orders.filter(o => o.id !== editorState.orderId);
-    setOrders(newOrders);
-    saveOrders(newOrders);
+    const res = await deleteOrder(editorState.orderId);
+    if (!res?.success) {
+       alert(`Order Delete Error: ${res?.error}`);
+       return;
+    }
+    setOrders(prev => prev.filter(o => o.id !== editorState.orderId));
     setEditorState({ isOpen: false, orderId: null, readOnly: false });
   };
 
-  const saveOrder = (status: "Draft" | "Sent") => {
-    let resolvedSupplierId = selectedSupplier.id || (selectedSupplier.name ? resolveSupplier(selectedSupplier.name) : null);
-    
-    let newOrders;
-    if (editorState.orderId) {
-      // Update existing
-      newOrders = orders.map(o => {
-        if (o.id === editorState.orderId) {
-          return {
-            ...o,
-            supplierId: resolvedSupplierId,
-            location: selectedLocation || "HQ (System)",
-            items: draftItems.length,
-            lineItems: draftItems,
-            total: currentTotal,
-            notes: notes,
-            status: status,
-            date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-          };
-        }
-        return o;
-      });
-    } else {
-      // Create new
-      const newOrder = {
-        id: `PO-${1050 + orders.length}`,
-        supplierId: resolvedSupplierId,
-        date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-        deliveryDate: "Pending",
-        items: draftItems.length,
-        lineItems: draftItems,
-        total: currentTotal,
-        status: status,
-        location: selectedLocation || "HQ (System)",
-        notes: notes,
-        createdBy: "Current User",
-        receivedBy: null,
-        receivedAt: null
-      };
-      newOrders = [newOrder, ...orders];
+  const saveOrder = async (status: "Draft" | "Sent") => {
+    // Prevent double submission
+    if (isSavingOrder) return;
+    setOrderSaveError(null);
+
+    // ── Resolve canonical location_id FRESH from user at call time ──────────────
+    // DO NOT use a render-time constant. writeLocationId captured at render
+    // picks up user=null (before profile loads) and silently writes LOC-HQ
+    // instead of the user's real location_id, causing the RLS WITH CHECK to fail.
+    if (!user) {
+      alert("User session not loaded. Please wait a moment and try again.");
+      return;
     }
-    
-    setOrders(newOrders);
-    saveOrders(newOrders);
-    setEditorState({ isOpen: false, orderId: null, readOnly: false });
+    const canonicalLocationId: string =
+      user.role === "hq_admin"
+        ? HQ_LOCATION_ID
+        : (user.locationId ?? null);    // null guard below will catch this
+
+    if (user.role !== "hq_admin" && !canonicalLocationId) {
+      alert("Your user profile does not have a location assigned. Contact HQ to assign your location before creating orders.");
+      return;
+    }
+
+    let resolvedSupplierId: number | null = selectedSupplier.id || null;
+    if (!resolvedSupplierId && selectedSupplier.name) {
+      try {
+        resolvedSupplierId = await resolveSupplier(selectedSupplier.name);
+      } catch (e: any) {
+        alert(e.message ?? `Supplier "${selectedSupplier.name}" not found in HQ master. Ask HQ to create it first.`);
+        return;
+      }
+    }
+
+    setIsSavingOrder(true);
+    try {
+      if (editorState.orderId) {
+      // ── UPDATE existing order (single-row — RLS-safe) ───────────────────────
+        const existing = orders.find(o => o.id === editorState.orderId);
+        const patch = {
+          ...existing,
+          supplierId:  resolvedSupplierId,
+          location:    selectedLocation || "HQ",
+          locationId:  existing?.locationId || canonicalLocationId,
+          items:       draftItems.length,
+          lineItems:   draftItems,
+          total:       currentTotal,
+          notes:       notes,
+          status:      status,
+          date:        new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        };
+        const res = await updateOrder(editorState.orderId, patch);
+        if (!res.success) {
+          setOrderSaveError(`Save error: ${res.error}`);
+          return;
+        }
+        setOrders(prev => prev.map(o => o.id === editorState.orderId ? (res.order ?? patch) : o));
+      } else {
+        // ── INSERT new order ──────────────────────────────────────────────────
+        const { id, poNumber } = generateOrderId(); // fresh UUID — no duplicate PK on retry
+        const newOrder = {
+          id,
+          poNumber,
+          supplierId:   resolvedSupplierId,
+          date:         new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+          deliveryDate: "Pending",
+          items:        draftItems.length,
+          lineItems:    draftItems,
+          total:        currentTotal,
+          status:       status,
+          location:     selectedLocation || "HQ",
+          locationId:   canonicalLocationId,
+          notes:        notes,
+          createdBy:    "Current User",
+          receivedBy:   null,
+          receivedAt:   null,
+        };
+        const res = await insertOrder(newOrder);
+        if (!res.success) {
+          setOrderSaveError(`Save error: ${res.error}`);
+          return;
+        }
+        setOrders(prev => [res.order ?? newOrder, ...prev]);
+      }
+
+      setEditorState({ isOpen: false, orderId: null, readOnly: false });
+    } finally {
+      setIsSavingOrder(false);
+    }
   };
 
   const openReceiveModal = (orderId: string) => {
@@ -380,56 +475,104 @@ export default function Orders() {
     setReceivingOrder(targetOrder);
   };
 
-  const confirmReceive = () => {
-    if(!receivingOrder) return;
+  const confirmReceive = async () => {
+    if (!receivingOrder) return;
 
-    // 1. Update Order Status
-    const newOrders = orders.map(o => {
-      if (o.id === receivingOrder.id) {
-        return { 
-          ...o, 
-          status: "Delivered",
-          deliveryDate: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-          receivedAt: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-          receivedBy: "Current User",
-          total: receivingTotal
-        };
+    // ── 1. Update order status (single-row — RLS-safe) ───────────────────────
+    const patch = {
+      ...receivingOrder,
+      status:       "Delivered",
+      deliveryDate: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+      receivedAt:   new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+      receivedBy:   "Current User",
+      total:        receivingTotal,
+    };
+
+    const res = await updateOrder(receivingOrder.id, patch);
+    if (!res?.success) {
+      alert(`Order Update Error: ${res?.error}`);
+      return;
+    }
+    setOrders(prev => prev.map(o => o.id === receivingOrder.id ? (res.order ?? patch) : o));
+
+    // ── 2. Post received stock directly to HQ inventory rows ─────────────────
+    // Each PO line item carries itemId (shared identity) and id (row PK).
+    // We update inventory_items directly via supabase scoped to LOC-HQ
+    // so we never clobber other-location rows.
+    const stockErrors: string[] = [];
+
+    for (const recItem of receivingItems) {
+      if (recItem.id === 999 || recItem.receivedQty <= 0) continue;
+
+      const sharedItemId: string | undefined = recItem.itemId || recItem.item_id;
+
+      if (sharedItemId) {
+        // ── Preferred path: match by shared item_id + LOC-HQ ─────────────────
+        const { data: hqRow, error: fetchErr } = await supabase
+          .from("inventory_items")
+          .select("id, instock")
+          .eq("item_id", sharedItemId)
+          .eq("location_id", HQ_LOCATION_ID)
+          .maybeSingle();
+
+        if (fetchErr) {
+          stockErrors.push(`${recItem.name}: DB error (${fetchErr.message})`);
+          continue;
+        }
+
+        if (hqRow) {
+          const newStock = Number(hqRow.instock ?? 0) + recItem.receivedQty;
+          const { error: updErr } = await supabase
+            .from("inventory_items")
+            .update({ instock: newStock, cost: recItem.actualPrice })
+            .eq("id", hqRow.id);
+
+          if (updErr) stockErrors.push(`${recItem.name}: update failed (${updErr.message})`);
+          else console.log(`[PO Receive] ${recItem.name}: instock ${hqRow.instock} → ${newStock}`);
+        } else {
+          stockErrors.push(`${recItem.name}: no HQ row found for item_id=${sharedItemId}. Add this product to HQ inventory first.`);
+        }
+      } else {
+        // ── Fallback: match by row id for legacy PO lines without itemId ──────
+        const { data: invRow, error: fetchErr } = await supabase
+          .from("inventory_items")
+          .select("id, instock, location_id")
+          .eq("id", String(recItem.id))
+          .maybeSingle();
+
+        if (fetchErr || !invRow) {
+          stockErrors.push(`${recItem.name}: inventory row id=${recItem.id} not found.`);
+          continue;
+        }
+
+        const newStock = Number(invRow.instock ?? 0) + recItem.receivedQty;
+        const { error: updErr } = await supabase
+          .from("inventory_items")
+          .update({ instock: newStock, cost: recItem.actualPrice })
+          .eq("id", invRow.id);
+
+        if (updErr) stockErrors.push(`${recItem.name}: update failed (${updErr.message})`);
+        else console.log(`[PO Receive] fallback id=${recItem.id}: instock → ${newStock}`);
       }
-      return o;
-    });
+    }
 
-    // 2. Update Inventory
-    const newInventory = [...inventoryData];
-    receivingItems.forEach(recItem => {
-      // Skip dummy generic fallback items
-      if (recItem.id === 999) return; 
+    if (stockErrors.length > 0) {
+      alert(`Order received, but some inventory lines failed to post:\n\n${stockErrors.join('\n')}`);
+    }
 
-      const invIdx = newInventory.findIndex(inv => inv.id === recItem.id);
-      if(invIdx > -1) {
-        newInventory[invIdx] = {
-           ...newInventory[invIdx],
-           inStock: newInventory[invIdx].inStock + recItem.receivedQty,
-           cost: recItem.actualPrice, // update AP cost baseline
-        };
-      }
-    });
-
-    setOrders(newOrders);
-    saveOrders(newOrders);
-    
-    setInventoryData(newInventory);
-    saveInventory(newInventory);
-    
     setSuccessModalOrder(receivingOrder.id);
     setReceivingOrder(null);
     setReceivingItems([]);
   };
+
 
   const handleSupplierChange = (name: string) => {
     const supp = suppliersData.find(s => s.name === name);
     setSelectedSupplier(supp || { name });
     setDraftItems([]); 
   };
+
+  if (isLoading) return <div className="animate-pulse flex p-12 text-neutral-400 justify-center">Loading Orders Module...</div>;
 
   return (
     <div className="space-y-6">
@@ -510,7 +653,7 @@ export default function Orders() {
                onChange={(e) => setFilterLocation(e.target.value)}
             >
                <option value="All">All Locations</option>
-               {locationsData.map(l => <option key={l} value={l}>{l}</option>)}
+               {locations.map((l: any) => <option key={l.id} value={l.name}>{l.name}</option>)}
             </select>
 
             <select 
@@ -637,18 +780,24 @@ export default function Orders() {
         description={editorState.readOnly ? "This order has been sent and cannot be edited." : "Fill in the details below to complete your order."}
         footer={
           <div className="w-full flex items-center justify-between">
-            {editorState.orderId && !editorState.readOnly ? (
-               <button 
-                className="px-4 py-2 text-sm font-medium bg-danger-50 text-danger-600 rounded-lg hover:bg-danger-100 transition-colors flex items-center gap-2"
-                onClick={deleteDraft}
-              >
-                <Trash className="h-4 w-4" />
-                Delete Draft
-              </button>
-            ) : <div />}
             <div className="flex items-center gap-3">
-              <button 
-                className="px-4 py-2 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 transition-colors"
+              {editorState.orderId && !editorState.readOnly ? (
+                <button
+                  className="px-4 py-2 text-sm font-medium bg-danger-50 text-danger-600 rounded-lg hover:bg-danger-100 transition-colors flex items-center gap-2 disabled:opacity-50"
+                  onClick={deleteDraft}
+                  disabled={isSavingOrder}
+                >
+                  <Trash className="h-4 w-4" />
+                  Delete Draft
+                </button>
+              ) : <div />}
+              {orderSaveError && (
+                <span className="text-xs font-semibold text-danger-600 max-w-xs truncate">{orderSaveError}</span>
+              )}
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                className="px-4 py-2 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 transition-colors disabled:opacity-50"
                 onClick={() => {
                   if (editorState.readOnly) {
                     setEditorState({ isOpen: false, orderId: null, readOnly: false });
@@ -656,17 +805,20 @@ export default function Orders() {
                     saveOrder("Draft");
                   }
                 }}
+                disabled={isSavingOrder}
               >
-                {editorState.readOnly ? "Close" : "Save as Draft"}
+                {editorState.readOnly ? "Close" : isSavingOrder ? "Saving…" : "Save as Draft"}
               </button>
               {!editorState.readOnly && (
-                <button 
-                  className="px-4 py-2 text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors shadow-sm flex items-center gap-2"
+                <button
+                  className="px-4 py-2 text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors shadow-sm flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
                   onClick={() => saveOrder("Sent")}
-                  disabled={!selectedSupplier?.name || draftItems.length === 0 || !selectedLocation}
+                  disabled={isSavingOrder || !selectedSupplier?.name || draftItems.length === 0 || !selectedLocation}
                 >
-                  <Send className="h-4 w-4" />
-                  Send Order
+                  {isSavingOrder
+                    ? <span className="h-4 w-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                    : <Send className="h-4 w-4" />}
+                  {isSavingOrder ? "Sending…" : "Send Order"}
                 </button>
               )}
             </div>
@@ -691,18 +843,29 @@ export default function Orders() {
               <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">2. Delivery Location</label>
               <div className="relative">
                 <MapPin className="h-4 w-4 text-neutral-400 absolute left-3 top-1/2 transform -translate-y-1/2" />
-                <select 
-                  className="w-full bg-white border border-neutral-200 rounded-lg py-2 pl-9 pr-3 text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 focus:border-brand-500 disabled:bg-neutral-50 disabled:text-neutral-500"
-                  value={selectedLocation}
-                  onChange={(e) => setSelectedLocation(e.target.value)}
-                  disabled={editorState.readOnly}
-                >
-                  <option value="">-- Select --</option>
-                  {locationsData.map(l => <option key={l} value={l}>{l}</option>)}
-                  {selectedLocation && !locationsData.includes(selectedLocation) && (
-                    <option value={selectedLocation}>{selectedLocation}</option>
-                  )}
-                </select>
+
+                {/* location_manager: locked to their own assigned location */}
+                {user?.role === "location_manager" ? (
+                  <div className="w-full bg-neutral-50 border border-neutral-200 rounded-lg py-2 pl-9 pr-3 text-sm text-neutral-700 font-medium flex items-center justify-between">
+                    <span>{selectedLocation || locationDisplayName(user.locationId) || "No location assigned"}</span>
+                    <span className="text-[10px] font-semibold text-neutral-400 uppercase tracking-wider ml-2 shrink-0">Locked</span>
+                  </div>
+                ) : (
+                  /* hq_admin: full live dropdown */
+                  <select
+                    className="w-full bg-white border border-neutral-200 rounded-lg py-2 pl-9 pr-3 text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 focus:border-brand-500 disabled:bg-neutral-50 disabled:text-neutral-500"
+                    value={selectedLocation}
+                    onChange={(e) => setSelectedLocation(e.target.value)}
+                    disabled={editorState.readOnly}
+                  >
+                    <option value="">-- Select --</option>
+                    {locations.map((l: any) => <option key={l.id} value={l.name}>{l.name}</option>)}
+                    {selectedLocation && !locations.find((l: any) => l.name === selectedLocation) && (
+                      <option value={selectedLocation}>{selectedLocation}</option>
+                    )}
+                  </select>
+                )}
+
               </div>
             </div>
           </div>

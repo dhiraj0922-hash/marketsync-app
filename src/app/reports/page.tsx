@@ -4,8 +4,17 @@ import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { BarChart, FileText, Download, Filter, Settings2, Clock } from "lucide-react";
 import { Drawer } from "@/components/ui/drawer";
+import { HQOnlyGuard } from "@/components/HQOnlyGuard";
 
 export default function Reports() {
+  return (
+    <HQOnlyGuard>
+      <ReportsPageContent />
+    </HQOnlyGuard>
+  );
+}
+
+function ReportsPageContent() {
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [selectedReport, setSelectedReport] = useState<any>(null);
   const [dateRange, setDateRange] = useState("Last 7 Days");

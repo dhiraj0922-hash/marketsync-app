@@ -1,14 +1,14 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import React, { useState, useEffect, useCallback } from "react";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
-import { 
-  Inbox, 
-  Search, 
-  CheckCircle2, 
+import {
+  Inbox,
+  Search,
+  CheckCircle2,
   XSquare,
   PackageCheck,
   MapPin,
@@ -18,676 +18,1376 @@ import {
   Printer,
   ChevronDown,
   ChevronRight,
-  ClipboardList
+  ClipboardList,
+  Plus,
+  AlertCircle,
+  Loader2,
+  Trash2,
 } from "lucide-react";
-import { 
-  loadRequisitions, 
-  saveRequisitions, 
+import {
+  loadRequisitions,
+  saveRequisitions,
   loadFinishedGoods,
-  saveFinishedGoods
+  saveFinishedGoods,
+  loadInventory,
+  loadSaleItems,
+  saveNewRequisition,
+  loadRequisitionItems,
+  updateRequisitionStatus,
+  updateRequisitionItemFulfilled,
+  type SaleItem,
 } from "@/lib/storage";
+import {
+  getCurrentUserProfile,
+  getCurrentUserId,
+  clearProfileCache,
+  type UserProfile,
+} from "@/lib/auth";
 
-const locationsData = ["Downtown", "Uptown", "Westside", "North Hills", "South Point"];
+// ─── Types ─────────────────────────────────────────────────────────────────────
 
-export default function Requisitions() {
+interface LineItemDraft {
+  // One of itemId (raw mode) or finishedGoodId (FG mode) will be set
+  itemId:         string | null;
+  finishedGoodId: string | null;
+  itemName:       string;         // snapshot: captured at selection time
+  unit:           string;         // snapshot: captured at selection time
+  unitPrice:      number;         // effective_price at selection time
+  quantityRequested: number;
+}
+
+// ─── Status badge helper ───────────────────────────────────────────────────────
+
+function StatusBadge({ status }: { status: string }) {
+  const map: Record<string, string> = {
+    Draft:       "bg-neutral-100 text-neutral-700",
+    draft:       "bg-neutral-100 text-neutral-700",
+    Submitted:   "bg-warning-50 text-warning-700",
+    submitted:   "bg-warning-50 text-warning-700",
+    Approved:    "bg-brand-50 text-brand-700",
+    approved:    "bg-brand-50 text-brand-700",
+    Rejected:    "bg-danger-50 text-danger-700",
+    rejected:    "bg-danger-50 text-danger-700",
+    Fulfilled:   "bg-success-50 text-success-700",
+    fulfilled:   "bg-success-50 text-success-700",
+    Partial:     "bg-orange-50 text-orange-700",
+    Backordered: "bg-danger-50 text-danger-700",
+  };
+  return (
+    <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-semibold ${map[status] ?? "bg-neutral-100 text-neutral-600"}`}>
+      {status}
+    </span>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LOCATION MANAGER VIEW
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function LocationManagerView({
+  profile,
+  inventoryItems,
+  saleItems,
+}: {
+  profile: UserProfile;
+  inventoryItems: any[];
+  saleItems: SaleItem[];
+}) {
+  // FG-mode: active when HQ has published at least one active+requisitionable sale item.
+  // All franchise locations automatically switch to FG-mode; no per-location config.
+  const fgMode = saleItems.some(s => s.isActive && s.isRequisitionable);
   const [requisitions, setRequisitions] = useState<any[]>([]);
-  const [finishedGoods, setFinishedGoods] = useState<any[]>([]);
-  
+  const [isLoading, setIsLoading] = useState(true);
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [selectedReq, setSelectedReq] = useState<any>(null);
+  const [reqLineItems, setReqLineItems] = useState<any[]>([]); // items from requisition_items table
+  const [lineItemsLoading, setLineItemsLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [filterStatus, setFilterStatus] = useState("All");
-  const [filterLocation, setFilterLocation] = useState("All");
 
-  const [selectedReq, setSelectedReq] = useState<any>(null);
-  const [selectedReqIds, setSelectedReqIds] = useState<string[]>([]);
-  
-  const [activeTab, setActiveTab] = useState<"overview" | "hq-production">("overview");
-  const [productionDate, setProductionDate] = useState<string>(new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }));
-  const [expandedRows, setExpandedRows] = useState<string[]>([]);
+  // ── Create form state ──────────────────────────────────────────────────────
+  const [draftNotes, setDraftNotes] = useState("");
+  const [lineItems, setLineItems] = useState<LineItemDraft[]>([]);
+  const [selectedItemId, setSelectedItemId] = useState("");
+  const [selectedQty, setSelectedQty] = useState<number>(1);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
-  useEffect(() => {
-    setRequisitions(loadRequisitions());
-    setFinishedGoods(loadFinishedGoods());
+  // ── Load this location's requisitions ─────────────────────────────────────
+  // RLS on public.requisitions ensures the query already returns only rows
+  // belonging to this user's location_id. Do NOT add a client-side location
+  // filter — it will silently drop rows if the mapper field is missing or
+  // the legacy location TEXT column stores a different value format.
+  const fetchReqs = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const rows = await loadRequisitions(); // RLS handles isolation
+      setRequisitions(Array.isArray(rows) ? rows : []);
+    } finally {
+      setIsLoading(false);
+    }
   }, []);
 
-  // Compute values
-  const getReqValue = (req: any) => {
-    return req.lineItems.reduce((sum: number, li: any) => {
-      const fg = finishedGoods.find(f => f.id === li.id);
-      return sum + ((li.fulfilledQty || 0) * (fg?.valuePerUnit || 0));
-    }, 0);
-  };
+  useEffect(() => { fetchReqs(); }, [fetchReqs]);
 
-  const getReqRequestedValue = (req: any) => {
-    return req.lineItems.reduce((sum: number, li: any) => {
-      const fg = finishedGoods.find(f => f.id === li.id);
-      return sum + ((li.requestedQty || 0) * (fg?.valuePerUnit || 0));
-    }, 0);
-  };
+  // ── Load line items when a requisition is opened ───────────────────────────
+  // Only fetch once status has left draft/submitted — line items may not exist
+  // yet for very new records. For approved/rejected/fulfilled, always fetch.
+  useEffect(() => {
+    if (!selectedReq) { setReqLineItems([]); return; }
+    // Fetch for ALL statuses — HQ needs to see items before approval, location
+    // manager needs to see what they submitted. No status gate.
+    let cancelled = false;
+    setLineItemsLoading(true);
+    loadRequisitionItems(selectedReq.id).then((res) => {
+      if (!cancelled) {
+        setReqLineItems(res.success ? (res.data ?? []) : []);
+        setLineItemsLoading(false);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [selectedReq]);
 
-  // Compute metrics
-  const pendingCount = requisitions.filter(r => r.status === "Draft" || r.status === "Submitted").length;
-  const backorderCount = requisitions.filter(r => r.status === "Partial" || r.status === "Backordered").length;
-  
-  let locValues = new Map();
-  let totalValueSupplied = 0;
-
-  requisitions.forEach(r => {
-    if (r.status === "Fulfilled" || r.status === "Partial") {
-       const val = getReqValue(r);
-       locValues.set(r.location, (locValues.get(r.location) || 0) + val);
-       totalValueSupplied += val;
-    }
-  });
-
-  let topLocation = "N/A";
-  let maxVal = 0;
-  locValues.forEach((v, k) => {
-    if (v > maxVal) { maxVal = v; topLocation = k; }
-  });
-
-  const filteredReqs = requisitions.filter(r => {
+  // ── Filter ────────────────────────────────────────────────────────────────
+  const filtered = requisitions.filter((r) => {
     if (filterStatus !== "All" && r.status !== filterStatus) return false;
-    if (filterLocation !== "All" && r.location !== filterLocation) return false;
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
-      if (!r.id.toLowerCase().includes(q) && !r.location.toLowerCase().includes(q) && !r.requestedBy.toLowerCase().includes(q)) {
-        return false;
-      }
+      if (!String(r.id).toLowerCase().includes(q) && !String(r.notes || "").toLowerCase().includes(q)) return false;
     }
     return true;
   });
 
-  // Mock Request Generator
-  const createMockRequest = () => {
-    if (finishedGoods.length === 0) return;
-    const loc = locationsData[Math.floor(Math.random() * locationsData.length)];
-    const names = ["Alex R.", "Sarah J.", "Mike T.", "David W.", "Jessica K."];
-    const user = names[Math.floor(Math.random() * names.length)];
-    
-    // Pick 1-3 random items
-    const numItems = Math.floor(Math.random() * 3) + 1;
-    const items = [];
-    const usedIds = new Set();
-    
-    for(let i = 0; i < numItems; i++) {
-       const candidate = finishedGoods[Math.floor(Math.random() * finishedGoods.length)];
-       if(!candidate || usedIds.has(candidate.id)) continue;
-       usedIds.add(candidate.id);
-       
-       items.push({
-         id: candidate.id,
-         name: candidate.name,
-         unit: candidate.unit,
-         requestedQty: Math.floor(Math.random() * 15) + 5,
-         fulfilledQty: 0,
-         currentStock: candidate.currentStock
-       });
-    }
+  // ── Add line item to draft ────────────────────────────────────────────────
+  const addLineItem = () => {
+    if (!selectedItemId) return;
 
-    if (items.length === 0) return;
-
-    const newReq = {
-      id: `REQ-${2000 + requisitions.length + 1}`,
-      location: loc,
-      requestedBy: user,
-      date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-      status: "Submitted",
-      items: items.length,
-      notes: "Auto-generated mock request for HQ Finished Goods.",
-      lineItems: items
-    };
-
-    const newArr = [newReq, ...requisitions];
-    setRequisitions(newArr);
-    saveRequisitions(newArr);
-  };
-
-  const handleUpdateReqStatus = (reqId: string, newStatus: string) => {
-    const newArr = requisitions.map(r => {
-      if (r.id === reqId) {
-        return { ...r, status: newStatus };
-      }
-      return r;
-    });
-    setRequisitions(newArr);
-    saveRequisitions(newArr);
-    
-    if (selectedReq && selectedReq.id === reqId) {
-      setSelectedReq({ ...selectedReq, status: newStatus });
-    }
-  };
-
-  const handleToggleSelect = (reqId: string) => {
-    if (selectedReqIds.includes(reqId)) {
-      setSelectedReqIds(selectedReqIds.filter(id => id !== reqId));
+    if (fgMode) {
+      // ── Finished-goods mode ──────────────────────────────────────────────
+      const saleItem = saleItems.find(s => s.id === selectedItemId);
+      if (!saleItem) return;
+      if (lineItems.some(li => li.finishedGoodId === saleItem.id)) return; // dedupe
+      setLineItems(prev => [
+        ...prev,
+        {
+          itemId:            null,
+          finishedGoodId:    saleItem.id,
+          itemName:          saleItem.name,          // snapshot
+          unit:              saleItem.baseUnit,       // snapshot
+          unitPrice:         saleItem.effectivePrice, // price captured at selection time
+          quantityRequested: selectedQty,
+        },
+      ]);
     } else {
-      setSelectedReqIds([...selectedReqIds, reqId]);
+      // ── Raw inventory mode (HQ internal / legacy) ────────────────────────
+      if (lineItems.some(li => li.itemId === selectedItemId)) return; // dedupe
+      const inv = inventoryItems.find(i => i.id === selectedItemId);
+      if (!inv) return;
+      setLineItems(prev => [
+        ...prev,
+        {
+          itemId:            inv.id,
+          finishedGoodId:    null,
+          itemName:          inv.name,
+          unit:              inv.unit || inv.baseUnit || "",
+          unitPrice:         Number(inv.cost ?? 0),
+          quantityRequested: selectedQty,
+        },
+      ]);
     }
+
+    setSelectedItemId("");
+    setSelectedQty(1);
   };
 
-  const handleFulfillSelected = (forceIds?: string[]) => {
-    const targets = forceIds || selectedReqIds;
-    if (targets.length === 0) return;
-    
-    const selectedList = requisitions.filter(r => targets.includes(r.id));
-    if (selectedList.some(r => r.status !== "Approved" && r.status !== "Partial" && r.status !== "Backordered")) {
-      alert("Only 'Approved', 'Partial', or 'Backordered' requests can be fulfilled.");
+  const removeLineItem = (id: string) =>
+    setLineItems(prev => prev.filter(li => (li.finishedGoodId ?? li.itemId) !== id));
+
+  const updateQty = (id: string, qty: number) =>
+    setLineItems(prev =>
+      prev.map(li => (li.finishedGoodId ?? li.itemId) === id ? { ...li, quantityRequested: Math.max(0, qty) } : li)
+    );
+
+  // ── Commit create ─────────────────────────────────────────────────────────
+  const handleCreate = async () => {
+    setSaveError(null);
+    if (lineItems.length === 0) { setSaveError("Add at least one item."); return; }
+    if (lineItems.some(li => li.quantityRequested <= 0)) {
+      setSaveError("All items must have a quantity greater than 0.");
       return;
     }
 
-    const _fgStock = [...finishedGoods];
-    const _reqs = [...requisitions];
+    setIsSaving(true);
+    try {
+      const userId = await getCurrentUserId();
+      if (!userId) { setSaveError("Not authenticated."); return; }
+      if (!profile.locationId) { setSaveError("Your profile has no location assigned."); return; }
 
-    let fullSuccess = true;
-    let partialCount = 0;
+      const reqId = `REQ-${Date.now()}`;
+      const res = await saveNewRequisition(
+        {
+          id:          reqId,
+          location_id: profile.locationId,
+          created_by:  userId,
+          status:      "submitted",
+          notes:       draftNotes,
+          date:        new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
+        },
+        lineItems.map(li => ({
+          // FG-mode: set finished_good_id; raw-mode: set item_id
+          item_id:              li.finishedGoodId ? null     : li.itemId,
+          finished_good_id:     li.finishedGoodId ?? null,
+          item_name_snapshot:   li.itemName,
+          unit_snapshot:        li.unit,
+          quantity_requested:   li.quantityRequested,
+          unit_price:           li.unitPrice,
+          line_total:           parseFloat((li.quantityRequested * li.unitPrice).toFixed(2)),
+        }))
+      );
 
-    selectedList.forEach(req => {
-       const reqIndex = _reqs.findIndex(r => r.id === req.id);
-       if (reqIndex === -1) return;
-       
-       let allItemsFulfilled = true;
-       
-       const updatedLineItems = req.lineItems.map((li: any) => {
-          const fgIndex = _fgStock.findIndex(f => f.id === li.id);
-          if (fgIndex === -1) {
-            allItemsFulfilled = false;
-            return li;
-          }
+      if (!res.success) {
+        setSaveError(res.error?.message ?? "Save failed. Check console.");
+        return;
+      }
 
-          const remainingDemand = li.requestedQty - (li.fulfilledQty || 0);
-          if (remainingDemand <= 0) return li; // Already fulfilled
-
-          const availableStock = _fgStock[fgIndex].currentStock;
-          
-          if (availableStock >= remainingDemand) {
-             _fgStock[fgIndex].currentStock -= remainingDemand;
-             return { ...li, fulfilledQty: (li.fulfilledQty || 0) + remainingDemand };
-          } else if (availableStock > 0) {
-             _fgStock[fgIndex].currentStock = 0; 
-             allItemsFulfilled = false;
-             fullSuccess = false;
-             return { ...li, fulfilledQty: (li.fulfilledQty || 0) + availableStock };
-          } else {
-             allItemsFulfilled = false;
-             fullSuccess = false;
-             return li;
-          }
-       });
-
-       _reqs[reqIndex].lineItems = updatedLineItems;
-       
-       if (allItemsFulfilled) {
-         _reqs[reqIndex].status = "Fulfilled";
-       } else {
-         _reqs[reqIndex].status = "Partial";
-         partialCount++;
-       }
-    });
-
-    setFinishedGoods(_fgStock);
-    saveFinishedGoods(_fgStock);
-
-    setRequisitions(_reqs);
-    saveRequisitions(_reqs);
-    
-    setSelectedReqIds([]);
-
-    if (selectedReq) {
-      const updatedMatch = _reqs.find(r => r.id === selectedReq.id);
-      if (updatedMatch) setSelectedReq(updatedMatch);
-    }
-    
-    if (fullSuccess) {
-      alert(`Successfully fulfilled selected requisitions!`);
-    } else {
-      alert(`${partialCount} requisition(s) could only be partially fulfilled and are in backorder.`);
+      setLineItems([]);
+      setDraftNotes("");
+      setIsCreateOpen(false);
+      await fetchReqs();
+    } finally {
+      setIsSaving(false);
     }
   };
 
-  const hqProductionDemand = () => {
-    const relevantReqs = requisitions.filter(r => 
-      r.date === productionDate && 
-      (r.status === "Approved" || r.status === "Submitted" || r.status === "Draft" || r.status === "Partial" || r.status === "Backordered")
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center p-16 text-neutral-400 gap-2">
+        <Loader2 className="h-5 w-5 animate-spin" /> Loading your requisitions…
+      </div>
     );
-
-    const agg: Record<string, { totalQty: number, unit: string, locations: { loc: string, qty: number }[] }> = {};
-    
-    relevantReqs.forEach(req => {
-      req.lineItems.forEach((li: any) => {
-         const remainingQty = li.requestedQty - (li.fulfilledQty || 0);
-         if (remainingQty > 0) {
-            if (!agg[li.name]) {
-               agg[li.name] = { totalQty: 0, unit: li.unit, locations: [] };
-            }
-            agg[li.name].totalQty += remainingQty;
-            
-            const existingLoc = agg[li.name].locations.find(l => l.loc === req.location);
-            if (existingLoc) {
-               existingLoc.qty += remainingQty;
-            } else {
-               agg[li.name].locations.push({ loc: req.location, qty: remainingQty });
-            }
-         }
-      });
-    });
-
-    return agg;
-  };
-
-  const productionData = hqProductionDemand();
-  const productionEntries = Object.entries(productionData);
-  const toggleExpand = (itemName: string) => {
-    setExpandedRows(prev => prev.includes(itemName) ? prev.filter(i => i !== itemName) : [...prev, itemName]);
-  };
-
+  }
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 print:hidden">
+
+      {/* ── Header ─────────────────────────────────────────────────────── */}
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
-          <h2 className="text-2xl font-bold tracking-tight">Store Requisitions</h2>
-          <p className="text-neutral-500">Manage store demands and route them against HQ central kitchen Finished Goods.</p>
+          <h2 className="text-2xl font-bold tracking-tight">My Requisitions</h2>
+          <p className="text-neutral-500 text-sm mt-0.5 flex items-center gap-1.5">
+            <MapPin className="h-3.5 w-3.5" />
+            {profile.locationId}
+          </p>
         </div>
-        <div className="flex bg-neutral-100 p-1 rounded-lg border border-neutral-200 shadow-inner">
-           <button 
-             onClick={() => setActiveTab('overview')}
-             className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${activeTab === 'overview' ? 'bg-white text-brand-700 shadow-sm' : 'text-neutral-600 hover:text-neutral-900'}`}
-           >
-             Store Requisitions
-           </button>
-           <button 
-             onClick={() => setActiveTab('hq-production')}
-             className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors flex items-center gap-2 ${activeTab === 'hq-production' ? 'bg-white text-brand-700 shadow-sm' : 'text-neutral-600 hover:text-neutral-900'}`}
-           >
-             <ClipboardList className="h-4 w-4" />
-             HQ Production
-           </button>
-        </div>
+        <button
+          id="btn-create-requisition"
+          onClick={() => { setSaveError(null); setIsCreateOpen(true); }}
+          className="flex items-center gap-2 px-5 py-2.5 text-sm font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 shadow-sm transition-colors"
+        >
+          <Plus className="h-4 w-4" />
+          Create Requisition
+        </button>
       </div>
 
-     {activeTab === "overview" ? (
-      <>
-        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 print:hidden">
-          <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
-          <button 
-            onClick={createMockRequest}
-            className="flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium bg-neutral-100 border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-200 shadow-sm w-full sm:w-auto transition-colors"
-          >
-            <Sparkles className="h-4 w-4 text-brand-500" />
-            + Mock Store Req
-          </button>
-          <button 
-            onClick={() => handleFulfillSelected()}
-            disabled={selectedReqIds.length === 0}
-            className={`flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium rounded-lg shadow-sm w-full sm:w-auto transition-colors ${selectedReqIds.length > 0 ? "bg-brand-600 text-white hover:bg-brand-700" : "bg-neutral-200 text-neutral-400 cursor-not-allowed"}`}
-          >
-            <PackageCheck className="h-4 w-4" />
-            Fulfill ({selectedReqIds.length}) Requests
-          </button>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+      {/* ── Metrics ────────────────────────────────────────────────────── */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          { label: "Pending Workflow", value: pendingCount.toString(), color: "text-warning-600" },
-          { label: "Open Backorders", value: backorderCount.toString(), color: "text-danger-600" },
-          { label: "Top Consuming Location", value: topLocation, color: "text-brand-600" },
-          { label: "Total Value Supplied", value: `$${totalValueSupplied.toFixed(2)}`, color: "text-success-600" }
-        ].map((stat, i) => (
+          { label: "Total", value: requisitions.length, color: "text-neutral-800" },
+          { label: "Pending Review", value: requisitions.filter(r => r.status === "submitted" || r.status === "Submitted").length, color: "text-warning-600" },
+          { label: "Approved", value: requisitions.filter(r => r.status === "approved" || r.status === "Approved").length, color: "text-brand-600" },
+          { label: "Fulfilled", value: requisitions.filter(r => r.status === "fulfilled" || r.status === "Fulfilled").length, color: "text-success-600" },
+        ].map((s, i) => (
           <Card key={i} className="shadow-sm border-neutral-200">
-            <CardContent className="p-4 flex flex-col gap-1 text-center sm:text-left">
-              <span className="text-xs text-neutral-500 font-medium">{stat.label}</span>
-              <span className={`text-2xl font-bold ${stat.color}`}>{stat.value}</span>
+            <CardContent className="p-4">
+              <span className="text-xs text-neutral-500 font-medium block">{s.label}</span>
+              <span className={`text-2xl font-bold ${s.color}`}>{s.value}</span>
             </CardContent>
           </Card>
         ))}
       </div>
 
+      {/* ── Table ──────────────────────────────────────────────────────── */}
       <Card className="shadow-sm border-neutral-200 overflow-hidden">
-        <CardHeader className="flex flex-col sm:flex-row space-y-4 sm:space-y-0 sm:items-center justify-between pb-4 border-b border-neutral-100 bg-white">
-          <div className="relative w-full sm:w-[400px]">
-            <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-              <Search className="h-4 w-4 text-neutral-400" />
-            </div>
-            <input 
-              type="text" 
-              placeholder="Search Req ID, location, or requester..." 
+        <CardHeader className="flex flex-col sm:flex-row gap-3 items-start sm:items-center pb-4 border-b border-neutral-100 bg-white pt-4 px-4">
+          <div className="relative w-full sm:w-80">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-neutral-400 pointer-events-none" />
+            <input
+              type="text"
+              placeholder="Search requisitions…"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9 pr-4 py-1.5 border border-neutral-200 rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 focus:border-brand-500 w-full bg-neutral-50 hover:bg-white transition-colors"
+              className="pl-9 pr-4 py-1.5 border border-neutral-200 rounded-md text-sm w-full bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
             />
           </div>
-          <div className="flex flex-wrap gap-2">
-            <select 
-               className="px-3 py-1.5 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm transition-colors"
-               value={filterStatus}
-               onChange={(e) => setFilterStatus(e.target.value)}
-            >
-               <option value="All">All Statuses</option>
-               <option value="Draft">Draft</option>
-               <option value="Submitted">Submitted</option>
-               <option value="Approved">Approved</option>
-               <option value="Partial">Partial</option>
-               <option value="Backordered">Backordered</option>
-               <option value="Fulfilled">Fulfilled</option>
-               <option value="Rejected">Rejected</option>
-            </select>
-            <select 
-               className="px-3 py-1.5 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm transition-colors"
-               value={filterLocation}
-               onChange={(e) => setFilterLocation(e.target.value)}
-            >
-               <option value="All">All Locations</option>
-               {locationsData.map(l => <option key={l} value={l}>{l}</option>)}
-            </select>
-          </div>
+          <select
+            value={filterStatus}
+            onChange={(e) => setFilterStatus(e.target.value)}
+            className="px-3 py-1.5 text-sm border border-neutral-200 bg-white rounded-lg outline-none focus:ring-1 focus:ring-brand-500"
+          >
+            <option value="All">All Statuses</option>
+            <option value="draft">Draft</option>
+            <option value="submitted">Submitted</option>
+            <option value="approved">Approved</option>
+            <option value="rejected">Rejected</option>
+            <option value="fulfilled">Fulfilled</option>
+          </select>
         </CardHeader>
         <CardContent className="p-0">
           <Table>
             <TableHeader className="bg-neutral-50/80 text-xs text-neutral-500 uppercase tracking-wider">
               <TableRow>
-                <TableHead className="w-[40px] px-6 py-3">
-                  <input 
-                    type="checkbox" 
-                    className="rounded border-neutral-300 text-brand-600 focus:ring-brand-500"
-                     onChange={(e) => {
-                       if (e.target.checked) {
-                         const approvedReqs = filteredReqs.filter(r => r.status === "Approved" || r.status === "Partial" || r.status === "Backordered").map(r => r.id);
-                         const combined = Array.from(new Set([...selectedReqIds, ...approvedReqs]));
-                         setSelectedReqIds(combined);
-                       } else {
-                         setSelectedReqIds([]);
-                       }
-                    }}
-                  />
-                </TableHead>
-                <TableHead className="py-3">Request ID</TableHead>
-                <TableHead className="py-3">Location</TableHead>
-                <TableHead className="py-3">Requested By</TableHead>
+                <TableHead className="py-3 px-6">Request ID</TableHead>
                 <TableHead className="py-3">Date</TableHead>
                 <TableHead className="py-3">Items</TableHead>
-                <TableHead className="py-3">Value Supplied</TableHead>
+                <TableHead className="py-3">Total</TableHead>
+                <TableHead className="py-3">Notes</TableHead>
                 <TableHead className="py-3">Status</TableHead>
-                <TableHead className="px-6 py-3 text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filteredReqs.length > 0 ? filteredReqs.map((req) => (
-                  <TableRow 
-                  key={req.id} 
-                  className={`cursor-pointer transition-colors hover:bg-neutral-50/50 ${selectedReqIds.includes(req.id) ? 'bg-brand-50/30' : ''}`}
-                  onClick={(e) => {
-                     if ((e.target as HTMLElement).closest('input[type="checkbox"]')) return;
-                     setSelectedReq(req);
-                  }}
+              {filtered.length > 0 ? filtered.map((req) => (
+                <TableRow
+                  key={req.id}
+                  className="cursor-pointer hover:bg-neutral-50/50 transition-colors"
+                  onClick={() => setSelectedReq(req)}
                 >
-                  <TableCell className="px-6">
-                    <input 
-                      type="checkbox"
-                      checked={selectedReqIds.includes(req.id)}
-                      onChange={() => handleToggleSelect(req.id)}
-                      disabled={req.status !== "Approved" && req.status !== "Partial" && req.status !== "Backordered"}
-                      className="rounded border-neutral-300 text-brand-600 focus:ring-brand-500 disabled:opacity-50"
-                    />
-                  </TableCell>
-                  <TableCell className="py-4 font-semibold text-brand-900">
-                    <div className="flex items-center gap-2 group-hover:text-brand-600 transition-colors">
+                  <TableCell className="px-6 py-4 font-semibold text-brand-900">
+                    <div className="flex items-center gap-2">
                       <Inbox className="h-4 w-4 text-neutral-400" />
                       {req.id}
                     </div>
                   </TableCell>
-                  <TableCell className="py-4 font-medium text-neutral-900 text-sm">
-                    <div className="flex items-center gap-1.5">
-                       <MapPin className="h-3.5 w-3.5 text-neutral-400" />
-                       {req.location}
-                    </div>
-                  </TableCell>
-                  <TableCell className="py-4 text-sm text-neutral-600">{req.requestedBy}</TableCell>
                   <TableCell className="py-4 text-sm text-neutral-500 flex items-center gap-1.5">
                     <Clock className="h-3.5 w-3.5 text-neutral-400" /> {req.date}
                   </TableCell>
                   <TableCell className="py-4 text-sm font-medium text-neutral-700">{req.items}</TableCell>
-                  <TableCell className="py-4 text-sm font-semibold text-success-600">
-                    ${getReqValue(req).toFixed(2)}
+                  <TableCell className="py-4 text-sm font-semibold text-neutral-800">
+                    {req.totalAmount > 0
+                      ? `$${Number(req.totalAmount).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                      : <span className="text-neutral-400">—</span>}
                   </TableCell>
-                  <TableCell className="py-4">
-                    <Badge 
-                      variant={req.status === "Approved" ? "default" : req.status === "Fulfilled" ? "success" : req.status === "Rejected" ? "danger" : "warning"}
-                      className={req.status === "Draft" || req.status === "Submitted" ? "bg-warning-50 text-warning-700" : req.status === "Partial" || req.status === "Backordered" ? "bg-danger-50 text-danger-700" : ""}
-                    >
-                      {req.status}
-                    </Badge>
-                  </TableCell>
-                  <TableCell className="px-6 py-4 text-right">
-                     <span className="text-brand-600 hover:text-brand-700 text-sm font-medium transition-colors">Review</span>
-                  </TableCell>
+                  <TableCell className="py-4 text-sm text-neutral-500 max-w-xs truncate">{req.notes || "—"}</TableCell>
+                  <TableCell className="py-4"><StatusBadge status={req.status} /></TableCell>
                 </TableRow>
               )) : (
-                 <TableRow>
-                   <TableCell colSpan={9} className="text-center py-10 text-neutral-500 text-sm">
-                      No matching requests located.
-                   </TableCell>
-                 </TableRow>
+                <TableRow>
+                  <TableCell colSpan={5} className="text-center py-12 text-neutral-400 text-sm">
+                    No requisitions yet. Create your first one above.
+                  </TableCell>
+                </TableRow>
               )}
             </TableBody>
           </Table>
         </CardContent>
       </Card>
 
-      {/* Review Requisition Drawer */}
+      {/* ── View Requisition Drawer ─────────────────────────────────────── */}
       <Drawer
-        isOpen={!!selectedReq}
-        onClose={() => setSelectedReq(null)}
+        isOpen={!!selectedReq && !isCreateOpen}
+        onClose={() => { setSelectedReq(null); setReqLineItems([]); }}
         title={`Requisition ${selectedReq?.id}`}
-        description={`Submitted by ${selectedReq?.requestedBy} from ${selectedReq?.location} on ${selectedReq?.date}`}
-        footer={
-          <div className="w-full flex flex-col gap-2">
-            <div className="flex items-center justify-between w-full border-t border-neutral-200 pt-4 mt-2">
-               <div className="flex flex-col">
-                  <span className="text-xs font-semibold uppercase text-neutral-500 tracking-wider">Value Supplied</span>
-                  <span className="text-xl font-bold text-success-600 flex items-center gap-1">
-                     <CircleDollarSign className="h-5 w-5" />
-                     {selectedReq ? getReqValue(selectedReq).toFixed(2) : "0.00"} 
-                     <span className="text-sm font-medium text-neutral-400">/ ${selectedReq ? getReqRequestedValue(selectedReq).toFixed(2) : "0.00"}</span>
+        description={`Created ${selectedReq?.date} · Status: ${selectedReq?.status}`}
+      >
+        <div className="space-y-4">
+          {selectedReq?.notes && (
+            <div className="bg-brand-50 border border-brand-100 rounded-lg p-4">
+              <h4 className="text-xs font-semibold text-brand-800 uppercase tracking-wider mb-1">Notes</h4>
+              <p className="text-sm text-neutral-700">{selectedReq.notes}</p>
+            </div>
+          )}
+
+          {/* Rejected banner */}
+          {(selectedReq?.status === "rejected" || selectedReq?.status === "Rejected") && (
+            <div className="bg-danger-50 border border-danger-200 rounded-lg p-4 flex items-center gap-3">
+              <XSquare className="h-5 w-5 text-danger-600 shrink-0" />
+              <p className="text-sm text-danger-700 font-medium">This requisition was rejected by HQ.</p>
+            </div>
+          )}
+
+          {/* Pending review — only while draft or submitted */}
+          {["draft", "submitted"].includes((selectedReq?.status ?? "").toLowerCase()) && (
+            <div className="bg-neutral-50 border border-neutral-200 rounded-lg p-4 flex items-center gap-3">
+              <Loader2 className="h-4 w-4 text-neutral-400 shrink-0" />
+              <p className="text-sm text-neutral-500">
+                Awaiting HQ review. Line items will be visible once approved or actioned.
+              </p>
+            </div>
+          )}
+
+          {/* Line items — visible once HQ has actioned the requisition */}
+          {reqLineItems.length > 0 && (() => {
+            // Compute total from the loaded line items (source of truth: requisition_items.line_total)
+            // Falls back to req.totalAmount (stored in DB) if line items haven't loaded yet.
+            const lineTotal = reqLineItems.reduce(
+              (sum: number, li: any) => sum + Number(li.lineTotal ?? li.line_total ?? 0), 0
+            );
+            const displayTotal = lineTotal > 0 ? lineTotal : (selectedReq?.totalAmount ?? 0);
+            return (
+              <div className="border border-neutral-200 rounded-lg overflow-hidden">
+                <Table>
+                  <TableHeader className="bg-neutral-50 text-[11px] uppercase text-neutral-500 tracking-wider">
+                    <TableRow>
+                      <TableHead className="py-2 px-4">Item</TableHead>
+                      <TableHead className="py-2">Requested</TableHead>
+                      <TableHead className="py-2">Unit Price</TableHead>
+                      <TableHead className="py-2 text-right">Line Total</TableHead>
+                      <TableHead className="py-2">Approved</TableHead>
+                      <TableHead className="py-2">Fulfilled</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {reqLineItems.map((li: any) => (
+                      <TableRow key={li.id} className="hover:bg-neutral-50/50">
+                        <TableCell className="py-3 px-4 text-sm font-medium text-neutral-800">
+                          {li.itemName}
+                        </TableCell>
+                        <TableCell className="py-3 text-sm text-neutral-700">
+                          {li.quantityRequested}
+                        </TableCell>
+                        <TableCell className="py-3 text-sm text-neutral-700">
+                          {li.unitPrice != null
+                            ? <span className="font-medium">${Number(li.unitPrice).toFixed(2)}</span>
+                            : <span className="text-neutral-400">—</span>}
+                        </TableCell>
+                        <TableCell className="py-3 text-sm text-right font-medium text-neutral-800">
+                          {li.lineTotal != null || li.line_total != null
+                            ? `$${Number(li.lineTotal ?? li.line_total).toFixed(2)}`
+                            : (li.unitPrice != null && li.quantityRequested != null)
+                              ? `$${(Number(li.unitPrice) * Number(li.quantityRequested)).toFixed(2)}`
+                              : <span className="text-neutral-400">—</span>}
+                        </TableCell>
+                        <TableCell className="py-3 text-sm">
+                          {li.quantityApproved != null
+                            ? <span className="font-semibold text-brand-700">{li.quantityApproved}</span>
+                            : <span className="text-neutral-400">—</span>}
+                        </TableCell>
+                        <TableCell className="py-3 text-sm">
+                          {li.quantityFulfilled != null
+                            ? <span className="font-semibold text-success-700">{li.quantityFulfilled}</span>
+                            : <span className="text-neutral-400">—</span>}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+                {/* Grand total footer */}
+                <div className="flex items-center justify-between px-4 py-3 bg-neutral-50 border-t border-neutral-200">
+                  <span className="text-xs font-semibold text-neutral-600 uppercase tracking-wider">Grand Total</span>
+                  <span className="text-base font-bold text-neutral-900">
+                    {displayTotal > 0 ? `$${displayTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "—"}
                   </span>
-               </div>
-               
-               <div className="flex items-center gap-3">
-                 {(selectedReq?.status === "Submitted" || selectedReq?.status === "Draft") && (
-                   <>
-                     <button 
-                       className="px-4 py-2 text-sm font-medium bg-white border border-danger-200 text-danger-700 rounded-lg hover:bg-danger-50 transition-colors shadow-sm flex items-center gap-2"
-                       onClick={() => handleUpdateReqStatus(selectedReq.id, "Rejected")}
-                     >
-                       <XSquare className="h-4 w-4" /> Reject
-                     </button>
-                     <button 
-                       className="px-4 py-2 text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors shadow-sm flex items-center gap-2"
-                       onClick={() => handleUpdateReqStatus(selectedReq.id, "Approved")}
-                     >
-                       <CheckCircle2 className="h-4 w-4" /> Approve
-                     </button>
-                   </>
-                 )}
-                 {(selectedReq?.status === "Approved" || selectedReq?.status === "Partial" || selectedReq?.status === "Backordered") && (
-                    <button 
-                       className="px-4 py-2 text-sm font-medium bg-success-600 text-white rounded-lg hover:bg-success-700 transition-colors shadow-sm flex items-center gap-2"
-                       onClick={() => {
-                           handleFulfillSelected([selectedReq.id]);
-                       }}
-                     >
-                       <PackageCheck className="h-4 w-4" /> Fulfill Ready Stock
-                    </button>
-                 )}
-                 {selectedReq?.status === "Fulfilled" && (
-                   <span className="px-4 py-2 text-sm font-medium text-success-700 flex items-center gap-2">
-                     <CheckCircle2 className="h-4 w-4" /> Completed
-                   </span>
-                 )}
-               </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Approved but no items returned yet — edge case */}
+          {lineItemsLoading && (
+            <div className="flex items-center gap-2 text-sm text-neutral-400 py-2">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading items…
+            </div>
+          )}
+        </div>
+      </Drawer>
+
+      {/* ── Create Requisition Drawer ───────────────────────────────────── */}
+      <Drawer
+        isOpen={isCreateOpen}
+        onClose={() => { setIsCreateOpen(false); setSaveError(null); }}
+        title="Create Requisition"
+        description={`Requesting from: ${profile.locationId}`}
+        footer={
+          <div className="w-full flex flex-col gap-3">
+            {saveError && (
+              <div className="flex items-center gap-2 bg-danger-50 border border-danger-200 rounded-lg px-3 py-2 text-sm text-danger-700">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                {saveError}
+              </div>
+            )}
+            {/* Grand total preview — shown whenever there is at least one line item */}
+            {lineItems.length > 0 && (
+              <div className="flex items-center justify-between px-4 py-2.5 bg-neutral-50 border border-neutral-200 rounded-lg">
+                <span className="text-sm text-neutral-600">Grand Total</span>
+                <span className="text-lg font-bold text-brand-900">
+                  ${lineItems.reduce((s, li) => s + li.quantityRequested * li.unitPrice, 0).toFixed(2)}
+                </span>
+              </div>
+            )}
+            <div className="flex items-center justify-end gap-3 border-t border-neutral-200 pt-4">
+              <button
+                onClick={() => { setIsCreateOpen(false); setSaveError(null); }}
+                className="px-4 py-2 text-sm font-medium border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                id="btn-submit-requisition"
+                onClick={handleCreate}
+                disabled={isSaving || lineItems.length === 0}
+                className="flex items-center gap-2 px-5 py-2 text-sm font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                {isSaving ? "Submitting…" : "Submit Requisition"}
+              </button>
             </div>
           </div>
         }
       >
         <div className="space-y-6">
-           <div className="bg-brand-50 border border-brand-100 rounded-lg p-4">
-             <h4 className="text-xs font-semibold text-brand-800 uppercase tracking-wider mb-1">Notes / Reason</h4>
-             <p className="text-sm text-neutral-700">{selectedReq?.notes || "No notes provided."}</p>
-           </div>
+          {/* Location badge — read-only */}
+          <div className="flex items-center gap-2 bg-neutral-50 border border-neutral-200 rounded-lg px-4 py-3">
+            <MapPin className="h-4 w-4 text-brand-500" />
+            <span className="text-sm font-medium text-neutral-700">Location:</span>
+            <span className="text-sm font-bold text-neutral-900">{profile.locationId}</span>
+            <span className="ml-auto text-xs text-neutral-400">(auto-assigned)</span>
+          </div>
 
-           <div className="bg-white border border-neutral-200 rounded-lg overflow-hidden mt-6">
+          {/* Notes */}
+          <div>
+            <label className="block text-xs font-semibold text-neutral-600 uppercase tracking-wider mb-1.5">
+              Notes / Reason
+            </label>
+            <textarea
+              rows={3}
+              value={draftNotes}
+              onChange={(e) => setDraftNotes(e.target.value)}
+              placeholder="Describe why items are needed…"
+              className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-brand-500 bg-neutral-50 resize-none"
+            />
+          </div>
+
+          {/* Add item row */}
+          <div>
+            <label className="block text-xs font-semibold text-neutral-600 uppercase tracking-wider mb-1.5">
+              {fgMode ? "Add HQ Finished Goods" : "Add Items"}
+            </label>
+            <div className="flex gap-2">
+              <select
+                value={selectedItemId}
+                onChange={e => setSelectedItemId(e.target.value)}
+                className="flex-1 px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
+              >
+                {fgMode ? (
+                  <>
+                    <option value="">Select HQ finished good…</option>
+                    {saleItems
+                      .filter(s => s.isActive && s.isRequisitionable)
+                      .filter(s => !lineItems.some(li => li.finishedGoodId === s.id))
+                      .map(s => (
+                        <option key={s.id} value={s.id}>
+                          {s.name} ({s.baseUnit}) — ${s.effectivePrice.toFixed(2)}/{s.baseUnit} · {(
+                            s.stockStatus === 'in_stock'     ? '✓ In Stock'    :
+                            s.stockStatus === 'low_stock'    ? '⚠ Low Stock'  :
+                                                               '✗ Out of Stock'
+                          )}
+                        </option>
+                      ))}
+                  </>
+                ) : (
+                  <>
+                    <option value="">Select inventory item…</option>
+                    {inventoryItems
+                      .filter(i => !lineItems.some(li => li.itemId === i.id))
+                      .map(i => (
+                        <option key={i.id} value={i.id}>
+                          {i.name} ({i.unit || i.baseUnit || "unit"})
+                        </option>
+                      ))}
+                  </>
+                )}
+              </select>
+              <input
+                type="number"
+                min={1}
+                value={selectedQty}
+                onChange={(e) => setSelectedQty(Math.max(1, Number(e.target.value)))}
+                className="w-24 px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
+              />
+              <button
+                onClick={addLineItem}
+                disabled={!selectedItemId}
+                className="px-3 py-2 text-sm font-medium bg-brand-100 text-brand-700 rounded-lg hover:bg-brand-200 transition-colors disabled:opacity-40"
+              >
+                <Plus className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+
+          {/* Line items list */}
+          {lineItems.length > 0 && (() => {
+            // Compute totals live from the current draft state —
+            // same formula used on submit: quantity × unit_price
+            const grandTotal = lineItems.reduce(
+              (sum, li) => sum + li.quantityRequested * li.unitPrice, 0
+            );
+            return (
+              <div className="border border-neutral-200 rounded-lg overflow-hidden">
+                <Table>
+                  <TableHeader className="bg-neutral-50 text-[11px] uppercase text-neutral-500 tracking-wider">
+                    <TableRow>
+                      <TableHead className="py-2 px-4">Item</TableHead>
+                      <TableHead className="py-2">Qty</TableHead>
+                      <TableHead className="py-2 text-right">Unit Price</TableHead>
+                      <TableHead className="py-2 text-right">Line Total</TableHead>
+                      <TableHead className="py-2 w-10" />
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {lineItems.map((li) => (
+                      <TableRow key={li.itemId}>
+                        <TableCell className="py-2 px-4 text-sm font-medium text-neutral-800">
+                          {li.itemName}
+                          <span className="ml-1 text-xs text-neutral-400">{li.unit}</span>
+                        </TableCell>
+                        <TableCell className="py-2">
+                          <input
+                            type="number"
+                            min={1}
+                            value={li.quantityRequested}
+                            onChange={(e) => updateQty(li.itemId, Number(e.target.value))}
+                            className="w-20 px-2 py-1 text-sm border border-neutral-200 rounded focus:outline-none focus:ring-1 focus:ring-brand-500"
+                          />
+                        </TableCell>
+                        <TableCell className="py-2 text-right text-sm text-neutral-500">
+                          {li.unitPrice > 0 ? `$${li.unitPrice.toFixed(2)}` : <span className="text-neutral-300">—</span>}
+                        </TableCell>
+                        <TableCell className="py-2 text-right text-sm font-medium text-neutral-800">
+                          ${(li.quantityRequested * li.unitPrice).toFixed(2)}
+                        </TableCell>
+                        <TableCell className="py-2">
+                          <button onClick={() => removeLineItem(li.itemId)} className="text-neutral-400 hover:text-danger-600 transition-colors">
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+                {/* Grand total footer */}
+                <div className="flex items-center justify-between px-4 py-3 bg-brand-50 border-t border-brand-100">
+                  <span className="text-xs font-semibold text-brand-700 uppercase tracking-wider">Grand Total</span>
+                  <span className="text-base font-bold text-brand-900">${grandTotal.toFixed(2)}</span>
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      </Drawer>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HQ ADMIN VIEW  (unchanged logic, cleaned up)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const locationsData = ["Downtown", "Uptown", "Westside", "North Hills", "South Point"];
+
+function HQAdminView({
+  finishedGoods: initialFG,
+  profile,
+}: {
+  finishedGoods: any[];
+  profile: import("@/lib/auth").UserProfile | null;
+}) {
+  const [requisitions, setRequisitions] = useState<any[]>([]);
+  const [finishedGoods, setFinishedGoods] = useState<any[]>(initialFG);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [filterStatus, setFilterStatus] = useState("All");
+  const [filterLocation, setFilterLocation] = useState("All");
+  const [selectedReq, setSelectedReq] = useState<any>(null);
+  const [selectedReqIds, setSelectedReqIds] = useState<string[]>([]);
+  const [activeTab, setActiveTab] = useState<"overview" | "hq-production">("overview");
+  const [productionDate, setProductionDate] = useState<string>(
+    new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+  );
+  const [expandedRows, setExpandedRows] = useState<string[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  // Line items fetched from requisition_items table on drawer open
+  const [hqReqItems, setHqReqItems] = useState<any[]>([]);
+  const [hqItemsLoading, setHqItemsLoading] = useState(false);
+  // Cache line items per req id so table rows show real values once a req is opened
+  const [reqItemsCache, setReqItemsCache] = useState<Map<string, any[]>>(new Map());
+
+  useEffect(() => {
+    async function fetchData() {
+      setIsLoading(true);
+      try {
+        const [reqs, fg] = await Promise.all([loadRequisitions(), loadFinishedGoods()]);
+        setRequisitions(Array.isArray(reqs) ? reqs : []);
+        setFinishedGoods(Array.isArray(fg) ? fg : []);
+      } finally {
+        setIsLoading(false);
+      }
+    }
+    fetchData();
+  }, []);
+
+  // Fetch line items from requisition_items whenever a requisition is opened
+  useEffect(() => {
+    if (!selectedReq) { setHqReqItems([]); return; }
+    // Serve from cache immediately to avoid flicker on re-open
+    if (reqItemsCache.has(selectedReq.id)) {
+      setHqReqItems(reqItemsCache.get(selectedReq.id)!);
+      setHqItemsLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setHqItemsLoading(true);
+    loadRequisitionItems(selectedReq.id).then((res) => {
+      if (!cancelled) {
+        const items = res.success ? (res.data ?? []) : [];
+        setHqReqItems(items);
+        setHqItemsLoading(false);
+        // Persist so table-level value helpers can use real data for this row
+        setReqItemsCache(prev => new Map(prev).set(selectedReq.id, items));
+      }
+    });
+    return () => { cancelled = true; };
+  }, [selectedReq]);
+
+  // Value helpers — use cached requisition_items when available;
+  // fall back to header total_amount for requested value on not-yet-opened rows.
+  const getReqValue = (req: any) => {
+    // items available if this req was opened (cache) or is currently selected
+    const items = reqItemsCache.get(req.id) ?? (req.id === selectedReq?.id ? hqReqItems : null);
+    if (items) {
+      return items.reduce((sum: number, li: any) => {
+        const price     = Number(li.unitPrice          ?? li.unit_price           ?? 0);
+        const fulfilled = Number(li.quantityFulfilled  ?? li.quantity_fulfilled   ?? 0);
+        return sum + fulfilled * price;
+      }, 0);
+    }
+    // Line items not loaded yet — fulfilled value unknown, show 0
+    return 0;
+  };
+
+  const getReqRequestedValue = (req: any) => {
+    const items = reqItemsCache.get(req.id) ?? (req.id === selectedReq?.id ? hqReqItems : null);
+    if (items) {
+      return items.reduce((sum: number, li: any) => {
+        const price     = Number(li.unitPrice         ?? li.unit_price          ?? 0);
+        const requested = Number(li.quantityRequested ?? li.quantity_requested  ?? 0);
+        return sum + requested * price;
+      }, 0);
+    }
+    // Fall back to header total_amount — always present, accurate for requested value
+    return Number(req.total_amount ?? req.totalAmount ?? 0);
+  };
+
+  // Canonical status sets — DB stores lowercase; normalize before comparing
+  const FULFILLABLE_STATUSES  = new Set(["approved", "partial", "backordered"]);
+  const FULFILLED_STATUSES    = new Set(["fulfilled", "partial"]);
+  const PENDING_STATUSES      = new Set(["draft", "submitted"]);
+
+  const pendingCount    = requisitions.filter((r) => PENDING_STATUSES.has((r.status ?? "").toLowerCase())).length;
+  const backorderCount  = requisitions.filter((r) => (r.status ?? "").toLowerCase() === "backordered").length;
+
+  let locValues = new Map<string, number>();
+  let totalValueSupplied = 0;
+  requisitions.forEach((r) => {
+    if (FULFILLED_STATUSES.has((r.status ?? "").toLowerCase())) {
+      const val = getReqValue(r);
+      locValues.set(r.location, (locValues.get(r.location) || 0) + val);
+      totalValueSupplied += val;
+    }
+  });
+  let topLocation = "N/A";
+  let maxVal = 0;
+  locValues.forEach((v, k) => { if (v > maxVal) { maxVal = v; topLocation = k; } });
+
+  const filteredReqs = requisitions.filter((r) => {
+    if (filterStatus !== "All" && r.status !== filterStatus) return false;
+    if (filterLocation !== "All" && r.location !== filterLocation) return false;
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      if (!String(r.id).toLowerCase().includes(q) &&
+          !String(r.location || "").toLowerCase().includes(q) &&
+          !String(r.requestedBy || r.requestedby || "").toLowerCase().includes(q)) return false;
+    }
+    return true;
+  });
+
+  const createMockRequest = async () => {
+    if (finishedGoods.length === 0) return;
+    const loc = locationsData[Math.floor(Math.random() * locationsData.length)];
+    const names = ["Alex R.", "Sarah J.", "Mike T.", "David W.", "Jessica K."];
+    const user = names[Math.floor(Math.random() * names.length)];
+    const numItems = Math.floor(Math.random() * 3) + 1;
+    const items: any[] = [];
+    const usedIds = new Set<string>();
+    for (let i = 0; i < numItems; i++) {
+      const candidate = finishedGoods[Math.floor(Math.random() * finishedGoods.length)];
+      if (!candidate || usedIds.has(candidate.id)) continue;
+      usedIds.add(candidate.id);
+      items.push({ id: candidate.id, name: candidate.name, unit: candidate.unit, requestedQty: Math.floor(Math.random() * 15) + 5, fulfilledQty: 0, currentStock: candidate.currentStock });
+    }
+    if (items.length === 0) return;
+    const newReq = {
+      id: `REQ-${2000 + requisitions.length + 1}`,
+      location: loc, requestedBy: user,
+      date: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
+      status: "Submitted", items: items.length, notes: "Auto-generated mock request.", lineItems: items,
+    };
+    const newArr = [newReq, ...requisitions];
+    const res = await saveRequisitions(newArr);
+    if (!res?.success) { alert(`DB Error: ${res?.error?.message}`); return; }
+    setRequisitions(newArr);
+  };
+
+  const handleUpdateReqStatus = async (reqId: string, newStatus: string) => {
+    // Use targeted single-row update — NOT a full array upsert — to avoid
+    // CHECK constraint violations from legacy capitalized statuses in other rows.
+    const res = await updateRequisitionStatus(reqId, newStatus);
+    if (!res?.success) { alert(`DB Error: ${res?.error?.message}`); return; }
+    const lower = newStatus.toLowerCase();
+    setRequisitions((prev) => prev.map((r) => r.id === reqId ? { ...r, status: lower } : r));
+    if (selectedReq?.id === reqId) setSelectedReq({ ...selectedReq, status: lower });
+  };
+
+  const handleToggleSelect = (reqId: string) =>
+    setSelectedReqIds((prev) => prev.includes(reqId) ? prev.filter((id) => id !== reqId) : [...prev, reqId]);
+
+  const handleFulfillSelected = async (forceIds?: string[]) => {
+    const targets = forceIds || selectedReqIds;
+    if (targets.length === 0) return;
+    const selectedList = requisitions.filter((r) => targets.includes(r.id));
+    if (selectedList.some((r) => !FULFILLABLE_STATUSES.has((r.status ?? "").toLowerCase()))) {
+      alert("Only approved, partial, or backordered requests can be fulfilled.");
+      return;
+    }
+    const _fg = [...finishedGoods];
+    const _reqs = [...requisitions];
+    let fullSuccess = true;
+    let partialCount = 0;
+    selectedList.forEach((req) => {
+      const reqIndex = _reqs.findIndex((r) => r.id === req.id);
+      if (reqIndex === -1) return;
+      let allFulfilled = true;
+      const updatedLineItems = (req.lineItems || []).map((li: any) => {
+        const fgIndex = _fg.findIndex((f) => f.id === li.id);
+        if (fgIndex === -1) { allFulfilled = false; return li; }
+        const remaining = li.requestedQty - (li.fulfilledQty || 0);
+        if (remaining <= 0) return li;
+        const avail = _fg[fgIndex].currentStock;
+        if (avail >= remaining) { _fg[fgIndex].currentStock -= remaining; return { ...li, fulfilledQty: (li.fulfilledQty || 0) + remaining }; }
+        else if (avail > 0) { _fg[fgIndex].currentStock = 0; allFulfilled = false; fullSuccess = false; return { ...li, fulfilledQty: (li.fulfilledQty || 0) + avail }; }
+        else { allFulfilled = false; fullSuccess = false; return li; }
+      });
+      _reqs[reqIndex].lineItems = updatedLineItems;
+      if (allFulfilled) { _reqs[reqIndex].status = "Fulfilled"; } else { _reqs[reqIndex].status = "Partial"; partialCount++; }
+    });
+    const fgRes = await saveFinishedGoods(_fg);
+    if (!fgRes?.success) { alert(`DB Error (Inventory): ${fgRes?.error?.message}`); return; }
+    setFinishedGoods(_fg);
+    const reqRes = await saveRequisitions(_reqs);
+    if (!reqRes?.success) { alert(`DB Error (Requisitions): ${reqRes?.error?.message}`); return; }
+    setRequisitions(_reqs);
+    setSelectedReqIds([]);
+    if (selectedReq) { const m = _reqs.find((r) => r.id === selectedReq.id); if (m) setSelectedReq(m); }
+    if (fullSuccess) alert("Successfully fulfilled selected requisitions!");
+    else alert(`${partialCount} requisition(s) partially fulfilled — in backorder.`);
+  };
+
+  const hqProductionDemand = () => {
+    const relevant = requisitions.filter(
+      (r) => r.date === productionDate &&
+        FULFILLABLE_STATUSES.has((r.status ?? "").toLowerCase()) ||
+        PENDING_STATUSES.has((r.status ?? "").toLowerCase())
+    );
+    const agg: Record<string, { totalQty: number; unit: string; locations: { loc: string; qty: number }[] }> = {};
+    relevant.forEach((req) => {
+      (req.lineItems || []).forEach((li: any) => {
+        const rem = li.requestedQty - (li.fulfilledQty || 0);
+        if (rem > 0) {
+          if (!agg[li.name]) agg[li.name] = { totalQty: 0, unit: li.unit, locations: [] };
+          agg[li.name].totalQty += rem;
+          const existing = agg[li.name].locations.find((l) => l.loc === req.location);
+          if (existing) existing.qty += rem; else agg[li.name].locations.push({ loc: req.location, qty: rem });
+        }
+      });
+    });
+    return agg;
+  };
+
+  const productionData = hqProductionDemand();
+  const productionEntries = Object.entries(productionData);
+  const toggleExpand = (name: string) =>
+    setExpandedRows((prev) => prev.includes(name) ? prev.filter((i) => i !== name) : [...prev, name]);
+
+  if (isLoading) return <div className="p-12 flex justify-center text-neutral-400 animate-pulse">Loading Requisitions HQ Pipeline…</div>;
+
+  return (
+    <div className="space-y-6">
+      {/* Header + Tab toggle */}
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 print:hidden">
+        <div>
+          <h2 className="text-2xl font-bold tracking-tight">Store Requisitions</h2>
+          <p className="text-neutral-500 text-sm">Manage store demands and route against HQ Finished Goods.</p>
+        </div>
+        <div className="flex bg-neutral-100 p-1 rounded-lg border border-neutral-200 shadow-inner">
+          <button onClick={() => setActiveTab("overview")}
+            className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${activeTab === "overview" ? "bg-white text-brand-700 shadow-sm" : "text-neutral-600 hover:text-neutral-900"}`}>
+            Store Requisitions
+          </button>
+          <button onClick={() => setActiveTab("hq-production")}
+            className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors flex items-center gap-2 ${activeTab === "hq-production" ? "bg-white text-brand-700 shadow-sm" : "text-neutral-600 hover:text-neutral-900"}`}>
+            <ClipboardList className="h-4 w-4" /> HQ Production
+          </button>
+        </div>
+      </div>
+
+      {activeTab === "overview" ? (
+        <>
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 print:hidden">
+            <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+              <button onClick={createMockRequest}
+                className="flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium bg-neutral-100 border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-200 shadow-sm w-full sm:w-auto transition-colors">
+                <Sparkles className="h-4 w-4 text-brand-500" /> + Mock Store Req
+              </button>
+              <button onClick={() => handleFulfillSelected()} disabled={selectedReqIds.length === 0}
+                className={`flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium rounded-lg shadow-sm w-full sm:w-auto transition-colors ${selectedReqIds.length > 0 ? "bg-brand-600 text-white hover:bg-brand-700" : "bg-neutral-200 text-neutral-400 cursor-not-allowed"}`}>
+                <PackageCheck className="h-4 w-4" /> Fulfill ({selectedReqIds.length}) Requests
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            {[
+              { label: "Pending Workflow", value: pendingCount.toString(), color: "text-warning-600" },
+              { label: "Open Backorders", value: backorderCount.toString(), color: "text-danger-600" },
+              { label: "Top Consuming Location", value: topLocation, color: "text-brand-600" },
+              { label: "Total Value Supplied", value: `$${totalValueSupplied.toFixed(2)}`, color: "text-success-600" },
+            ].map((stat, i) => (
+              <Card key={i} className="shadow-sm border-neutral-200">
+                <CardContent className="p-4 flex flex-col gap-1 text-center sm:text-left">
+                  <span className="text-xs text-neutral-500 font-medium">{stat.label}</span>
+                  <span className={`text-2xl font-bold ${stat.color}`}>{stat.value}</span>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+
+          <Card className="shadow-sm border-neutral-200 overflow-hidden">
+            <CardHeader className="flex flex-col sm:flex-row space-y-4 sm:space-y-0 sm:items-center justify-between pb-4 border-b border-neutral-100 bg-white">
+              <div className="relative w-full sm:w-[400px]">
+                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                  <Search className="h-4 w-4 text-neutral-400" />
+                </div>
+                <input type="text" placeholder="Search Req ID, location, or requester…" value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="pl-9 pr-4 py-1.5 border border-neutral-200 rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 w-full bg-neutral-50" />
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <select className="px-3 py-1.5 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm"
+                  value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
+                  <option value="All">All Statuses</option>
+                  <option value="Draft">Draft</option>
+                  <option value="Submitted">Submitted</option>
+                  <option value="submitted">submitted</option>
+                  <option value="Approved">Approved</option>
+                  <option value="Partial">Partial</option>
+                  <option value="Backordered">Backordered</option>
+                  <option value="Fulfilled">Fulfilled</option>
+                  <option value="Rejected">Rejected</option>
+                </select>
+                {/* Location filter: hidden for location_manager — RLS already isolates their data */}
+                {profile?.role !== "location_manager" && (
+                  <select
+                    className="px-3 py-1.5 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm"
+                    value={filterLocation}
+                    onChange={(e) => setFilterLocation(e.target.value)}
+                  >
+                    <option value="All">All Locations (HQ View)</option>
+                    {locationsData.map((l) => <option key={l} value={l}>{l}</option>)}
+                  </select>
+                )}
+                {profile?.role === "location_manager" && profile.locationId && (
+                  <div className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-neutral-50 border border-neutral-200 text-neutral-700 rounded-lg">
+                    <MapPin className="h-3.5 w-3.5 text-brand-500" />
+                    {profile.locationId}
+                  </div>
+                )}
+              </div>
+            </CardHeader>
+            <CardContent className="p-0">
               <Table>
-                <TableHeader className="bg-neutral-50/50 text-[11px] uppercase text-neutral-500 tracking-wider">
+                <TableHeader className="bg-neutral-50/80 text-xs text-neutral-500 uppercase tracking-wider">
                   <TableRow>
-                    <TableHead>Finished Good</TableHead>
-                    <TableHead>Requested</TableHead>
-                    <TableHead>Fulfilled</TableHead>
-                    <TableHead>Demand Gap</TableHead>
-                    <TableHead className="text-right">Value</TableHead>
+                    <TableHead className="w-[40px] px-6 py-3">
+                      <input type="checkbox" className="rounded border-neutral-300 text-brand-600 focus:ring-brand-500"
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            const approvedIds = filteredReqs.filter((r) => FULFILLABLE_STATUSES.has((r.status ?? "").toLowerCase())).map((r) => r.id);
+                            setSelectedReqIds((prev) => Array.from(new Set([...prev, ...approvedIds])));
+                          } else setSelectedReqIds([]);
+                        }} />
+                    </TableHead>
+                    <TableHead className="py-3">Request ID</TableHead>
+                    <TableHead className="py-3">Location</TableHead>
+                    <TableHead className="py-3">Requested By</TableHead>
+                    <TableHead className="py-3">Date</TableHead>
+                    <TableHead className="py-3">Items</TableHead>
+                    <TableHead className="py-3">Value Supplied</TableHead>
+                    <TableHead className="py-3">Status</TableHead>
+                    <TableHead className="px-6 py-3 text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {selectedReq?.lineItems?.map((item: any, idx: number) => {
-                     const fg = finishedGoods.find(f => f.id === item.id);
-                     const isComplete = item.fulfilledQty >= item.requestedQty;
-                     const gap = item.requestedQty - (item.fulfilledQty || 0);
-                     const unitValue = fg?.valuePerUnit || 0;
-                     const itemSuppliedValue = (item.fulfilledQty || 0) * unitValue;
-                     
-                     return (
-                        <TableRow key={`reqitem-${idx}`} className="hover:bg-neutral-50/50">
-                          <TableCell>
-                            <div className="font-medium text-sm text-neutral-900">{item.name}</div>
-                          </TableCell>
-                          <TableCell>
-                            <span className="text-xs font-medium text-neutral-800">{item.requestedQty} {item.unit}</span>
-                          </TableCell>
-                          <TableCell>
-                             <Badge variant="neutral" className={`text-xs border-none font-bold px-2 py-1 ${isComplete ? "bg-success-100 text-success-800" : "bg-brand-100 text-brand-800"}`}>
-                               {item.fulfilledQty || 0} {item.unit}
-                             </Badge>
-                          </TableCell>
-                          <TableCell>
-                             {gap > 0 ? (
-                               <span className="text-xs font-bold text-danger-600">{gap} {item.unit} backorder</span>
-                             ) : (
-                               <span className="text-xs font-bold text-neutral-400">0</span>
-                             )}
-                          </TableCell>
-                          <TableCell className="text-right font-medium text-success-700 text-sm">
-                             ${itemSuppliedValue.toFixed(2)}
-                          </TableCell>
-                        </TableRow>
-                     )
-                  })}
+                  {filteredReqs.length > 0 ? filteredReqs.map((req) => (
+                    <TableRow key={req.id}
+                      className={`cursor-pointer transition-colors hover:bg-neutral-50/50 ${selectedReqIds.includes(req.id) ? "bg-brand-50/30" : ""}`}
+                      onClick={(e) => { if ((e.target as HTMLElement).closest('input[type="checkbox"]')) return; setSelectedReq(req); }}>
+                      <TableCell className="px-6">
+                        <input type="checkbox" checked={selectedReqIds.includes(req.id)} onChange={() => handleToggleSelect(req.id)}
+                          disabled={!FULFILLABLE_STATUSES.has((req.status ?? "").toLowerCase())}
+                          className="rounded border-neutral-300 text-brand-600 focus:ring-brand-500 disabled:opacity-50" />
+                      </TableCell>
+                      <TableCell className="py-4 font-semibold text-brand-900">
+                        <div className="flex items-center gap-2"><Inbox className="h-4 w-4 text-neutral-400" />{req.id}</div>
+                      </TableCell>
+                      <TableCell className="py-4 font-medium text-neutral-900 text-sm">
+                        <div className="flex items-center gap-1.5"><MapPin className="h-3.5 w-3.5 text-neutral-400" />{req.location}</div>
+                      </TableCell>
+                      <TableCell className="py-4 text-sm text-neutral-600">{req.requestedBy || req.requestedby || "—"}</TableCell>
+                      <TableCell className="py-4 text-sm text-neutral-500">
+                        <div className="flex items-center gap-1.5"><Clock className="h-3.5 w-3.5 text-neutral-400" />{req.date}</div>
+                      </TableCell>
+                      <TableCell className="py-4 text-sm font-medium text-neutral-700">{req.items}</TableCell>
+                      <TableCell className="py-4 text-sm font-semibold text-success-600">${getReqValue(req).toFixed(2)}</TableCell>
+                      <TableCell className="py-4"><StatusBadge status={req.status} /></TableCell>
+                      <TableCell className="px-6 py-4 text-right">
+                        <span className="text-brand-600 hover:text-brand-700 text-sm font-medium transition-colors">Review</span>
+                      </TableCell>
+                    </TableRow>
+                  )) : (
+                    <TableRow>
+                      <TableCell colSpan={9} className="text-center py-10 text-neutral-500 text-sm">No matching requests.</TableCell>
+                    </TableRow>
+                  )}
                 </TableBody>
               </Table>
-           </div>
-        </div>
-      </Drawer>
-      </>
-     ) : (
-      <div className="space-y-6">
-        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-neutral-100 pb-4 print:border-none print:pb-0">
-          <div>
-            <h3 className="text-xl font-bold tracking-tight text-neutral-900 print:text-2xl">HQ Production Summary</h3>
-            <p className="text-neutral-500 text-sm print:hidden">Centralized preparation queue for selected date.</p>
-          </div>
-          <div className="flex flex-col sm:flex-row items-center gap-2 w-full sm:w-auto mt-4 sm:mt-0 print:hidden">
-             <input 
-               type="date"
-               value={new Date(productionDate).toISOString().split('T')[0]} // Quick conversion natively
-               onChange={(e) => {
-                 const [y, m, d] = e.target.value.split('-');
-                 // Native translation loosely back to requested text formatting
-                 const dDate = new Date(Number(y), Number(m)-1, Number(d));
-                 setProductionDate(dDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }));
-               }}
-               className="px-3 py-1.5 text-sm font-medium border border-neutral-200 text-neutral-700 bg-white rounded-lg focus:outline-none focus:ring-1 focus:ring-brand-500"
-             />
-             <button 
-               onClick={() => window.print()}
-               className="flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-neutral-900 text-white rounded-lg shadow-sm hover:bg-neutral-800 transition-colors w-full sm:w-auto justify-center"
-             >
-               <Printer className="h-4 w-4" />
-               Print Kitchen Sheet
-             </button>
-          </div>
-        </div>
-        
-        <div className="print:block">
-           <div className="hidden print:block text-sm text-neutral-500 mb-4 pb-2 border-b border-neutral-200">
-             Date: {productionDate}
-           </div>
+            </CardContent>
+          </Card>
 
-           {productionEntries.length === 0 ? (
-              <div className="text-center py-16 bg-neutral-50 border border-neutral-200 border-dashed rounded-xl">
-                 <PackageCheck className="h-12 w-12 text-neutral-300 mx-auto mb-3" />
-                 <h3 className="text-lg font-bold text-neutral-900">No Production Required</h3>
-                 <p className="text-neutral-500 text-sm mt-1 max-w-sm mx-auto">There are no open requisitions pending fulfillment for {productionDate}.</p>
+          {/* Review Drawer */}
+          <Drawer isOpen={!!selectedReq} onClose={() => { setSelectedReq(null); setHqReqItems([]); }}
+            title={`Requisition ${selectedReq?.id}`}
+            description={`Submitted by ${selectedReq?.requestedBy || selectedReq?.requestedby || "—"} from ${selectedReq?.location} on ${selectedReq?.date}`}
+            footer={
+              <div className="w-full flex flex-col gap-2">
+                <div className="flex items-center justify-between w-full border-t border-neutral-200 pt-4 mt-2">
+                  <div className="flex flex-col">
+                    <span className="text-xs font-semibold uppercase text-neutral-500 tracking-wider">Value Supplied</span>
+                    <span className="text-xl font-bold text-success-600 flex items-center gap-1">
+                      <CircleDollarSign className="h-5 w-5" />
+                      {selectedReq ? getReqValue(selectedReq).toFixed(2) : "0.00"}
+                      <span className="text-sm font-medium text-neutral-400">/ ${selectedReq ? getReqRequestedValue(selectedReq).toFixed(2) : "0.00"}</span>
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    {["submitted", "draft"].includes((selectedReq?.status ?? "").toLowerCase()) && (
+                      <>
+                        <button onClick={() => handleUpdateReqStatus(selectedReq.id, "rejected")}
+                          className="px-4 py-2 text-sm font-medium bg-white border border-danger-200 text-danger-700 rounded-lg hover:bg-danger-50 transition-colors shadow-sm flex items-center gap-2">
+                          <XSquare className="h-4 w-4" /> Reject
+                        </button>
+                        <button onClick={() => handleUpdateReqStatus(selectedReq.id, "approved")}
+                          className="px-4 py-2 text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors shadow-sm flex items-center gap-2">
+                          <CheckCircle2 className="h-4 w-4" /> Approve
+                        </button>
+                      </>
+                    )}
+                    {FULFILLABLE_STATUSES.has((selectedReq?.status ?? "").toLowerCase()) && (
+                      <button onClick={() => handleFulfillSelected([selectedReq.id])}
+                        className="px-4 py-2 text-sm font-medium bg-success-600 text-white rounded-lg hover:bg-success-700 transition-colors shadow-sm flex items-center gap-2">
+                        <PackageCheck className="h-4 w-4" /> Fulfill Ready Stock
+                      </button>
+                    )}
+                    {FULFILLED_STATUSES.has((selectedReq?.status ?? "").toLowerCase()) && !
+                      PENDING_STATUSES.has((selectedReq?.status ?? "").toLowerCase()) &&
+                      !FULFILLABLE_STATUSES.has((selectedReq?.status ?? "").toLowerCase()) && (
+                      <span className="px-4 py-2 text-sm font-medium text-success-700 flex items-center gap-2">
+                        <CheckCircle2 className="h-4 w-4" /> Completed
+                      </span>
+                    )}
+                  </div>
+                </div>
               </div>
-           ) : (
-             <div className="overflow-x-auto rounded-xl border border-neutral-200 print:border-none shadow-sm print:shadow-none">
-                 <Table className="bg-white print:bg-transparent">
-                   <TableHeader className="bg-neutral-50/80 text-xs text-neutral-500 uppercase tracking-wider print:bg-transparent">
-                     <TableRow>
-                       <TableHead className="w-[40px] px-4 print:px-0">#</TableHead>
-                       <TableHead className="py-3 px-4 print:px-0">Item Name</TableHead>
-                       <TableHead className="py-3 px-4 print:px-0">Total Quantity</TableHead>
-                     </TableRow>
-                   </TableHeader>
-                   <TableBody>
-                     {productionEntries.map(([itemName, data], idx) => {
-                       const isExpanded = expandedRows.includes(itemName);
-                       return (
-                         <React.Fragment key={idx}>
-                           <TableRow 
-                             className="hover:bg-brand-50/30 cursor-pointer print:hover:bg-transparent"
-                             onClick={() => toggleExpand(itemName)}
-                           >
-                             <TableCell className="px-4 py-3 print:px-0">
-                               <div className="print:hidden">
-                                 {isExpanded ? <ChevronDown className="h-4 w-4 text-brand-600" /> : <ChevronRight className="h-4 w-4 text-neutral-400" />}
-                               </div>
-                               <div className="hidden print:block text-neutral-500 font-medium">#{idx+1}</div>
-                             </TableCell>
-                             <TableCell className="py-3 px-4 print:px-0">
-                               <span className="font-bold text-neutral-900 text-base">{itemName}</span>
-                             </TableCell>
-                             <TableCell className="py-3 px-4 print:px-0">
-                               <span className="font-bold text-brand-700 text-base bg-brand-50 print:bg-transparent px-2 py-1 rounded-md">
-                                 {data.totalQty} {data.unit}
-                               </span>
-                             </TableCell>
-                           </TableRow>
-                           {/* Location Breakdown Map */}
-                           {(isExpanded || true) && ( 
-                             // NOTE: `true` forced for print. For print, you generally want it expanded.
-                             <TableRow className={`bg-neutral-50/50 print:table-row print:bg-transparent ${isExpanded ? 'table-row' : 'hidden print:table-row'}`}>
-                               <TableCell colSpan={3} className="px-10 py-3 print:px-4">
-                                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 py-2">
-                                    {data.locations.map((loc, lIdx) => (
-                                      <div key={lIdx} className="flex justify-between items-center text-sm py-1 border-b border-neutral-200 border-dashed last:border-0 print:border-neutral-300">
-                                        <span className="text-neutral-600 font-medium">{loc.loc}</span>
-                                        <span className="text-neutral-900 font-bold bg-white print:bg-transparent border border-neutral-200 print:border-none px-2 rounded-md shadow-sm print:shadow-none">
-                                          {loc.qty} {data.unit}
-                                        </span>
-                                      </div>
-                                    ))}
+            }>
+            <div className="space-y-6">
+              <div className="bg-brand-50 border border-brand-100 rounded-lg p-4">
+                <h4 className="text-xs font-semibold text-brand-800 uppercase tracking-wider mb-1">Notes / Reason</h4>
+                <p className="text-sm text-neutral-700">{selectedReq?.notes || "No notes provided."}</p>
+              </div>
+              <div className="bg-white border border-neutral-200 rounded-lg overflow-hidden mt-6">
+                <Table>
+                  <TableHeader className="bg-neutral-50/50 text-[11px] uppercase text-neutral-500 tracking-wider">
+                    <TableRow>
+                      <TableHead>Item ID</TableHead>
+                      <TableHead>Requested</TableHead>
+                      <TableHead>Unit Price</TableHead>
+                      <TableHead>Fulfilled</TableHead>
+                      <TableHead>Demand Gap</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {hqItemsLoading ? (
+                      <TableRow>
+                        <TableCell colSpan={4} className="text-center py-6 text-neutral-400 text-sm">
+                          <div className="flex items-center justify-center gap-2">
+                            <Loader2 className="h-4 w-4 animate-spin" /> Loading items…
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ) : hqReqItems.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={4} className="text-center py-6 text-neutral-400 text-sm">
+                          No items found for this requisition.
+                        </TableCell>
+                      </TableRow>
+                    ) : hqReqItems.map((item: any) => {
+                      const requested = Number(item.quantityRequested ?? 0);
+                      const fulfilled = Number(item.quantityFulfilled ?? 0);
+                      const gap = Math.max(0, requested - fulfilled);
+                      const isComplete = fulfilled >= requested;
+                      return (
+                        <TableRow key={item.id} className="hover:bg-neutral-50/50">
+                          <TableCell>
+                            <div className="font-medium text-sm text-neutral-900">{item.itemName}</div>
+                          </TableCell>
+                          <TableCell>
+                            <span className="text-xs font-medium text-neutral-800">{requested}</span>
+                          </TableCell>
+                          <TableCell>
+                            {item.unitPrice != null
+                              ? <span className="text-xs font-medium text-neutral-700">${Number(item.unitPrice).toFixed(2)}</span>
+                              : <span className="text-neutral-400 text-xs">—</span>}
+                          </TableCell>
+                          {/* Editable fulfilled input — HQ only */}
+                          <TableCell>
+                            <input
+                              type="number"
+                              min={0}
+                              max={requested}
+                              defaultValue={fulfilled}
+                              key={`${item.id}-${fulfilled}`}
+                              onBlur={async (e) => {
+                                const newVal = Math.max(0, Math.min(requested, Number(e.target.value)));
+                                if (newVal === fulfilled) return;
+                                // Optimistic local update
+                                setHqReqItems((prev) =>
+                                  prev.map((li) =>
+                                    li.id === item.id ? { ...li, quantityFulfilled: newVal } : li
+                                  )
+                                );
+                                const res = await updateRequisitionItemFulfilled(
+                                  item.id,
+                                  newVal,
+                                  item.requisitionId   // triggers auto status recalc in storage
+                                );
+                                if (!res.success) {
+                                  alert(`Failed to save: ${res.error?.message}`);
+                                  // Revert on failure
+                                  setHqReqItems((prev) =>
+                                    prev.map((li) =>
+                                      li.id === item.id ? { ...li, quantityFulfilled: fulfilled } : li
+                                    )
+                                  );
+                                } else if (res.newStatus) {
+                                  // Sync parent requisition status in local state
+                                  setSelectedReq((prev: any) => prev ? { ...prev, status: res.newStatus } : prev);
+                                  setRequisitions((prev: any[]) =>
+                                    prev.map((r) => r.id === item.requisitionId ? { ...r, status: res.newStatus } : r)
+                                  );
+                                }
+                              }}
+                              className={`w-20 px-2 py-1 text-sm font-bold rounded-md border text-center ${
+                                isComplete
+                                  ? "border-success-300 bg-success-50 text-success-800"
+                                  : "border-neutral-300 bg-white text-neutral-800"
+                              } focus:outline-none focus:ring-2 focus:ring-brand-400`}
+                            />
+                          </TableCell>
+                          <TableCell>
+                            {gap > 0
+                              ? <span className="text-xs font-bold text-danger-600">{gap} needed</span>
+                              : <span className="text-xs font-bold text-success-600">Complete</span>}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+          </Drawer>
+        </>
+      ) : (
+        /* HQ Production tab — unchanged */
+        <div className="space-y-6">
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-neutral-100 pb-4 print:border-none print:pb-0">
+            <div>
+              <h3 className="text-xl font-bold tracking-tight text-neutral-900 print:text-2xl">HQ Production Summary</h3>
+              <p className="text-neutral-500 text-sm print:hidden">Centralized preparation queue for selected date.</p>
+            </div>
+            <div className="flex flex-col sm:flex-row items-center gap-2 w-full sm:w-auto mt-4 sm:mt-0 print:hidden">
+              <input type="date"
+                value={new Date(productionDate).toISOString().split("T")[0]}
+                onChange={(e) => {
+                  const [y, m, d] = e.target.value.split("-");
+                  const dDate = new Date(Number(y), Number(m) - 1, Number(d));
+                  setProductionDate(dDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }));
+                }}
+                className="px-3 py-1.5 text-sm font-medium border border-neutral-200 text-neutral-700 bg-white rounded-lg focus:outline-none focus:ring-1 focus:ring-brand-500" />
+              <button onClick={() => window.print()}
+                className="flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-neutral-900 text-white rounded-lg shadow-sm hover:bg-neutral-800 transition-colors w-full sm:w-auto justify-center">
+                <Printer className="h-4 w-4" /> Print Kitchen Sheet
+              </button>
+            </div>
+          </div>
+          <div className="print:block">
+            <div className="hidden print:block text-sm text-neutral-500 mb-4 pb-2 border-b border-neutral-200">Date: {productionDate}</div>
+            {productionEntries.length === 0 ? (
+              <div className="text-center py-16 bg-neutral-50 border border-neutral-200 border-dashed rounded-xl">
+                <PackageCheck className="h-12 w-12 text-neutral-300 mx-auto mb-3" />
+                <h3 className="text-lg font-bold text-neutral-900">No Production Required</h3>
+                <p className="text-neutral-500 text-sm mt-1 max-w-sm mx-auto">No open requisitions pending fulfillment for {productionDate}.</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto rounded-xl border border-neutral-200 print:border-none shadow-sm print:shadow-none">
+                <Table className="bg-white print:bg-transparent">
+                  <TableHeader className="bg-neutral-50/80 text-xs text-neutral-500 uppercase tracking-wider print:bg-transparent">
+                    <TableRow>
+                      <TableHead className="w-[40px] px-4 print:px-0">#</TableHead>
+                      <TableHead className="py-3 px-4 print:px-0">Item Name</TableHead>
+                      <TableHead className="py-3 px-4 print:px-0">Total Quantity</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {productionEntries.map(([itemName, data], idx) => {
+                      const isExpanded = expandedRows.includes(itemName);
+                      return (
+                        <React.Fragment key={idx}>
+                          <TableRow className="hover:bg-brand-50/30 cursor-pointer print:hover:bg-transparent" onClick={() => toggleExpand(itemName)}>
+                            <TableCell className="px-4 py-3 print:px-0">
+                              <div className="print:hidden">{isExpanded ? <ChevronDown className="h-4 w-4 text-brand-600" /> : <ChevronRight className="h-4 w-4 text-neutral-400" />}</div>
+                              <div className="hidden print:block text-neutral-500 font-medium">#{idx + 1}</div>
+                            </TableCell>
+                            <TableCell className="py-3 px-4 print:px-0"><span className="font-bold text-neutral-900 text-base">{itemName}</span></TableCell>
+                            <TableCell className="py-3 px-4 print:px-0">
+                              <span className="font-bold text-brand-700 text-base bg-brand-50 print:bg-transparent px-2 py-1 rounded-md">{data.totalQty} {data.unit}</span>
+                            </TableCell>
+                          </TableRow>
+                          <TableRow className={`bg-neutral-50/50 print:table-row print:bg-transparent ${isExpanded ? "table-row" : "hidden print:table-row"}`}>
+                            <TableCell colSpan={3} className="px-10 py-3 print:px-4">
+                              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 py-2">
+                                {data.locations.map((loc, lIdx) => (
+                                  <div key={lIdx} className="flex justify-between items-center text-sm py-1 border-b border-neutral-200 border-dashed last:border-0">
+                                    <span className="text-neutral-600 font-medium">{loc.loc}</span>
+                                    <span className="text-neutral-900 font-bold bg-white border border-neutral-200 px-2 rounded-md shadow-sm">{loc.qty} {data.unit}</span>
                                   </div>
-                               </TableCell>
-                             </TableRow>
-                           )}
-                         </React.Fragment>
-                       )
-                     })}
-                   </TableBody>
-                 </Table>
-             </div>
-           )}
+                                ))}
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        </React.Fragment>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </div>
         </div>
-      </div>
-     )}
+      )}
     </div>
   );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PAGE ROOT — detects role and renders appropriate view
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export default function Requisitions() {
+  const [profile, setProfile]         = useState<UserProfile | null>(null);
+  const [inventoryItems, setInventoryItems] = useState<any[]>([]);
+  const [finishedGoods, setFinishedGoods]   = useState<any[]>([]);
+  const [saleItems, setSaleItems]           = useState<SaleItem[]>([]);
+  const [isBootstrapping, setIsBootstrapping] = useState(true);
+
+  useEffect(() => {
+    async function boot() {
+      clearProfileCache();
+      const [prof, inv, fg, si] = await Promise.all([
+        getCurrentUserProfile(),
+        loadInventory(),
+        loadFinishedGoods(),
+        loadSaleItems(),
+      ]);
+      setProfile(prof);
+      setInventoryItems(Array.isArray(inv) ? inv : []);
+      setFinishedGoods(Array.isArray(fg) ? fg : []);
+      setSaleItems(Array.isArray(si) ? si : []);
+      setIsBootstrapping(false);
+    }
+    boot();
+  }, []);
+
+  if (isBootstrapping) {
+    return (
+      <div className="flex items-center justify-center p-16 text-neutral-400 gap-2">
+        <Loader2 className="h-5 w-5 animate-spin" /> Loading…
+      </div>
+    );
+  }
+
+  // ── No profile: user is authenticated but has no user_profiles row ──────────
+  // Do NOT fall back to HQAdminView — that would silently grant admin access.
+  // Show a neutral restricted state with no controls.
+  if (!profile) {
+    return (
+      <div className="flex flex-col items-center justify-center py-24 px-8 text-center space-y-5">
+        <div className="w-14 h-14 rounded-full bg-warning-50 border border-warning-200 flex items-center justify-center">
+          <AlertCircle className="h-7 w-7 text-warning-500" />
+        </div>
+        <div className="space-y-1.5">
+          <h2 className="text-xl font-bold text-neutral-900">Access Not Configured</h2>
+          <p className="text-neutral-500 text-sm max-w-sm">
+            Your account does not have a role or location assigned yet. Contact your
+            administrator to complete your profile setup before accessing requisitions.
+          </p>
+        </div>
+        <div className="bg-neutral-50 border border-neutral-200 rounded-lg px-5 py-3 text-xs text-neutral-400 font-mono">
+          No <code className="font-semibold text-neutral-600">user_profiles</code> row found for your auth account.
+        </div>
+      </div>
+    );
+  }
+
+  // ── Unknown / unexpected role ────────────────────────────────────────────────
+  if (profile.role !== "hq_admin" && profile.role !== "location_manager") {
+    return (
+      <div className="flex flex-col items-center justify-center py-24 px-8 text-center space-y-5">
+        <div className="w-14 h-14 rounded-full bg-danger-50 border border-danger-200 flex items-center justify-center">
+          <AlertCircle className="h-7 w-7 text-danger-500" />
+        </div>
+        <div className="space-y-1.5">
+          <h2 className="text-xl font-bold text-neutral-900">Unrecognized Role</h2>
+          <p className="text-neutral-500 text-sm max-w-sm">
+            Your account has an unrecognized role value{" "}
+            <code className="font-semibold text-neutral-700">"{profile.role}"</code>. Contact
+            your administrator to correct your role assignment.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (profile.role === "hq_admin") {
+    return <HQAdminView finishedGoods={finishedGoods} profile={profile} />;
+  }
+
+  return <LocationManagerView profile={profile} inventoryItems={inventoryItems} saleItems={saleItems} />;
+
 }

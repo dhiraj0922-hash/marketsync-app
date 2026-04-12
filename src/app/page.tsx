@@ -44,12 +44,17 @@ const usageData = [
   { name: 'Sun', actual: 6490, theoretical: 6100 },
 ];
 
-import { loadInventory, loadOrders, saveOrders, loadCounts, loadSuppliers, loadRequisitions, loadFinishedGoods, loadRecipes, loadProductionPlans } from "@/lib/storage";
+import { loadInventory, loadOrders, saveOrders, loadCounts, loadSuppliers, loadRequisitions, loadFinishedGoods, loadRecipes, loadProductionPlans, loadLocations } from "@/lib/storage";
 import { runAutomationEngine } from "@/lib/automation";
 import { CheckSquare } from "lucide-react";
+import { useAuth } from "@/components/AuthProvider";
+import HQLocationReview from "@/components/HQLocationReview";
 
 export default function Dashboard() {
   const router = useRouter();
+  const { user } = useAuth();
+  const isHQAdmin = user?.role === "hq_admin";
+
   const [inventoryItems, setInventoryItems] = useState<any[]>([]);
   const [orders, setOrders] = useState<any[]>([]);
   const [counts, setCounts] = useState<any[]>([]);
@@ -58,23 +63,74 @@ export default function Dashboard() {
   const [finishedGoods, setFinishedGoods] = useState<any[]>([]);
   const [recipes, setRecipes] = useState<any[]>([]);
   const [productionPlans, setProductionPlans] = useState<any[]>([]);
+  const [locations, setLocations] = useState<any[]>([]);
   const [isBulkGenDrawerOpen, setIsBulkGenDrawerOpen] = useState(false);
   const [bulkDrafts, setBulkDrafts] = useState<Record<string, any[]>>({});
+  const [dynamicUsageData, setDynamicUsageData] = useState<any[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     runAutomationEngine();
-    setInventoryItems(loadInventory());
-    setOrders(loadOrders());
-    setCounts(loadCounts());
-    setSuppliersData(loadSuppliers());
-    setRequisitions(loadRequisitions());
-    setFinishedGoods(loadFinishedGoods());
-    setRecipes(loadRecipes());
-    setProductionPlans(loadProductionPlans());
+    
+    async function fetchData() {
+       setIsLoading(true);
+       try {
+          const [loadedInventory, loadedOrders, loadedCounts, loadedSuppliers, loadedRequisitions, loadedSettingsFGs, loadedRecipes, loadedPlans, loadedLocations] = await Promise.all([
+             loadInventory(),
+             loadOrders(),
+             loadCounts(),
+             loadSuppliers(),
+             loadRequisitions(),
+             loadFinishedGoods(),
+             loadRecipes(),
+             loadProductionPlans(),
+             loadLocations(),
+          ]);
+          
+          setInventoryItems(loadedInventory);
+          setOrders(loadedOrders);
+          setCounts(loadedCounts);
+          setSuppliersData(loadedSuppliers);
+          setRequisitions(loadedRequisitions);
+          setFinishedGoods(loadedSettingsFGs);
+          setRecipes(loadedRecipes);
+          setProductionPlans(loadedPlans);
+          // Exclude HQ itself from location picker — HQ reviews store locations
+          setLocations((loadedLocations as any[]).filter((l: any) => l.id !== "LOC-HQ"));
+          
+          // Check clean-slate architecture boundary
+          const liveStockTotal = loadedInventory.reduce((acc: number, item: any) => acc + ((item.inStock || 0) * (item.cost || 0)), 0);
+          if (liveStockTotal === 0 && loadedOrders.length === 0) {
+            setDynamicUsageData([
+              { name: 'Mon', actual: 0, theoretical: 0 },
+              { name: 'Tue', actual: 0, theoretical: 0 },
+              { name: 'Wed', actual: 0, theoretical: 0 },
+              { name: 'Thu', actual: 0, theoretical: 0 },
+              { name: 'Fri', actual: 0, theoretical: 0 },
+              { name: 'Sat', actual: 0, theoretical: 0 },
+              { name: 'Sun', actual: 0, theoretical: 0 },
+            ]);
+          } else {
+            setDynamicUsageData(usageData);
+          }
+       } catch (err) {
+          console.error(err);
+       } finally {
+          setIsLoading(false);
+       }
+    }
+    
+    fetchData();
   }, []);
+
+  if (isLoading) {
+     return <div className="animate-pulse flex items-center justify-center p-12 text-sm text-neutral-400">Loading Dashboard Context...</div>;
+  }
 
   const lowStockItems = inventoryItems.filter(item => item.inStock < item.parLevel);
   const recentOrdersRender = orders.slice(0, 4);
+  const totalInventoryValue = inventoryItems.reduce((acc, item) => acc + ((item.inStock || 0) * (item.cost || 0)), 0);
+  const isCleanSlate = totalInventoryValue === 0 && orders.length === 0;
 
   const handleAddToPO = (item: any) => {
     const suggestedReq = item.parLevel - item.inStock;
@@ -431,6 +487,18 @@ export default function Dashboard() {
         </Card>
       )}
 
+      {/* HQ Cross-Location Review — HQ admin only */}
+      {isHQAdmin && (
+        <Card className="shadow-sm border-indigo-100 bg-indigo-50/30">
+          <CardHeader className="border-b border-indigo-100 pb-4">
+            <CardTitle className="text-base text-neutral-800">Cross-Location Review</CardTitle>
+          </CardHeader>
+          <CardContent className="p-5">
+            <HQLocationReview locations={locations} />
+          </CardContent>
+        </Card>
+      )}
+
       {/* Exec Metrics Row */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <Card className="border-l-4 border-l-brand-500 shadow-sm">
@@ -438,18 +506,24 @@ export default function Dashboard() {
             <div className="flex justify-between items-start">
               <div className="space-y-1">
                 <p className="text-sm font-medium text-neutral-500">Total Inventory Value</p>
-                <p className="text-2xl font-bold text-neutral-900">$45,231.89</p>
+                <p className="text-2xl font-bold text-neutral-900">${totalInventoryValue.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
               </div>
               <div className="p-2 bg-brand-50 text-brand-600 rounded-md">
                 <DollarSign className="h-5 w-5" />
               </div>
             </div>
             <div className="mt-4 flex items-center text-sm">
-              <span className="text-success-600 flex items-center font-medium">
-                <TrendingUp className="h-4 w-4 mr-1" />
-                +2.4%
-              </span>
-              <span className="text-neutral-400 ml-2">from last month</span>
+              {isCleanSlate ? (
+                 <span className="text-neutral-400 font-medium">Opening Balance</span>
+              ) : (
+                <>
+                  <span className="text-success-600 flex items-center font-medium">
+                    <TrendingUp className="h-4 w-4 mr-1" />
+                    +2.4%
+                  </span>
+                  <span className="text-neutral-400 ml-2">from last month</span>
+                </>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -500,18 +574,24 @@ export default function Dashboard() {
             <div className="flex justify-between items-start">
               <div className="space-y-1">
                 <p className="text-sm font-medium text-neutral-500">CoGS (7 Days)</p>
-                <p className="text-2xl font-bold text-neutral-900">28.4%</p>
+                <p className="text-2xl font-bold text-neutral-900">{isCleanSlate ? "0.0%" : "28.4%"}</p>
               </div>
               <div className="p-2 bg-warning-50 text-warning-600 rounded-md">
                 <TrendingDown className="h-5 w-5" />
               </div>
             </div>
             <div className="mt-4 flex items-center text-sm">
-              <span className="text-success-600 flex items-center font-medium">
-                <TrendingDown className="h-4 w-4 mr-1" />
-                -0.5%
-              </span>
-              <span className="text-neutral-400 ml-2">vs theoretical (28.9%)</span>
+              {isCleanSlate ? (
+                <span className="text-neutral-400 font-medium">Insufficient Operational Data</span>
+              ) : (
+                <>
+                  <span className="text-success-600 flex items-center font-medium">
+                    <TrendingDown className="h-4 w-4 mr-1" />
+                    -0.5%
+                  </span>
+                  <span className="text-neutral-400 ml-2">vs theoretical (28.9%)</span>
+                </>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -526,7 +606,7 @@ export default function Dashboard() {
           </CardHeader>
           <CardContent className="pt-6 h-80">
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={usageData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
+              <LineChart data={dynamicUsageData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E5E5E5" />
                 <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#737373', fontSize: 12}} dy={10} />
                 <YAxis axisLine={false} tickLine={false} tick={{fill: '#737373', fontSize: 12}} dx={-10} tickFormatter={(value) => `$${value}`} />

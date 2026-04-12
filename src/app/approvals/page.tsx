@@ -28,66 +28,82 @@ export default function Approvals() {
   
   const [activeTab, setActiveTab] = useState<"production" | "orders">("production");
 
-  useEffect(() => {
-    // Run automation passively when opening the approval gate
-    runAutomationEngine();
+  const [isLoading, setIsLoading] = useState(true);
 
-    setProductionPlans(loadProductionPlans());
-    setOrders(loadOrders());
-    setSuppliers(loadSuppliers());
+  useEffect(() => {
+    async function fetchData() {
+      setIsLoading(true);
+      try {
+        runAutomationEngine();
+        
+        const [plans, ords, sups] = await Promise.all([
+          loadProductionPlans(),
+          loadOrders(),
+          loadSuppliers()
+        ]);
+        
+        setProductionPlans(plans);
+        setOrders(ords);
+        setSuppliers(sups);
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setIsLoading(false);
+      }
+    }
+    fetchData();
   }, []);
+
+  if (isLoading) return <div className="p-12 flex justify-center text-neutral-400 animate-pulse">Loading Workflows...</div>;
 
   const pendingPlans = productionPlans.filter(p => p.status === "Draft (Auto)" || p.status === "Pending Approval");
   const pendingOrders = orders.filter(o => o.status === "Draft (Auto)" || o.status === "Pending Approval" || (o.status === "Draft" && o.createdBy === "Auto Engine"));
 
-  const handleApprovePlan = (id: string) => {
+  const handleApprovePlan = async (id: string) => {
     const arr = [...productionPlans];
     const item = arr.find(p => p.id === id);
-    if (item) {
-       item.status = "Approved";
-       setProductionPlans(arr);
-       saveProductionPlans(arr);
-    }
+    if (item) item.status = "Approved";
+    const res = await saveProductionPlans(arr);
+    if (!res?.success) { alert(`DB Error (Approve Plan): ${res?.error}`); return; }
+    setProductionPlans(arr);
   };
 
-  const handleRejectPlan = (id: string) => {
+  const handleRejectPlan = async (id: string) => {
     const arr = [...productionPlans];
     const item = arr.find(p => p.id === id);
-    if (item) {
-       item.status = "Rejected";
-       setProductionPlans(arr);
-       saveProductionPlans(arr);
-    }
+    if (item) item.status = "Rejected";
+    const res = await saveProductionPlans(arr);
+    if (!res?.success) { alert(`DB Error (Reject Plan): ${res?.error}`); return; }
+    setProductionPlans(arr);
   };
   
-  const handleStartProduction = (id: string) => {
+  const handleStartProduction = async (id: string) => {
     const arr = [...productionPlans];
     const item = arr.find(p => p.id === id);
     if (item) {
        item.status = "In Production";
+       const res = await saveProductionPlans(arr);
+       if (!res?.success) { alert(`DB Error (Start Prod): ${res?.error}`); return; }
        setProductionPlans(arr);
-       saveProductionPlans(arr);
     }
   };
 
-  const handleApproveOrder = (id: string) => {
+  const handleApproveOrder = async (id: string) => {
     const arr = [...orders];
     const item = arr.find(o => o.id === id);
-    if (item) {
-       item.status = "Approved";
-       setOrders(arr);
-       saveOrders(arr);
-    }
+    if (item) item.status = "Approved";
+    const res = await saveOrders(arr);
+    if (!res?.success) { alert(`DB Error (Approve PO): ${res?.error}`); return; }
+    setOrders(arr);
   };
 
-  const handleRejectOrder = (id: string) => {
+  const handleRejectOrder = async (id: string) => {
     const arr = [...orders];
     const item = arr.find(o => o.id === id);
-    if (item) {
-       item.status = "Rejected";
-       setOrders(arr);
-       saveOrders(arr);
-    }
+    if (item) item.status = "Rejected";
+    const res = await saveOrders(arr);
+    if (!res?.success) { alert(`DB Error (Reject PO): ${res?.error}`); return; }
+    setOrders(arr);
   };
 
   return (
