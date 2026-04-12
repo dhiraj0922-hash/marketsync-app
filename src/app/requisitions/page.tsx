@@ -644,7 +644,7 @@ function LocationManagerView({
                             type="number"
                             min={1}
                             value={li.quantityRequested}
-                            onChange={(e) => updateQty(li.itemId, Number(e.target.value))}
+                            onChange={(e) => updateQty(li.finishedGoodId ?? li.itemId ?? '', Number(e.target.value))}
                             className="w-20 px-2 py-1 text-sm border border-neutral-200 rounded focus:outline-none focus:ring-1 focus:ring-brand-500"
                           />
                         </TableCell>
@@ -655,7 +655,7 @@ function LocationManagerView({
                           ${(li.quantityRequested * li.unitPrice).toFixed(2)}
                         </TableCell>
                         <TableCell className="py-2">
-                          <button onClick={() => removeLineItem(li.itemId)} className="text-neutral-400 hover:text-danger-600 transition-colors">
+                          <button onClick={() => removeLineItem(li.finishedGoodId ?? li.itemId ?? '')} className="text-neutral-400 hover:text-danger-600 transition-colors">
                             <Trash2 className="h-4 w-4" />
                           </button>
                         </TableCell>
