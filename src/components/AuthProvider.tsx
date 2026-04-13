@@ -21,6 +21,8 @@ export const useAuth = () => useContext(AuthContext);
 const AUTH_TIMEOUT_MS = 8_000;
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
+  console.log("AuthProvider mounted");
+
   const [user, setUser]       = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const router   = useRouter();
@@ -28,15 +30,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // ── Profile loader ──────────────────────────────────────────────────────────
   const loadProfile = async (authUser: { id: string; email?: string }) => {
-    console.log("[AuthProvider] loadProfile start uid=", authUser.id);
+    console.log("[AuthProvider] loadProfile START  uid=", authUser.id, " email=", authUser.email);
+
     const { data: profile, error } = await supabase
       .from("user_profiles")
       .select("id, user_id, full_name, role, location_id, is_active")
       .eq("user_id", authUser.id)
       .single();
 
+    console.log("[AuthProvider] loadProfile RESULT", {
+      found:       !!profile,
+      role:        profile?.role        ?? null,
+      location_id: profile?.location_id ?? null,
+      is_active:   profile?.is_active   ?? null,
+      errorCode:   error?.code          ?? null,
+      errorMsg:    error?.message       ?? null,
+    });
+
     if (error || !profile) {
-      console.warn("[AuthProvider] no user_profiles row for uid", authUser.id, error?.message);
+      console.warn("[AuthProvider] loadProfile: no profile row — setting user with role=null");
       setUser({
         id: authUser.id,
         email: authUser.email ?? "",
@@ -47,7 +59,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    console.log("[AuthProvider] loadProfile OK role=", profile.role);
+    console.log("[AuthProvider] loadProfile OK → role=", profile.role, " locationId=", profile.location_id);
     setUser({
       id: profile.user_id,
       email: authUser.email ?? "",
@@ -72,8 +84,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const hardTimeout = setTimeout(() => {
       if (mounted) {
         console.warn(
-          `[AuthProvider] bootstrap exceeded ${AUTH_TIMEOUT_MS}ms — forcing loading=false. ` +
-          "Check NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in Vercel env vars."
+          `[AuthProvider] HARD TIMEOUT after ${AUTH_TIMEOUT_MS}ms → setLoading(false). ` +  // ← LOADING FALSE (timeout path)
+          "Bootstrap never completed. Check NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in Vercel env vars."
         );
         setLoading(false);
       }
@@ -82,30 +94,40 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     async function checkSession() {
       try {
         if (!supabaseConfigured) {
-          console.error("[AuthProvider] Supabase env vars not configured — skipping getSession.");
-          return; // finally will still run → setLoading(false)
+          console.error("[AuthProvider] Supabase env vars not configured — skipping getSession. loading will be set false in finally.");
+          return;
         }
 
-        console.log("[AuthProvider] getSession start");
+        console.log("[AuthProvider] getSession START");
         const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-        console.log("[AuthProvider] getSession end session=", session ? "present" : "null", "error=", sessionError?.message);
+        console.log("[AuthProvider] getSession END", {
+          sessionPresent: !!session,
+          userId:         session?.user?.id         ?? null,
+          userEmail:      session?.user?.email      ?? null,
+          accessToken:    session?.access_token ? "<present>" : null,
+          expiresAt:      session?.expires_at       ?? null,
+          errorMsg:       sessionError?.message     ?? null,
+        });
 
-        if (!mounted) return;
+        if (!mounted) {
+          console.log("[AuthProvider] checkSession: component unmounted during getSession — aborting");
+          return;
+        }
 
         if (session?.user) {
-          console.log("[AuthProvider] session found, loading profile");
+          console.log("[AuthProvider] session present → calling loadProfile uid=", session.user.id);
           await loadProfile(session.user);
         } else {
-          console.log("[AuthProvider] no session");
+          console.log("[AuthProvider] no session → setUser(null)");
           setUser(null);
         }
       } catch (e: any) {
-        console.error("[AuthProvider] checkSession threw:", e?.message ?? e);
+        console.error("[AuthProvider] checkSession THREW:", e?.message ?? e);
         if (mounted) setUser(null);
       } finally {
-        console.log("[AuthProvider] bootstrap finally — setting loading=false");
+        console.log("[AuthProvider] bootstrap finally → setLoading(false)  mounted=", mounted);
         clearTimeout(hardTimeout);
-        if (mounted) setLoading(false);
+        if (mounted) setLoading(false); // ← LOADING FALSE (normal path)
       }
     }
 
