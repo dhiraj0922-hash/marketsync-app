@@ -30,14 +30,16 @@ import { AIRecipeImport } from "@/components/AIRecipeImport";
 function withAbortableTimeout<T>(
   factory: (signal: AbortSignal) => Promise<T>,
   ms: number,
-  timeoutMsg: string
+  timeoutMsg: string | (() => string)
 ): Promise<T> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout>;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
       controller.abort();
-      reject(new Error(timeoutMsg));
+      // Evaluate lazy message factory at the moment the deadline fires
+      // so any elapsed-time calculation in the message is accurate.
+      reject(new Error(typeof timeoutMsg === 'function' ? timeoutMsg() : timeoutMsg));
     }, ms);
   });
   return Promise.race([factory(controller.signal), deadline])
@@ -312,14 +314,15 @@ function RecipesPageContent() {
       // Now: abort() tears down the HTTP connection immediately.
       console.debug("[saveRecipe] step 1: upsertRecipe", recipeData.id,
         "| ingredients:", ingredients.length);
-      const t1 = Date.now();
+      const SAVE_TIMEOUT_MS = Math.max(30_000, 20_000); // 30 s, floor of 20 s
       const res = await withAbortableTimeout(
         (signal) => upsertRecipe(recipeData, signal),
-        30_000,
-        `Recipe save timed out after ${Math.round((Date.now() - t0) / 1000)}s. ` +
-        `Supabase may be cold-starting — please retry in a few seconds.`
+        SAVE_TIMEOUT_MS,
+        () =>
+          `Recipe save timed out after ${Math.round((Date.now() - t0) / 1000)}s. ` +
+          `Supabase may be cold-starting — please retry in a few seconds.`
       );
-      console.debug(`[saveRecipe] step 1 done in ${Date.now() - t1}ms (total: ${Date.now() - t0}ms)`, res);
+      console.debug(`[saveRecipe] step 1 done (total so far: ${Date.now() - t0}ms)`, res);
 
       if (!res.success) {
         const dbMsg = res.error?.message ?? res.error?.hint ?? JSON.stringify(res.error) ?? "Unknown DB error";
