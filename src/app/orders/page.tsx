@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
@@ -60,48 +60,95 @@ export default function Orders() {
     return locations.find(l => l.id === locationId)?.name ?? locationId;
   };
 
+  // Monotonically-increasing counter — only the response matching the latest
+  // request id is allowed to update state. Prevents stale responses from a slow
+  // prior fetch overwriting the result of a faster newer one.
+  const requestIdRef = useRef(0);
+
   useEffect(() => {
-    async function fetchData() {
+    const thisRequestId = ++requestIdRef.current;
+    const controller   = new AbortController();
+
+    // Hard fetch timeout — never show "Loading Orders Module..." beyond this.
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, 15_000);
+
+    async function fetchAll() {
       setIsLoading(true);
+      console.log("[Orders] load start  requestId=", thisRequestId, " queryLocationId=", queryLocationId);
+
       try {
         const [loadedOrders, loadedInv, loadedSup, loadedLocs] = await Promise.all([
-           loadOrders(queryLocationId),   // DB-level scoped by location_id
-           loadInventory(),
-           loadSuppliers(),
-           loadLocations(),
+          loadOrders(queryLocationId),
+          loadInventory(),
+          loadSuppliers(),
+          loadLocations(),
         ]);
+
+        // Discard if a newer request has already started
+        if (thisRequestId !== requestIdRef.current) {
+          console.log("[Orders] stale response ignored  requestId=", thisRequestId);
+          return;
+        }
+
+        if (loadedOrders.length === 0) {
+          console.log("[Orders] load empty  requestId=", thisRequestId);
+        } else {
+          console.log("[Orders] load success  count=", loadedOrders.length, " requestId=", thisRequestId);
+        }
 
         setOrders(loadedOrders);
         setInventoryData(loadedInv);
         setSuppliersData(loadedSup);
         setLocations(loadedLocs);
 
+        // Handle ?openDraft= deep-link
         if (typeof window !== "undefined") {
-           const params = new URLSearchParams(window.location.search);
-           const draftId = params.get("openDraft");
-           if (draftId) {
-              const target = loadedOrders.find((o: any) => o.id === draftId);
-              if (target) {
-                const supp = loadedSup.find((s: any) => s.id === target.supplierId);
-                setSelectedSupplier(supp || { id: target.supplierId, name: target.supplierId });
-                setSelectedLocation(target.location);
-                setNotes(target.notes || "");
-                setDraftItems(target.lineItems || []);
-                setEditorState({ isOpen: true, orderId: target.id, readOnly: false });
-                
-                window.history.replaceState({}, '', '/orders');
-              }
-           }
+          const params  = new URLSearchParams(window.location.search);
+          const draftId = params.get("openDraft");
+          if (draftId) {
+            const target = loadedOrders.find((o: any) => o.id === draftId);
+            if (target) {
+              const supp = loadedSup.find((s: any) => s.id === target.supplierId);
+              setSelectedSupplier(supp || { id: target.supplierId, name: target.supplierId });
+              setSelectedLocation(target.location);
+              setNotes(target.notes || "");
+              setDraftItems(target.lineItems || []);
+              setEditorState({ isOpen: true, orderId: target.id, readOnly: false });
+              window.history.replaceState({}, "", "/orders");
+            }
+          }
         }
-      } catch (err) {
-         console.error(err);
+      } catch (err: any) {
+        if (thisRequestId !== requestIdRef.current) {
+          console.log("[Orders] stale error ignored  requestId=", thisRequestId);
+          return;
+        }
+        const isAbort = err?.name === "AbortError";
+        console.log(
+          "[Orders] load error",
+          isAbort ? "(timeout/abort)" : "",
+          " requestId=", thisRequestId,
+          " message=", err?.message
+        );
       } finally {
-         setIsLoading(false);
+        console.log("[Orders] load finally  requestId=", thisRequestId, " isCurrent=", thisRequestId === requestIdRef.current);
+        // Always clear loading — even on unmount (React ignores state on unmounted components)
+        if (thisRequestId === requestIdRef.current) {
+          setIsLoading(false);
+        }
       }
     }
-    
-    fetchData();
-  }, []);
+
+    fetchAll();
+
+    return () => {
+      // Cancel in-flight request and timeout on cleanup
+      clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [queryLocationId]); // re-fetch whenever role/location resolves after auth bootstrap
 
   
   // Editor / Draft State
