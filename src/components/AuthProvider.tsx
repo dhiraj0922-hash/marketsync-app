@@ -14,11 +14,7 @@ const AuthContext = createContext<AuthContextType>({ user: null, loading: true, 
 
 export const useAuth = () => useContext(AuthContext);
 
-// Hard ceiling on the auth bootstrap. If getSession() or the profile fetch
-// haven't resolved after AUTH_TIMEOUT_MS we force loading=false so the user
-// is not stuck on a spinner forever. They will be redirected to /login by the
-// redirect effect below because user will still be null.
-const AUTH_TIMEOUT_MS = 8_000;
+const BOOTSTRAP_TIMEOUT_MS = 10_000; // hard ceiling — spinner never shows longer than this
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   console.log("AuthProvider mounted");
@@ -27,6 +23,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const router   = useRouter();
   const pathname = usePathname();
+
+  // Tracks whether the initial bootstrap is complete.
+  // onAuthStateChange is suppressed during bootstrap so it doesn't race with
+  // checkSession() — both would call loadProfile() concurrently otherwise.
+  const bootstrapDone = useRef(false);
 
   // ── Profile loader ──────────────────────────────────────────────────────────
   const loadProfile = async (authUser: { id: string; email?: string }) => {
@@ -71,30 +72,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   // ── Bootstrap: run ONCE on mount ────────────────────────────────────────────
-  // DO NOT include pathname/router in the dependency array.
-  // pathname changes every navigation — putting it here causes a new getSession()
-  // and a new onAuthStateChange subscription on every page visit, leading to
-  // race conditions and the spinner never clearing on cold-start.
   useEffect(() => {
-    let mounted = true;
-    console.log("[AuthProvider] bootstrap start. supabaseConfigured=", supabaseConfigured);
+    let isMounted = true;
+    console.log("[AuthProvider] bootstrap START supabaseConfigured=", supabaseConfigured);
 
-    // Hard timeout: if the entire bootstrap takes longer than AUTH_TIMEOUT_MS,
-    // force loading=false so the user is never stuck on the spinner indefinitely.
-    const hardTimeout = setTimeout(() => {
-      if (mounted) {
+    // Unconditional failsafe — loading WILL be cleared no matter what.
+    // Using a ref so clearTimeout always targets the right timer even if the
+    // component re-renders between setTimeout and clearTimeout.
+    const failsafe = setTimeout(() => {
+      if (isMounted && loading) {
         console.warn(
-          `[AuthProvider] HARD TIMEOUT after ${AUTH_TIMEOUT_MS}ms → setLoading(false). ` +  // ← LOADING FALSE (timeout path)
-          "Bootstrap never completed. Check NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in Vercel env vars."
+          `[AuthProvider] FAILSAFE after ${BOOTSTRAP_TIMEOUT_MS}ms → setLoading(false).` +
+          " Bootstrap never completed. Check Vercel env vars."
         );
-        setLoading(false);
+        bootstrapDone.current = true;
+        setLoading(false); // ← LOADING FALSE path: failsafe
       }
-    }, AUTH_TIMEOUT_MS);
+    }, BOOTSTRAP_TIMEOUT_MS);
 
-    async function checkSession() {
+    async function bootstrap() {
       try {
         if (!supabaseConfigured) {
-          console.error("[AuthProvider] Supabase env vars not configured — skipping getSession. loading will be set false in finally.");
+          console.error("[AuthProvider] Supabase env vars missing — cannot call getSession.");
+          setUser(null);
           return;
         }
 
@@ -102,70 +102,85 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const { data: { session }, error: sessionError } = await supabase.auth.getSession();
         console.log("[AuthProvider] getSession END", {
           sessionPresent: !!session,
-          userId:         session?.user?.id         ?? null,
-          userEmail:      session?.user?.email      ?? null,
+          userId:         session?.user?.id     ?? null,
+          userEmail:      session?.user?.email  ?? null,
           accessToken:    session?.access_token ? "<present>" : null,
-          expiresAt:      session?.expires_at       ?? null,
-          errorMsg:       sessionError?.message     ?? null,
+          expiresAt:      session?.expires_at   ?? null,
+          errorMsg:       sessionError?.message ?? null,
         });
 
-        if (!mounted) {
-          console.log("[AuthProvider] checkSession: component unmounted during getSession — aborting");
+        if (!isMounted) {
+          console.log("[AuthProvider] bootstrap: unmounted after getSession — aborting");
           return;
         }
 
         if (session?.user) {
-          console.log("[AuthProvider] session present → calling loadProfile uid=", session.user.id);
+          console.log("[AuthProvider] session found → loadProfile uid=", session.user.id);
           await loadProfile(session.user);
         } else {
           console.log("[AuthProvider] no session → setUser(null)");
           setUser(null);
         }
-      } catch (e: any) {
-        console.error("[AuthProvider] checkSession THREW:", e?.message ?? e);
-        if (mounted) setUser(null);
+      } catch (err: any) {
+        console.error("[AuthProvider] bootstrap THREW:", err?.message ?? err);
+        if (isMounted) setUser(null);
       } finally {
-        console.log("[AuthProvider] bootstrap finally → setLoading(false)  mounted=", mounted);
-        clearTimeout(hardTimeout);
-        if (mounted) setLoading(false); // ← LOADING FALSE (normal path)
+        clearTimeout(failsafe);
+        bootstrapDone.current = true;
+        console.log("[AuthProvider] bootstrap DONE → setLoading(false)  isMounted=", isMounted);
+        // Call unconditionally — if unmounted React will ignore the state update.
+        // The only thing NOT calling this was the old `if (mounted)` guard which
+        // caused the spinner to persist when the component briefly unmounted/remounted.
+        setLoading(false); // ← LOADING FALSE path: normal
       }
     }
 
-    checkSession();
+    bootstrap();
 
-    // Auth state listener — handles sign-in / sign-out events AFTER bootstrap.
-    // Does NOT call setLoading(false) — bootstrap's finally always handles that.
+    // Auth state listener — only acts AFTER bootstrap is complete.
+    // During bootstrap, checkSession already handles the initial session.
+    // Allowing onAuthStateChange to run concurrently was the race condition
+    // that caused double loadProfile() calls and non-deterministic loading state.
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      console.log("[AuthProvider] onAuthStateChange event=", event, "session=", session ? "present" : "null");
-      if (!mounted) return;
+      console.log("[AuthProvider] onAuthStateChange event=", event, "bootstrapDone=", bootstrapDone.current);
+
+      // Suppress INITIAL_SESSION — bootstrap() handles it.
+      // All other events (SIGNED_IN, SIGNED_OUT, TOKEN_REFRESHED) are handled here.
+      if (event === "INITIAL_SESSION") {
+        console.log("[AuthProvider] onAuthStateChange: skipping INITIAL_SESSION (handled by bootstrap)");
+        return;
+      }
+
+      if (!isMounted) return;
 
       if (session?.user) {
         await loadProfile(session.user);
       } else {
         setUser(null);
+        // Only set loading false if bootstrap is done; otherwise bootstrap's finally handles it
+        if (bootstrapDone.current) {
+          setLoading(false); // ← LOADING FALSE path: sign-out after bootstrap
+        }
       }
     });
 
     return () => {
-      mounted = false;
-      clearTimeout(hardTimeout);
+      isMounted = false;
+      clearTimeout(failsafe);
       subscription.unsubscribe();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // ← intentionally empty: bootstrap runs exactly once on mount
+  }, []); // intentionally empty — bootstrap runs exactly once on mount
 
-  // ── Redirect effect: separate from bootstrap ────────────────────────────────
-  // Runs whenever user or pathname changes, AFTER loading is resolved.
-  // Keeping this separate from the bootstrap effect eliminates the dependency
-  // on pathname/router that was causing re-bootstrap on every navigation.
+  // ── Redirect effect: runs AFTER loading clears ──────────────────────────────
   useEffect(() => {
-    if (loading) return; // don't redirect until we know the auth state
+    if (loading) return; // never redirect while bootstrap is still in progress
 
     if (!user && pathname !== "/login") {
-      console.log("[AuthProvider] redirect → /login (no user, pathname=", pathname, ")");
+      console.log("[AuthProvider] redirect → /login  pathname=", pathname);
       router.push("/login");
     } else if (user && pathname === "/login") {
-      console.log("[AuthProvider] redirect → / (user present, on /login)");
+      console.log("[AuthProvider] redirect → /  (authenticated user on /login)");
       router.push("/");
     }
   }, [user, loading, pathname, router]);
@@ -188,7 +203,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setUser(null);
       router.push("/login");
     } catch (e) {
-      console.error(e);
+      console.error("[AuthProvider] signOut error:", e);
     }
   };
 

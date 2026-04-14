@@ -58,11 +58,8 @@ export default function LoginPage() {
 
         {/* Header */}
         <div className="p-8 pb-6 border-b border-neutral-100 bg-neutral-50/50 flex flex-col items-center">
-          <div className="h-12 w-12 bg-brand-600 rounded-xl mb-4 flex items-center justify-center text-white shadow-sm ring-4 ring-brand-50">
-            <Factory className="h-6 w-6" />
-          </div>
-          <h2 className="text-2xl font-bold text-neutral-900 tracking-tight">Antigravity HQ</h2>
-          <p className="text-sm text-neutral-500 mt-1">Sign in to initialize operational environment</p>
+          <h2 className="text-2xl font-bold text-neutral-900 tracking-tight">StockIQ</h2>
+          <p className="text-sm text-neutral-500 mt-1">Sign in to your account</p>
         </div>
 
         {/* Body */}
@@ -79,7 +76,7 @@ export default function LoginPage() {
           {/* Email field — always visible */}
           <div className="space-y-1">
             <label className="text-xs font-bold text-neutral-600 uppercase tracking-widest pl-1">
-              Authorized Node Email
+              Email
             </label>
             <div className="relative">
               <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-neutral-400">
@@ -100,7 +97,7 @@ export default function LoginPage() {
           {/* Security Clearance label + Forgot password toggle */}
           <div className="flex items-center justify-between pl-1 pr-1">
             <label className="text-xs font-bold text-neutral-600 uppercase tracking-widest">
-              {forgotMode ? "Password Reset" : "Security Clearance"}
+              {forgotMode ? "Password Reset" : "Password"}
             </label>
             <button
               id="forgot-password-toggle"
@@ -186,13 +183,13 @@ export default function LoginPage() {
               >
                 {loading
                   ? <><div className="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>Validating Node...</>
-                  : "Authenticate Key"}
+                  : "Sign In"}
               </button>
             </form>
           )}
 
           <div className="mt-2 text-center text-xs font-medium text-neutral-400">
-            Central Command Instance limits access natively based exclusively upon predefined role architecture schema bounds.
+            Access is limited based on your assigned role.
           </div>
         </div>
       </div>
