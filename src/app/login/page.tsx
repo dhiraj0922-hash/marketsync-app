@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { Factory, Lock, Mail, ServerCrash, KeyRound, CheckCircle2 } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -19,18 +19,47 @@ export default function LoginPage() {
   const [resetLoading, setResetLoading] = useState(false);
   const [resetError, setResetError]     = useState<string | null>(null);
 
+  // Prevents duplicate concurrent sign-in calls. The button's disabled state
+  // closes most paths, but this ref closes the gap for any rapid re-render race.
+  const submittingRef = useRef(false);
+
   // ─ Handlers ───────────────────────────────────────────────────────────────
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submittingRef.current) {
+      console.log("[Login] submit blocked — already in flight");
+      return;
+    }
+    submittingRef.current = true;
     setLoading(true);
     setError(null);
+    console.log("[Login] submit start  email=", email);
+
     try {
-      const { data, error: authError } = await supabase.auth.signInWithPassword({ email, password });
-      if (authError) setError(authError.message);
-      else if (data.session) router.push("/");
-    } catch {
-      setError("An unexpected network error occurred.");
+      // Hard timeout — signInWithPassword must resolve within 10s.
+      // Without this, a cold Supabase instance can leave "Validating Node..."
+      // showing indefinitely with no user feedback.
+      const signInPromise = supabase.auth.signInWithPassword({ email, password });
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Sign-in timed out. Please retry in a moment.")), 10_000)
+      );
+
+      const { data, error: authError } = await Promise.race([signInPromise, timeoutPromise]);
+
+      if (authError) {
+        console.log("[Login] submit error", authError.message);
+        setError(authError.message);
+      } else if (data.session) {
+        console.log("[Login] submit success  uid=", data.session.user.id);
+        // AuthProvider's onAuthStateChange (SIGNED_IN) handles the redirect.
+        // router.push here is a belt-and-suspenders fallback.
+        router.push("/");
+      }
+    } catch (err: any) {
+      console.log("[Login] submit error (caught)", err?.message ?? err);
+      setError(err?.message ?? "An unexpected network error occurred.");
     } finally {
+      submittingRef.current = false;
       setLoading(false);
     }
   };
@@ -182,7 +211,7 @@ export default function LoginPage() {
                 }`}
               >
                 {loading
-                  ? <><div className="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>Validating Node...</>
+                  ? <><div className="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>Signing in...</>
                   : "Sign In"}
               </button>
             </form>
