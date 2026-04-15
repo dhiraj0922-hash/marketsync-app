@@ -4,6 +4,7 @@ import { usePathname } from "next/navigation";
 import { Bell, Search, MapPin, ChevronDown, LogOut, User } from "lucide-react";
 import { useAuth } from "./AuthProvider";
 import { useState } from "react";
+import { isHqAdmin, accessScopeLabel } from "@/lib/roles";
 
 const getPageTitle = (pathname: string) => {
   if (pathname === "/") return "Overview";
@@ -17,22 +18,15 @@ export function Header() {
   const { user, signOut } = useAuth();
   const [profileOpen, setProfileOpen] = useState(false);
 
-  // Normalise role string coming from either system_users ("Location Manager")
-  // or user_profiles ("location_manager") so the header works regardless of source.
   const rawRole: string = user?.role ?? "";
-  const isLocationManager =
-    rawRole === "location_manager" ||
-    rawRole.toLowerCase() === "location manager";
+  const isLocationMgr = !isHqAdmin(user) && !!user?.role;
 
-  // Location pill label: use assigned location if available, otherwise generic.
-  const locationLabel: string =
-    user?.locationId ||
-    (Array.isArray(user?.assignedLocations) && user.assignedLocations[0] !== "All"
-      ? user.assignedLocations[0]
-      : null) ||
-    "My Location";
+  // Location pill label
+  const locationLabel: string = isLocationMgr
+    ? (user?.locationId || "My Location")
+    : accessScopeLabel(user);
 
-  console.log("HEADER ROLE", rawRole, "| isLocationManager:", isLocationManager, "| locationId:", user?.locationId);
+  console.log("HEADER ROLE", rawRole, "| isLocationMgr:", isLocationMgr, "| locationId:", user?.locationId);
 
   return (
     <header className="h-16 flex items-center justify-between px-6 lg:px-8 border-b border-neutral-200 bg-white sticky top-0 z-10 w-full shadow-sm">
@@ -42,7 +36,7 @@ export function Header() {
         <div className="h-6 w-px bg-neutral-200 hidden md:block"></div>
 
         {/* ── Location selector — role-aware ─────────────────────────────── */}
-        {isLocationManager ? (
+        {isLocationMgr ? (
           /* Location manager: read-only pill, no dropdown, no location switching */
           <div className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-md border border-neutral-200 bg-neutral-50 text-sm font-medium text-neutral-700 cursor-default select-none">
             <MapPin className="h-4 w-4 text-brand-600" />

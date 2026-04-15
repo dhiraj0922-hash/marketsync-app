@@ -13,6 +13,7 @@ import { Plus, Search, SplitSquareVertical, Calculator, Trash2, Sparkles } from 
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
 import { AIRecipeImport } from "@/components/AIRecipeImport";
 import { useAuth } from "@/components/AuthProvider";
+import { isHqAdmin, resolveLocationId } from "@/lib/roles";
 
 // ─── Utility: race a promise against a cancellable deadline ───────────────────
 //
@@ -99,12 +100,7 @@ function RecipesPageContent() {
       setIsLoading(true);
       try {
         // Scope inventory to the user's location — identical to inventory page.
-        // Without this, loadInventory() returns ALL locations, making two
-        // cauliflower rows (one per location) appear as duplicate options.
-        const locationId: string =
-          user?.role === "hq_admin" || (user?.role ?? "").toLowerCase().includes("hq")
-            ? "LOC-HQ"
-            : (user?.locationId ?? "");
+        const locationId: string = resolveLocationId(user);
 
         const [loadedRec, loadedInv, loadedSups] = await Promise.all([
           loadRecipes(),

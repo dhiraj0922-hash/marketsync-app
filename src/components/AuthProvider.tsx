@@ -3,9 +3,10 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { supabase, supabaseConfigured } from "@/lib/supabase";
+import { ROLE_HQ_ADMIN, LOC_HQ, type AppUser } from "@/lib/roles";
 
 type AuthContextType = {
-  user: any;
+  user: AppUser | null;
   loading: boolean;
   signOut: () => Promise<void>;
 };
@@ -14,13 +15,12 @@ const AuthContext = createContext<AuthContextType>({ user: null, loading: true, 
 
 export const useAuth = () => useContext(AuthContext);
 
-// Hard timeout for the entire bootstrap (getSession + loadProfile).
-const BOOTSTRAP_TIMEOUT_MS = 10_000;
-// Hard timeout for the user_profiles fetch alone — prevents a slow DB from
-// consuming the entire bootstrap budget and leaving no room for state updates.
-const PROFILE_TIMEOUT_MS   =  6_000;
+// ── Timeouts ─────────────────────────────────────────────────────────────────
+/** Hard limit for the entire initial bootstrap (getSession + loadProfile) */
+const BOOTSTRAP_TIMEOUT_MS = 12_000;
+/** Per-fetch limit for the user_profiles query */
+const PROFILE_TIMEOUT_MS   =  7_000;
 
-// Promise that rejects after `ms` milliseconds with a clear message.
 function withTimeout<T>(promise: PromiseLike<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const t = setTimeout(() => reject(new Error(`[AuthProvider] timeout: ${label} exceeded ${ms}ms`)), ms);
@@ -31,22 +31,23 @@ function withTimeout<T>(promise: PromiseLike<T>, ms: number, label: string): Pro
   });
 }
 
+// ── Error types ───────────────────────────────────────────────────────────────
+type BootstrapError = "timeout" | "profile_fetch_failed" | null;
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  // NOTE: this log fires on every render — normal for a context provider.
-  // The key line to watch is "[AuthProvider] bootstrap START" which fires once.
-  const [user, setUser]             = useState<any>(null);
-  const [loading, setLoading]       = useState(true);
-  // Exposed in the loading screen so users know when to retry instead of waiting.
-  const [timedOut, setTimedOut]     = useState(false);
+  const [user, setUser]           = useState<AppUser | null>(null);
+  const [loading, setLoading]     = useState(true);
+  const [bootstrapError, setBootstrapError] = useState<BootstrapError>(null);
+
   const router   = useRouter();
   const pathname = usePathname();
 
-  // Tracks whether the initial bootstrap is complete.
-  // onAuthStateChange INITIAL_SESSION is suppressed during bootstrap to prevent
-  // a concurrent loadProfile() race with the bootstrap's own profile fetch.
+  // Prevents concurrent profile fetches (bootstrap + onAuthStateChange race)
   const bootstrapDone = useRef(false);
-  // Ref so the failsafe callback always sees the live value, not a stale closure.
   const loadingRef    = useRef(true);
+  // Retain the last successfully loaded user so a token-refresh profile
+  // re-fetch failure doesn't wipe out a known-good role.
+  const lastGoodUser  = useRef<AppUser | null>(null);
 
   const markLoadingFalse = (label: string) => {
     console.log(`[AuthProvider] setLoading(false) via: ${label}`);
@@ -54,9 +55,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setLoading(false);
   };
 
-  // ── Profile loader with its own timeout ────────────────────────────────────
-  const loadProfile = async (authUser: { id: string; email?: string }) => {
-    console.log("[AuthProvider] loadProfile START  uid=", authUser.id, " email=", authUser.email);
+  // ── Profile loader ────────────────────────────────────────────────────────
+  /**
+   * Fetches user_profiles for the given auth user.
+   *
+   * On success → sets user with profileLoaded=true, updates lastGoodUser ref.
+   * On timeout/error → does NOT wipe user.role. Instead:
+   *   - If lastGoodUser exists (e.g. token refresh path): restores it with profileError=true flag.
+   *   - If no prior user (bootstrap path): sets user with role=null and profileError=true
+   *     so the UI can show a retry instead of a wrong access-denied screen.
+   */
+  const loadProfile = async (authUser: { id: string; email?: string }, isBootstrap = false) => {
+    console.log("[AuthProvider] loadProfile START  uid=", authUser.id, " email=", authUser.email, " isBootstrap=", isBootstrap);
 
     try {
       const { data: profile, error } = await withTimeout(
@@ -79,53 +89,80 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       });
 
       if (error || !profile) {
-        console.warn("[AuthProvider] loadProfile: no profile row — setting user with role=null");
-        setUser({
-          id: authUser.id,
-          email: authUser.email ?? "",
-          name: authUser.email?.split("@")[0] ?? "Unknown",
-          role: null,
-          locationId: null,
-        });
+        // ── Profile row missing ───────────────────────────────────────────
+        // PGRST116 = "not found" — profile row doesn't exist yet.
+        // Other errors = DB/network problem.
+        console.warn("[AuthProvider] loadProfile: no profile row or DB error — code:", error?.code);
+
+        if (lastGoodUser.current) {
+          // Token refresh path: don't downgrade. Restore last-known-good user.
+          console.warn("[AuthProvider] loadProfile: restoring lastGoodUser (no downgrade on refresh path)");
+          setUser({ ...lastGoodUser.current, profileError: true });
+        } else {
+          // Bootstrap path: genuinely no profile. Set minimal user with error flag.
+          const minimal: AppUser = {
+            id:           authUser.id,
+            email:        authUser.email ?? "",
+            name:         authUser.email?.split("@")[0] ?? "Unknown",
+            role:         null,
+            locationId:   null,
+            profileError: true,
+          };
+          setUser(minimal);
+          if (isBootstrap) setBootstrapError("profile_fetch_failed");
+        }
         return;
       }
 
-      console.log("[AuthProvider] loadProfile OK → role=", profile.role, " locationId=", profile.location_id);
-      setUser({
-        id: profile.user_id,
-        email: authUser.email ?? "",
-        name: profile.full_name ?? authUser.email?.split("@")[0] ?? "User",
-        role: profile.role,
-        locationId: profile.location_id,
-        isActive: profile.is_active,
-      });
+      // ── Success ───────────────────────────────────────────────────────────
+      const resolved: AppUser = {
+        id:            profile.user_id,
+        email:         authUser.email ?? "",
+        name:          profile.full_name ?? authUser.email?.split("@")[0] ?? "User",
+        role:          profile.role,
+        locationId:    profile.location_id,
+        isActive:      profile.is_active,
+        profileLoaded: true,
+        profileError:  false,
+      };
+      console.log("[AuthProvider] loadProfile OK → role=", resolved.role, " locationId=", resolved.locationId);
+      lastGoodUser.current = resolved;
+      setUser(resolved);
+      setBootstrapError(null);
+
     } catch (err: any) {
       console.error("[AuthProvider] loadProfile THREW:", err?.message ?? err);
-      // Always set a minimal user so the app isn't stuck.
-      setUser({
-        id: authUser.id,
-        email: authUser.email ?? "",
-        name: authUser.email?.split("@")[0] ?? "Unknown",
-        role: null,
-        locationId: null,
-      });
+
+      if (lastGoodUser.current) {
+        // Restore last-known-good — timeout on token-refresh shouldn't log you out
+        console.warn("[AuthProvider] loadProfile: timeout/error on refresh — restoring lastGoodUser");
+        setUser({ ...lastGoodUser.current, profileError: true });
+      } else {
+        setUser({
+          id:           authUser.id,
+          email:        authUser.email ?? "",
+          name:         authUser.email?.split("@")[0] ?? "Unknown",
+          role:         null,
+          locationId:   null,
+          profileError: true,
+        });
+        if (isBootstrap) setBootstrapError("timeout");
+      }
     }
   };
 
-  // ── Bootstrap: run ONCE on mount ────────────────────────────────────────────
+  // ── Bootstrap — runs exactly once on mount ────────────────────────────────
   useEffect(() => {
     let isMounted = true;
-    console.log("[AuthProvider] bootstrap START supabaseConfigured=", supabaseConfigured);
 
-    // Failsafe: if bootstrap has not resolved within BOOTSTRAP_TIMEOUT_MS,
-    // force the spinner off and show the retry message.
-    // Uses loadingRef (not the stale closure `loading`) to check live state.
+    console.log("[AuthProvider] bootstrap START  supabaseConfigured=", supabaseConfigured);
+
     const failsafe = setTimeout(() => {
       if (isMounted && loadingRef.current) {
-        console.warn(`[AuthProvider] FAILSAFE after ${BOOTSTRAP_TIMEOUT_MS}ms — bootstrap never completed.`);
+        console.warn(`[AuthProvider] FAILSAFE after ${BOOTSTRAP_TIMEOUT_MS}ms — forcing loading=false`);
         bootstrapDone.current = true;
-        setTimedOut(true);
-        setUser(null);
+        setBootstrapError("timeout");
+        // Don't wipe user — just unblock the UI
         markLoadingFalse("failsafe-timeout");
       }
     }, BOOTSTRAP_TIMEOUT_MS);
@@ -133,7 +170,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     async function bootstrap() {
       try {
         if (!supabaseConfigured) {
-          console.error("[AuthProvider] Supabase env vars missing — cannot call getSession.");
+          console.error("[AuthProvider] Supabase env vars missing.");
           setUser(null);
           return;
         }
@@ -142,21 +179,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const { data: { session }, error: sessionError } = await supabase.auth.getSession();
         console.log("[AuthProvider] getSession END", {
           sessionPresent: !!session,
-          userId:         session?.user?.id     ?? null,
-          userEmail:      session?.user?.email  ?? null,
-          accessToken:    session?.access_token ? "<present>" : null,
-          expiresAt:      session?.expires_at   ?? null,
+          userId:         session?.user?.id   ?? null,
           errorMsg:       sessionError?.message ?? null,
         });
 
-        if (!isMounted) {
-          console.log("[AuthProvider] bootstrap: unmounted after getSession — aborting");
-          return;
-        }
+        if (!isMounted) return;
 
         if (session?.user) {
           console.log("[AuthProvider] session found → loadProfile uid=", session.user.id);
-          await loadProfile(session.user);
+          await loadProfile(session.user, /* isBootstrap */ true);
         } else {
           console.log("[AuthProvider] no session → setUser(null)");
           setUser(null);
@@ -173,32 +204,41 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     bootstrap();
 
-    // Auth state listener — INITIAL_SESSION is suppressed so it doesn't race
-    // with bootstrap(). SIGNED_IN / SIGNED_OUT / TOKEN_REFRESHED are handled
-    // here after bootstrap completes.
+    // ── Auth state listener ───────────────────────────────────────────────
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       console.log("[AuthProvider] onAuthStateChange event=", event, "bootstrapDone=", bootstrapDone.current);
 
-      if (event === "INITIAL_SESSION") {
-        console.log("[AuthProvider] skipping INITIAL_SESSION — handled by bootstrap()");
-        return;
-      }
+      // INITIAL_SESSION is handled by bootstrap() — skip to avoid the race
+      if (event === "INITIAL_SESSION") return;
 
       if (!isMounted) return;
 
-      if (session?.user) {
-        await loadProfile(session.user);
-        // After a SIGNED_IN event (post-login), ensure loading is cleared
-        // in case bootstrap already ran and set it false, but a re-render
-        // race put it back to true.
+      if (event === "TOKEN_REFRESHED") {
+        // Token refreshed silently. Re-validate the profile in the background
+        // but DO NOT show loading spinner (would flash the screen on every refresh).
+        // Also: if the refetch fails, lastGoodUser ensures we keep the good role.
+        if (session?.user) {
+          console.log("[AuthProvider] TOKEN_REFRESHED — silent profile revalidation uid=", session.user.id);
+          // Fire-and-forget: loading stays false, role is preserved via lastGoodUser
+          loadProfile(session.user, /* isBootstrap */ false);
+        }
+        return;
+      }
+
+      if (event === "SIGNED_IN" && session?.user) {
+        // New login — set loading so the redirect effect fires cleanly
         if (bootstrapDone.current) {
+          await loadProfile(session.user, /* isBootstrap */ false);
           markLoadingFalse("onAuthStateChange-signed-in");
         }
-      } else {
+        return;
+      }
+
+      if (event === "SIGNED_OUT") {
+        lastGoodUser.current = null;
         setUser(null);
-        if (bootstrapDone.current) {
-          markLoadingFalse("onAuthStateChange-signed-out");
-        }
+        if (bootstrapDone.current) markLoadingFalse("onAuthStateChange-signed-out");
+        return;
       }
     });
 
@@ -208,12 +248,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       subscription.unsubscribe();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // intentionally empty — bootstrap runs exactly once on mount
+  }, []);
 
-  // ── Redirect effect: runs only AFTER loading=false ─────────────────────────
+  // ── Redirect effect ───────────────────────────────────────────────────────
   useEffect(() => {
     if (loading) return;
-
     if (!user && pathname !== "/login") {
       console.log("[AuthProvider] redirect → /login  pathname=", pathname);
       router.push("/login");
@@ -223,16 +262,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [user, loading, pathname, router]);
 
-  // ── Loading screen ──────────────────────────────────────────────────────────
+  // ── Loading screen ────────────────────────────────────────────────────────
   if (loading && pathname !== "/login") {
     return (
       <div className="min-h-screen bg-neutral-50 flex items-center justify-center">
         <div className="flex flex-col items-center gap-4">
-          {timedOut ? (
-            // Timeout state — never show infinite spinner
+          {bootstrapError ? (
+            // Error / timeout state — clear message + retry
             <>
-              <div className="text-neutral-500 text-sm font-medium text-center max-w-xs">
-                Authentication is taking longer than expected. Please retry.
+              <div className="text-neutral-700 text-sm font-semibold text-center max-w-xs">
+                {bootstrapError === "timeout"
+                  ? "Authentication is taking longer than expected."
+                  : "Your profile could not be loaded. Please check your connection."}
+              </div>
+              <div className="text-neutral-500 text-xs text-center max-w-xs">
+                Your session is still active — this is usually a temporary DB cold-start.
               </div>
               <button
                 onClick={() => window.location.reload()}
@@ -242,9 +286,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               </button>
             </>
           ) : (
-            // Normal loading spinner
+            // Normal spinner
             <div className="animate-pulse flex flex-col items-center">
-              <div className="h-8 w-8 rounded-full border-4 border-brand-500 border-t-transparent animate-spin mb-4"></div>
+              <div className="h-8 w-8 rounded-full border-4 border-brand-500 border-t-transparent animate-spin mb-4" />
               <div className="text-neutral-500 text-sm font-medium">Validating security context...</div>
             </div>
           )}
@@ -255,6 +299,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signOut = async () => {
     try {
+      lastGoodUser.current = null;
       await supabase.auth.signOut();
       setUser(null);
       router.push("/login");

@@ -3,6 +3,7 @@
 import { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/components/AuthProvider";
+import { isHqAdmin, resolveLocationId } from "@/lib/roles";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
@@ -109,7 +110,7 @@ export default function Inventory() {
           // Scope to current user's location — loadInventory() returns all rows across
           // all locations. Without filtering, HQ users would see store rows and vice-versa.
           const userLocationId: string =
-            user?.role === "hq_admin" ? "LOC-HQ" : (user?.locationId ?? "");
+            resolveLocationId(user);
 
           const scopedInv = userLocationId
             ? inv.filter((item: any) => item.locationId === userLocationId)
@@ -523,22 +524,13 @@ export default function Inventory() {
       return;
     }
 
-    // Determine location_id.
-    // HQ admins (role === 'hq_admin') always write to LOC-HQ.
-    // Location managers write to their assigned location.
-    // Fallback: if locationId is still empty after all checks, default to
-    // LOC-HQ rather than blocking — HQ view is the primary use-case.
-    const rawRole      = user?.role ?? "";
-    const rawLocId     = user?.locationId ?? "";
-    const isHqAdmin    = rawRole === "hq_admin" || rawRole.toLowerCase().includes("hq");
-    const locationId: string = isHqAdmin
-      ? "LOC-HQ"
-      : (rawLocId || "LOC-HQ"); // fall through to LOC-HQ instead of blocking
+    // HQ admins always write to LOC-HQ; location managers use their assigned location.
+    const locationId: string = resolveLocationId(user);
 
     // Always log so the real values are visible in the console.
-    console.log("[AddItem] role=", rawRole, " locationId=", rawLocId, " → resolved location_id=", locationId, " isHqAdmin=", isHqAdmin);
+    console.log("[AddItem] role=", user?.role, " locationId=", user?.locationId, " → resolved location_id=", locationId, " isHqAdmin=", isHqAdmin(user));
 
-    // Only block if locationId is genuinely missing (should never happen after the fallback above)
+    // Should never be empty after resolveLocationId, but guard defensively
     if (!locationId) {
       alert("Your profile has no location assigned. Cannot add item.");
       return;
@@ -748,8 +740,7 @@ export default function Inventory() {
               });
           } else {
               // Determine location for this import (HQ admin → LOC-HQ, else current user location)
-              const importLocationId: string =
-                user?.role === "hq_admin" ? "LOC-HQ" : (user?.locationId ?? "LOC-HQ");
+              const importLocationId: string = resolveLocationId(user);
               const newRowId = crypto.randomUUID(); // always unique per location row
 
               // Reuse shared item_id if same product name exists on the other side of HQ/store boundary

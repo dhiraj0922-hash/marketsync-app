@@ -412,7 +412,7 @@ export default function Orders() {
     const canonicalLocationId: string =
       user.role === "hq_admin"
         ? HQ_LOCATION_ID
-        : (user.locationId ?? null);    // null guard below will catch this
+        : (user.locationId ?? HQ_LOCATION_ID);
 
     if (user.role !== "hq_admin" && !canonicalLocationId) {
       alert("Your user profile does not have a location assigned. Contact HQ to assign your location before creating orders.");

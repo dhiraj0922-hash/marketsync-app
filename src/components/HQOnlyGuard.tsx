@@ -5,29 +5,20 @@
  *
  * Page-level route protection for HQ-admin-only pages.
  *
- * Usage — wrap the entire page export:
- *
- *   export default function UsersPage() {
- *     return (
- *       <HQOnlyGuard>
- *         <ActualPageContent />
- *       </HQOnlyGuard>
- *     );
- *   }
- *
  * Behaviour:
- *   - While auth is loading: shows a neutral spinner (same style as AuthProvider).
- *   - hq_admin: renders children normally.
- *   - location_manager or unconfigured role: renders an access-denied screen.
- *     The user is NOT redirected — they stay on the URL so they can see the
- *     message, but no page content or data is rendered.
+ *   - While auth is loading: spinner.
+ *   - profileError=true: shows a non-blocking warning banner but still renders
+ *     children IF the last known role was hq_admin (prevents lock-out on cold-start).
+ *   - isHqAdmin(): renders children normally.
+ *   - Any other role: renders an access-denied screen (no redirect).
  *
- * Location-agnostic: the check reads from useAuth() which reads user_profiles.
- * Every future location_manager automatically inherits the block.
+ * Uses the central isHqAdmin() helper from roles.ts so role matching is
+ * case-insensitive and consistent across the entire app.
  */
 
 import { useAuth } from "@/components/AuthProvider";
-import { ShieldOff, ArrowLeft } from "lucide-react";
+import { isHqAdmin } from "@/lib/roles";
+import { ShieldOff, ArrowLeft, AlertTriangle } from "lucide-react";
 import Link from "next/link";
 
 interface HQOnlyGuardProps {
@@ -37,7 +28,7 @@ interface HQOnlyGuardProps {
 export function HQOnlyGuard({ children }: HQOnlyGuardProps) {
   const { user, loading } = useAuth();
 
-  // ── Still resolving session ──────────────────────────────────────────────
+  // ── Still resolving session ────────────────────────────────────────────────
   if (loading) {
     return (
       <div className="min-h-screen bg-neutral-50 flex items-center justify-center">
@@ -49,12 +40,34 @@ export function HQOnlyGuard({ children }: HQOnlyGuardProps) {
     );
   }
 
-  // ── Authorised ───────────────────────────────────────────────────────────
-  if (user?.role === "hq_admin") {
+  // ── Profile fetch failed (DB cold-start / network error) ──────────────────
+  // If we have a previous good user that was hq_admin, show a non-blocking
+  // banner and let them through — don't lock out an HQ admin on a slow DB.
+  if ((user as any)?.profileError && isHqAdmin(user)) {
+    return (
+      <>
+        <div className="w-full bg-warning-50 border-b border-warning-200 px-6 py-2 flex items-center gap-2 text-warning-700 text-xs font-medium">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+          Profile refresh failed — using cached credentials. Some data may be stale.&nbsp;
+          <button
+            onClick={() => window.location.reload()}
+            className="underline font-semibold hover:text-warning-800"
+          >
+            Retry
+          </button>
+        </div>
+        {children}
+      </>
+    );
+  }
+
+  // ── Authorised ─────────────────────────────────────────────────────────────
+  if (isHqAdmin(user)) {
     return <>{children}</>;
   }
 
-  // ── Access denied — location_manager or unconfigured ────────────────────
+  // ── Access denied ──────────────────────────────────────────────────────────
+  const roleDisplay = user?.role ?? "unauthenticated";
   return (
     <div className="min-h-screen bg-neutral-50 flex items-center justify-center p-6">
       <div className="max-w-md w-full text-center space-y-5">
@@ -64,14 +77,19 @@ export function HQOnlyGuard({ children }: HQOnlyGuardProps) {
           </div>
         </div>
         <div>
-          <h1 className="text-xl font-bold text-neutral-900 mb-2">
-            HQ Admin Access Only
-          </h1>
+          <h1 className="text-xl font-bold text-neutral-900 mb-2">HQ Admin Access Only</h1>
           <p className="text-sm text-neutral-500 leading-relaxed">
             This section is restricted to HQ administrators. Your account
-            ({user?.role ?? "unauthenticated"}) does not have permission to
-            view this page.
+            ({roleDisplay}) does not have permission to view this page.
           </p>
+          {(user as any)?.profileError && (
+            <p className="text-xs text-warning-600 mt-2">
+              Your profile failed to load — if you are an HQ admin, please&nbsp;
+              <button onClick={() => window.location.reload()} className="underline font-semibold">
+                retry
+              </button>.
+            </p>
+          )}
         </div>
         <Link
           href="/"
