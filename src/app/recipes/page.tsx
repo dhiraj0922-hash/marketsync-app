@@ -12,6 +12,7 @@ import { normalizeUnit, canonicalizeUnit, resolveEffectiveBaseUom, computeBaseUn
 import { Plus, Search, SplitSquareVertical, Calculator, Trash2, Sparkles } from "lucide-react";
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
 import { AIRecipeImport } from "@/components/AIRecipeImport";
+import { useAuth } from "@/components/AuthProvider";
 
 // ─── Utility: race a promise against a cancellable deadline ───────────────────
 //
@@ -63,6 +64,7 @@ export default function Recipes() {
 }
 
 function RecipesPageContent() {
+  const { user } = useAuth();
   const [recipes, setRecipes] = useState<any[]>([]);
   const [inventory, setInventory] = useState<any[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
@@ -91,9 +93,17 @@ function RecipesPageContent() {
     async function fetchData() {
       setIsLoading(true);
       try {
+        // Scope inventory to the user's location — identical to inventory page.
+        // Without this, loadInventory() returns ALL locations, making two
+        // cauliflower rows (one per location) appear as duplicate options.
+        const locationId: string =
+          user?.role === "hq_admin" || (user?.role ?? "").toLowerCase().includes("hq")
+            ? "LOC-HQ"
+            : (user?.locationId ?? "");
+
         const [loadedRec, loadedInv] = await Promise.all([
           loadRecipes(),
-          loadInventory()
+          loadInventory(locationId || undefined)
         ]);
         setRecipes(loadedRec);
         setInventory(loadedInv);
@@ -104,7 +114,9 @@ function RecipesPageContent() {
       }
     }
     fetchData();
-  }, []);
+  // Re-fetch if user resolves after mount (auth timing)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.locationId, user?.role]);
 
   if (isLoading) return <div className="animate-pulse flex p-12 justify-center text-neutral-400">Loading Recipes...</div>;
 
@@ -618,10 +630,11 @@ function RecipesPageContent() {
 
                   const targetId = ing.inventoryId || ing.fgId;
 
-                  // ── Item lookup — dual-path identical to calculateCost ──────────────────
-                  // Bug fix: previously only matched by i.id, but addIngredient was storing
-                  // itemId (shared cross-location id) instead of row PK. Now we match both
-                  // so saved recipes load correctly regardless of which id was stored.
+                  // ── Item lookup — match on row id first, itemId only as fallback ──────────
+                  // IMPORTANT: always prefer the unique row id over the shared item_id.
+                  // Two items with the same name share item_id (cross-location link) — if we
+                  // match on itemId first, the second cauliflower would resolve to the first's
+                  // row and show wrong cost / units. Row id is always unique.
                   const invItem = inventory.find(i =>
                     (targetId != null) && (
                       i.id.toString() === targetId.toString() ||
@@ -801,18 +814,44 @@ function RecipesPageContent() {
                  >
                    <option value="">Select inventory item or preparation to append...</option>
                    <optgroup label="Raw Inventory Nodes">
-                     {inventory.filter((i: any) => i.itemType === 'Raw' || !i.itemType).map((item: any) => (
-                       <option key={`inv-${item.id}`} value={item.id.toString()}>
-                         {item.name} ({item.unit}) — ${(item.cost || 0).toFixed(2)}/{item.unit}
-                       </option>
-                     ))}
+                     {inventory
+                       .filter((i: any) => (i.itemType === 'Raw' || !i.itemType) && (!user?.locationId || i.locationId === user.locationId))
+                       .map((item: any) => {
+                         const sameNameCount = inventory.filter(
+                           (x: any) => x.name.toLowerCase() === item.name.toLowerCase()
+                         ).length;
+                         const idSuffix = sameNameCount > 1
+                           ? ` [#${String(item.id).slice(-6)}]`
+                           : '';
+                         const catPart = item.category ? ` · ${item.category}` : '';
+                         const label = `${item.name}${catPart} (${item.unit}) — $${(item.cost || 0).toFixed(2)}/${item.unit}${idSuffix}`;
+                         return (
+                           <option key={`inv-${item.id}`} value={item.id.toString()}>
+                             {label}
+                           </option>
+                         );
+                       })
+                     }
                    </optgroup>
-                   <optgroup label="Finished Goods & Preparations">
-                     {inventory.filter((i: any) => i.itemType === 'Preparation' || i.itemType === 'Finished Good').map((item: any) => (
-                       <option key={`prep-${item.id}`} value={item.id.toString()}>
-                         {item.name} ({item.unit}) — ${(item.cost || 0).toFixed(2)}/{item.unit}
-                       </option>
-                     ))}
+                   <optgroup label="Finished Goods &amp; Preparations">
+                     {inventory
+                       .filter((i: any) => (i.itemType === 'Preparation' || i.itemType === 'Finished Good') && (!user?.locationId || i.locationId === user.locationId))
+                       .map((item: any) => {
+                         const sameNameCount = inventory.filter(
+                           (x: any) => x.name.toLowerCase() === item.name.toLowerCase()
+                         ).length;
+                         const idSuffix = sameNameCount > 1
+                           ? ` [#${String(item.id).slice(-6)}]`
+                           : '';
+                         const catPart = item.category ? ` · ${item.category}` : '';
+                         const label = `${item.name}${catPart} (${item.unit}) — $${(item.cost || 0).toFixed(2)}/${item.unit}${idSuffix}`;
+                         return (
+                           <option key={`prep-${item.id}`} value={item.id.toString()}>
+                             {label}
+                           </option>
+                         );
+                       })
+                     }
                    </optgroup>
                  </select>
                  <button 
