@@ -8,19 +8,18 @@ import { Drawer } from "@/components/ui/drawer";
 import { Calendar, CheckCircle2, Clock, Smartphone, Play, Save, Send, ShieldCheck, FileEdit, Calculator, ArrowRight } from "lucide-react";
 import { loadCounts, saveCounts, loadInventory, saveInventory } from "@/lib/storage";
 import { useAuth } from "@/components/AuthProvider";
-
+import { isHqAdmin, resolveLocationId } from "@/lib/roles";
 
 const locationsData = ["Downtown", "Uptown", "Westside", "HQ"];
 const countTypes = ["Daily", "Weekly", "Monthly", "Spot Check"];
 
 export default function Counts() {
   const { user } = useAuth();
-  // writeLocationId: used when inserting rows — always a real DB location_id (NOT NULL)
-  const writeLocationId: string =
-    user?.role === "hq_admin" ? "LOC-HQ" : (user?.locationId ?? "");
-  // queryLocationId: used when loading — null for hq_admin (see all), scoped for store managers
-  const queryLocationId: string | null =
-    user?.role === "hq_admin" ? null : (user?.locationId ?? null);
+  // writeLocationId: used when inserting rows — always a real DB location_id (NOT NULL).
+  // resolveLocationId() returns "LOC-HQ" for hq_admin (even when location_id is null in DB).
+  const writeLocationId: string = resolveLocationId(user);
+  // queryLocationId: null for hq_admin (see all), scoped for location managers.
+  const queryLocationId: string | null = isHqAdmin(user) ? null : (user?.locationId ?? null);
 
   const [counts, setCounts] = useState<any[]>([]);
   const [inventoryData, setInventoryData] = useState<any[]>([]);

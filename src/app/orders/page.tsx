@@ -33,6 +33,7 @@ import {
 import { loadOrders, saveOrders, insertOrder, updateOrder, deleteOrder, generateOrderId, loadInventory, saveInventory, loadSuppliers, resolveSupplier, loadLocations } from "@/lib/storage";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/components/AuthProvider";
+import { isHqAdmin, resolveLocationId } from "@/lib/roles";
 
 const HQ_LOCATION_ID = "LOC-HQ";
 
@@ -40,8 +41,7 @@ export default function Orders() {
   const { user } = useAuth();
   // queryLocationId: scopes the loadOrders query
   // Recomputed each render — safe as a render-time value (only used in useEffect deps)
-  const queryLocationId: string | null =
-    user?.role === "hq_admin" ? null : (user?.locationId ?? null);
+  const queryLocationId: string | null = isHqAdmin(user) ? null : (user?.locationId ?? null);
 
   // NOTE: writeLocationId is intentionally NOT a render-time constant.
   // Computing it from user at render captures user=null before the profile loads,
@@ -273,14 +273,9 @@ export default function Orders() {
     setSelectedSupplier(null);
     setOrderSaveError(null);
     // location_manager: lock to their canonical locationId.
-    // Store the raw locationId (not the display name) — saveOrder reads it from
-    // the user profile anyway, but selectedLocation drives the disabled check on
-    // Send Order. If we called locationDisplayName() here while locations is still
-    // loading it returns "" → Send is permanently disabled. Use locationId directly.
+    // HQ admin: leave selectedLocation blank — they choose manually in the form.
     setSelectedLocation(
-      user?.role === "location_manager"
-        ? (user.locationId ?? "")
-        : ""
+      isHqAdmin(user) ? "" : (user?.locationId ?? "")
     );
     setDraftItems([]);
     setNotes("");
@@ -335,7 +330,7 @@ export default function Orders() {
          total: total,
          status: "Draft",
          location: "HQ",
-         locationId: user?.role === "hq_admin" ? HQ_LOCATION_ID : (user?.locationId ?? HQ_LOCATION_ID),  // resolved fresh at call time
+         locationId: resolveLocationId(user),  // resolved fresh at call time
          notes: "Auto-generated from low stock metrics",
          createdBy: "System",
          receivedBy: null,
@@ -401,20 +396,11 @@ export default function Orders() {
     if (isSavingOrder) return;
     setOrderSaveError(null);
 
-    // ── Resolve canonical location_id FRESH from user at call time ──────────────
-    // DO NOT use a render-time constant. writeLocationId captured at render
-    // picks up user=null (before profile loads) and silently writes LOC-HQ
-    // instead of the user's real location_id, causing the RLS WITH CHECK to fail.
-    if (!user) {
-      alert("User session not loaded. Please wait a moment and try again.");
-      return;
-    }
-    const canonicalLocationId: string =
-      user.role === "hq_admin"
-        ? HQ_LOCATION_ID
-        : (user.locationId ?? HQ_LOCATION_ID);
+    // Resolve canonical location_id FRESH via roles helper — always returns a string.
+    const canonicalLocationId: string = resolveLocationId(user);
 
-    if (user.role !== "hq_admin" && !canonicalLocationId) {
+    // Only block location_managers who are missing their location assignment
+    if (!isHqAdmin(user) && !user?.locationId) {
       alert("Your user profile does not have a location assigned. Contact HQ to assign your location before creating orders.");
       return;
     }
