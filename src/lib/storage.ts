@@ -30,17 +30,33 @@ const mapInventoryToFrontend = (db: any) => ({
      supplierId: db.supplierid,
      priceTrend: db.pricetrend,
      priceIncrease: db.priceincrease,
-     purchaseUnits: db.purchaseunits || []
+     purchaseUnits: db.purchaseunits || [],
+     // ── Phase 1: Structured packaging / UOM fields ─────────────────────────
+     // All nullable. NULL = legacy behavior in costing (falls back to purchaseUnits → item.cost).
+     purchaseUom:       db.purchase_uom      ?? null,  // supplier invoice unit (e.g. 'case')
+     packQty:           db.pack_qty          != null ? Number(db.pack_qty)       : null, // inner units per pack
+     innerUnitType:     db.inner_unit_type   ?? null,  // e.g. 'can', 'bottle'
+     innerUnitSize:     db.inner_unit_size   != null ? Number(db.inner_unit_size) : null, // qty per inner unit
+     innerUnitUom:      db.inner_unit_uom    ?? null,  // measurement unit of innerUnitSize
+     baseUomNew:        db.base_uom          ?? null,  // preferred costing unit (overrides baseUnit when set)
+     allowedRecipeUoms: Array.isArray(db.allowed_recipe_uoms) ? db.allowed_recipe_uoms : null,
 });
 
-const mapInventoryToDB = (item: any) => ({
+const mapInventoryToDB = (item: any) => {
+  // Phase 1 decision: if base_uom is set but baseunit is blank, backfill baseunit.
+  // Never overwrite an existing baseunit value.
+  const existingBaseUnit = item.baseUnit?.trim() || '';
+  const newBaseUom       = item.baseUomNew?.trim() || '';
+  const resolvedBaseUnit = existingBaseUnit || newBaseUom; // only fills blank; existing wins
+
+  return {
      id: String(item.id || ''),
      item_id: String(item.itemId || item.id || ''),   // shared identity across locations
      location_id: item.locationId || item.location_id || null,
      name: item.name || '',
      category: item.category || '',
      itemtype: item.itemType || '',
-     baseunit: item.baseUnit || '',
+     baseunit: resolvedBaseUnit,   // backfill from base_uom only when baseunit is blank
      unit: item.unit || '',
      instock: isNaN(parseFloat(item.inStock)) ? 0 : parseFloat(item.inStock),
      parlevel: isNaN(parseFloat(item.parLevel)) ? 0 : parseFloat(item.parLevel),
@@ -51,8 +67,18 @@ const mapInventoryToDB = (item: any) => ({
      supplierid: typeof item.supplierId === 'number' ? item.supplierId : null,
      pricetrend: item.priceTrend || 'steady',
      priceincrease: Boolean(item.priceIncrease),
-     purchaseunits: Array.isArray(item.purchaseUnits) ? item.purchaseUnits : []
-});
+     purchaseunits: Array.isArray(item.purchaseUnits) ? item.purchaseUnits : [],
+     // ── Phase 1: Structured packaging / UOM fields ─────────────────────────
+     // Pass-through as-is. NULL preserved for items not yet upgraded.
+     purchase_uom:        item.purchaseUom    ?? null,
+     pack_qty:            item.packQty        != null ? Number(item.packQty)       : null,
+     inner_unit_type:     item.innerUnitType  ?? null,
+     inner_unit_size:     item.innerUnitSize  != null ? Number(item.innerUnitSize) : null,
+     inner_unit_uom:      item.innerUnitUom   ?? null,
+     base_uom:            newBaseUom          || null,
+     allowed_recipe_uoms: Array.isArray(item.allowedRecipeUoms) ? item.allowedRecipeUoms : null,
+  };
+};
 
 /**
  * Load inventory items.

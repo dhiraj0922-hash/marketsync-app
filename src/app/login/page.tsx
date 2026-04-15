@@ -3,14 +3,12 @@
 import { useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { Factory, Lock, Mail, ServerCrash, KeyRound, CheckCircle2 } from "lucide-react";
-import { useRouter } from "next/navigation";
 
 export default function LoginPage() {
   const [email, setEmail]     = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading]   = useState(false);
   const [error, setError]       = useState<string | null>(null);
-  const router = useRouter();
 
   // ─ Forgot password state ──────────────────────────────────────────────────
   const [forgotMode, setForgotMode]     = useState(false);
@@ -51,9 +49,7 @@ export default function LoginPage() {
         setError(authError.message);
       } else if (data.session) {
         console.log("[Login] submit success  uid=", data.session.user.id);
-        // AuthProvider's onAuthStateChange (SIGNED_IN) handles the redirect.
-        // router.push here is a belt-and-suspenders fallback.
-        router.push("/");
+        // Redirect is owned by AuthProvider via onAuthStateChange (SIGNED_IN).
       }
     } catch (err: any) {
       console.log("[Login] submit error (caught)", err?.message ?? err);

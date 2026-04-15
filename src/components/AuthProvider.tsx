@@ -14,42 +14,94 @@ const AuthContext = createContext<AuthContextType>({ user: null, loading: true, 
 
 export const useAuth = () => useContext(AuthContext);
 
-const BOOTSTRAP_TIMEOUT_MS = 10_000; // hard ceiling — spinner never shows longer than this
+// Hard timeout for the entire bootstrap (getSession + loadProfile).
+const BOOTSTRAP_TIMEOUT_MS = 10_000;
+// Hard timeout for the user_profiles fetch alone — prevents a slow DB from
+// consuming the entire bootstrap budget and leaving no room for state updates.
+const PROFILE_TIMEOUT_MS   =  6_000;
+
+// Promise that rejects after `ms` milliseconds with a clear message.
+function withTimeout<T>(promise: PromiseLike<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`[AuthProvider] timeout: ${label} exceeded ${ms}ms`)), ms);
+    promise.then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e);  }
+    );
+  });
+}
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  console.log("AuthProvider mounted");
-
-  const [user, setUser]       = useState<any>(null);
-  const [loading, setLoading] = useState(true);
+  // NOTE: this log fires on every render — normal for a context provider.
+  // The key line to watch is "[AuthProvider] bootstrap START" which fires once.
+  const [user, setUser]             = useState<any>(null);
+  const [loading, setLoading]       = useState(true);
+  // Exposed in the loading screen so users know when to retry instead of waiting.
+  const [timedOut, setTimedOut]     = useState(false);
   const router   = useRouter();
   const pathname = usePathname();
 
   // Tracks whether the initial bootstrap is complete.
-  // onAuthStateChange is suppressed during bootstrap so it doesn't race with
-  // checkSession() — both would call loadProfile() concurrently otherwise.
+  // onAuthStateChange INITIAL_SESSION is suppressed during bootstrap to prevent
+  // a concurrent loadProfile() race with the bootstrap's own profile fetch.
   const bootstrapDone = useRef(false);
+  // Ref so the failsafe callback always sees the live value, not a stale closure.
+  const loadingRef    = useRef(true);
 
-  // ── Profile loader ──────────────────────────────────────────────────────────
+  const markLoadingFalse = (label: string) => {
+    console.log(`[AuthProvider] setLoading(false) via: ${label}`);
+    loadingRef.current = false;
+    setLoading(false);
+  };
+
+  // ── Profile loader with its own timeout ────────────────────────────────────
   const loadProfile = async (authUser: { id: string; email?: string }) => {
     console.log("[AuthProvider] loadProfile START  uid=", authUser.id, " email=", authUser.email);
 
-    const { data: profile, error } = await supabase
-      .from("user_profiles")
-      .select("id, user_id, full_name, role, location_id, is_active")
-      .eq("user_id", authUser.id)
-      .single();
+    try {
+      const { data: profile, error } = await withTimeout(
+        supabase
+          .from("user_profiles")
+          .select("id, user_id, full_name, role, location_id, is_active")
+          .eq("user_id", authUser.id)
+          .single(),
+        PROFILE_TIMEOUT_MS,
+        "user_profiles fetch"
+      );
 
-    console.log("[AuthProvider] loadProfile RESULT", {
-      found:       !!profile,
-      role:        profile?.role        ?? null,
-      location_id: profile?.location_id ?? null,
-      is_active:   profile?.is_active   ?? null,
-      errorCode:   error?.code          ?? null,
-      errorMsg:    error?.message       ?? null,
-    });
+      console.log("[AuthProvider] loadProfile RESULT", {
+        found:       !!profile,
+        role:        profile?.role        ?? null,
+        location_id: profile?.location_id ?? null,
+        is_active:   profile?.is_active   ?? null,
+        errorCode:   error?.code          ?? null,
+        errorMsg:    error?.message       ?? null,
+      });
 
-    if (error || !profile) {
-      console.warn("[AuthProvider] loadProfile: no profile row — setting user with role=null");
+      if (error || !profile) {
+        console.warn("[AuthProvider] loadProfile: no profile row — setting user with role=null");
+        setUser({
+          id: authUser.id,
+          email: authUser.email ?? "",
+          name: authUser.email?.split("@")[0] ?? "Unknown",
+          role: null,
+          locationId: null,
+        });
+        return;
+      }
+
+      console.log("[AuthProvider] loadProfile OK → role=", profile.role, " locationId=", profile.location_id);
+      setUser({
+        id: profile.user_id,
+        email: authUser.email ?? "",
+        name: profile.full_name ?? authUser.email?.split("@")[0] ?? "User",
+        role: profile.role,
+        locationId: profile.location_id,
+        isActive: profile.is_active,
+      });
+    } catch (err: any) {
+      console.error("[AuthProvider] loadProfile THREW:", err?.message ?? err);
+      // Always set a minimal user so the app isn't stuck.
       setUser({
         id: authUser.id,
         email: authUser.email ?? "",
@@ -57,18 +109,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         role: null,
         locationId: null,
       });
-      return;
     }
-
-    console.log("[AuthProvider] loadProfile OK → role=", profile.role, " locationId=", profile.location_id);
-    setUser({
-      id: profile.user_id,
-      email: authUser.email ?? "",
-      name: profile.full_name ?? authUser.email?.split("@")[0] ?? "User",
-      role: profile.role,
-      locationId: profile.location_id,
-      isActive: profile.is_active,
-    });
   };
 
   // ── Bootstrap: run ONCE on mount ────────────────────────────────────────────
@@ -76,17 +117,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     let isMounted = true;
     console.log("[AuthProvider] bootstrap START supabaseConfigured=", supabaseConfigured);
 
-    // Unconditional failsafe — loading WILL be cleared no matter what.
-    // Using a ref so clearTimeout always targets the right timer even if the
-    // component re-renders between setTimeout and clearTimeout.
+    // Failsafe: if bootstrap has not resolved within BOOTSTRAP_TIMEOUT_MS,
+    // force the spinner off and show the retry message.
+    // Uses loadingRef (not the stale closure `loading`) to check live state.
     const failsafe = setTimeout(() => {
-      if (isMounted && loading) {
-        console.warn(
-          `[AuthProvider] FAILSAFE after ${BOOTSTRAP_TIMEOUT_MS}ms → setLoading(false).` +
-          " Bootstrap never completed. Check Vercel env vars."
-        );
+      if (isMounted && loadingRef.current) {
+        console.warn(`[AuthProvider] FAILSAFE after ${BOOTSTRAP_TIMEOUT_MS}ms — bootstrap never completed.`);
         bootstrapDone.current = true;
-        setLoading(false); // ← LOADING FALSE path: failsafe
+        setTimedOut(true);
+        setUser(null);
+        markLoadingFalse("failsafe-timeout");
       }
     }, BOOTSTRAP_TIMEOUT_MS);
 
@@ -127,27 +167,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       } finally {
         clearTimeout(failsafe);
         bootstrapDone.current = true;
-        console.log("[AuthProvider] bootstrap DONE → setLoading(false)  isMounted=", isMounted);
-        // Call unconditionally — if unmounted React will ignore the state update.
-        // The only thing NOT calling this was the old `if (mounted)` guard which
-        // caused the spinner to persist when the component briefly unmounted/remounted.
-        setLoading(false); // ← LOADING FALSE path: normal
+        markLoadingFalse("bootstrap-finally");
       }
     }
 
     bootstrap();
 
-    // Auth state listener — only acts AFTER bootstrap is complete.
-    // During bootstrap, checkSession already handles the initial session.
-    // Allowing onAuthStateChange to run concurrently was the race condition
-    // that caused double loadProfile() calls and non-deterministic loading state.
+    // Auth state listener — INITIAL_SESSION is suppressed so it doesn't race
+    // with bootstrap(). SIGNED_IN / SIGNED_OUT / TOKEN_REFRESHED are handled
+    // here after bootstrap completes.
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       console.log("[AuthProvider] onAuthStateChange event=", event, "bootstrapDone=", bootstrapDone.current);
 
-      // Suppress INITIAL_SESSION — bootstrap() handles it.
-      // All other events (SIGNED_IN, SIGNED_OUT, TOKEN_REFRESHED) are handled here.
       if (event === "INITIAL_SESSION") {
-        console.log("[AuthProvider] onAuthStateChange: skipping INITIAL_SESSION (handled by bootstrap)");
+        console.log("[AuthProvider] skipping INITIAL_SESSION — handled by bootstrap()");
         return;
       }
 
@@ -155,11 +188,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       if (session?.user) {
         await loadProfile(session.user);
+        // After a SIGNED_IN event (post-login), ensure loading is cleared
+        // in case bootstrap already ran and set it false, but a re-render
+        // race put it back to true.
+        if (bootstrapDone.current) {
+          markLoadingFalse("onAuthStateChange-signed-in");
+        }
       } else {
         setUser(null);
-        // Only set loading false if bootstrap is done; otherwise bootstrap's finally handles it
         if (bootstrapDone.current) {
-          setLoading(false); // ← LOADING FALSE path: sign-out after bootstrap
+          markLoadingFalse("onAuthStateChange-signed-out");
         }
       }
     });
@@ -172,9 +210,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // intentionally empty — bootstrap runs exactly once on mount
 
-  // ── Redirect effect: runs AFTER loading clears ──────────────────────────────
+  // ── Redirect effect: runs only AFTER loading=false ─────────────────────────
   useEffect(() => {
-    if (loading) return; // never redirect while bootstrap is still in progress
+    if (loading) return;
 
     if (!user && pathname !== "/login") {
       console.log("[AuthProvider] redirect → /login  pathname=", pathname);
@@ -189,9 +227,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   if (loading && pathname !== "/login") {
     return (
       <div className="min-h-screen bg-neutral-50 flex items-center justify-center">
-        <div className="animate-pulse flex flex-col items-center">
-          <div className="h-8 w-8 rounded-full border-4 border-brand-500 border-t-transparent animate-spin mb-4"></div>
-          <div className="text-neutral-500 text-sm font-medium">Validating security context...</div>
+        <div className="flex flex-col items-center gap-4">
+          {timedOut ? (
+            // Timeout state — never show infinite spinner
+            <>
+              <div className="text-neutral-500 text-sm font-medium text-center max-w-xs">
+                Authentication is taking longer than expected. Please retry.
+              </div>
+              <button
+                onClick={() => window.location.reload()}
+                className="px-4 py-2 text-sm font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors"
+              >
+                Retry
+              </button>
+            </>
+          ) : (
+            // Normal loading spinner
+            <div className="animate-pulse flex flex-col items-center">
+              <div className="h-8 w-8 rounded-full border-4 border-brand-500 border-t-transparent animate-spin mb-4"></div>
+              <div className="text-neutral-500 text-sm font-medium">Validating security context...</div>
+            </div>
+          )}
         </div>
       </div>
     );

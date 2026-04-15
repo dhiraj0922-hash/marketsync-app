@@ -210,3 +210,166 @@ export function normalizeUnit(qty: number, fromUnitBase: string, toUnitBase: str
   // Round to 6 decimal places
   return Math.round(targetQty * 1_000_000) / 1_000_000;
 }
+
+// =============================================================================
+// Phase 1: Structured packaging / UOM helpers
+//
+// These are additive exports — nothing above is changed.
+// They are only called by recipe costing when the new structured fields are
+// populated. All three return null / empty-array when fields are missing so
+// callers can safely fall back to legacy behaviour.
+// =============================================================================
+
+/**
+ * Resolve the effective canonical costing unit for an inventory item.
+ *
+ * Priority:
+ *   1. base_uom (new, explicit)            → item.baseUomNew
+ *   2. baseunit (legacy DB column)         → item.baseUnit
+ *   3. unit (display unit, last resort)    → item.unit
+ *   4. 'ea' (hard fallback, never empty)
+ *
+ * Used by recipe costing and the recipe builder row renderer so both use
+ * the identical target unit for normalizeUnit() calls.
+ */
+export function resolveEffectiveBaseUom(item: {
+  baseUomNew?: string | null;
+  baseUnit?:   string | null;
+  unit?:       string | null;
+}): string {
+  return (
+    item.baseUomNew?.trim() ||
+    item.baseUnit?.trim()   ||
+    item.unit?.trim()       ||
+    'ea'
+  );
+}
+
+/**
+ * Compute cost per base unit from the structured pack fields (read-time only).
+ *
+ * Formula:
+ *   totalBaseUnits = normalizeUnit(packQty × innerUnitSize, innerUnitUom → baseUom)
+ *   costPerBaseUnit = purchaseCost / totalBaseUnits
+ *
+ * Returns null if:
+ *   - any required field is null / zero
+ *   - innerUnitUom and baseUom are in different measurement families (cross-family)
+ *   - normalizeUnit throws for any reason
+ *
+ * The caller must fall back to the next costing path when null is returned.
+ * Per Phase 1 decisions: this result is NEVER written back to item.cost.
+ */
+export function computeBaseUnitCostFromPack(item: {
+  purchaseCost?:  number | null;
+  packQty?:       number | null;
+  innerUnitSize?: number | null;
+  innerUnitUom?:  string | null;
+  baseUomNew?:    string | null;
+  baseUnit?:      string | null;
+  unit?:          string | null;
+}): number | null {
+  const { purchaseCost, packQty, innerUnitSize, innerUnitUom } = item;
+
+  // All structured fields must be present and non-zero
+  if (
+    purchaseCost  == null || purchaseCost  <= 0 ||
+    packQty       == null || packQty       <= 0 ||
+    innerUnitSize == null || innerUnitSize <= 0 ||
+    !innerUnitUom?.trim()
+  ) return null;
+
+  const baseUom = resolveEffectiveBaseUom(item);
+  if (!baseUom || baseUom === 'ea') {
+    // Structured cost computation is meaningless for count-only items
+    return null;
+  }
+
+  try {
+    const totalInnerQty  = packQty * innerUnitSize;                     // e.g. 12 × 330 = 3960 ml
+    const totalBaseUnits = normalizeUnit(totalInnerQty, innerUnitUom, baseUom); // e.g. 3960 ml → 3.96 l
+    if (totalBaseUnits <= 0) return null;
+    return purchaseCost / totalBaseUnits;
+  } catch {
+    // Cross-family or unrecognised unit — fall through to legacy path
+    return null;
+  }
+}
+
+/**
+ * Return a list of soft-warning strings for an inventory item whose unit fields
+ * are ambiguous or inconsistent.
+ *
+ * These are shown as ⚠ badges in the recipe builder — they never block saving.
+ * Per Phase 1 decisions, allowed_recipe_uoms violations are soft warnings only.
+ *
+ * @param item   Front-end item shape (camelCase)
+ * @param usedUnit  The unit the user selected in the recipe ingredient row
+ */
+export function auditItemUnitAmbiguity(
+  item: {
+    name?:             string | null;
+    baseUomNew?:       string | null;
+    baseUnit?:         string | null;
+    unit?:             string | null;
+    innerUnitUom?:     string | null;
+    allowedRecipeUoms?: string[] | null;
+  },
+  usedUnit?: string | null
+): string[] {
+  const warnings: string[] = [];
+  const effectiveBase = resolveEffectiveBaseUom(item);
+  const label = item.name || 'This item';
+
+  // 1. No meaningful base unit
+  if (!effectiveBase || effectiveBase === 'ea') {
+    warnings.push(
+      `"${label}" has no specific base unit — pack-level cost computation is disabled. Costing uses item.cost directly.`
+    );
+  }
+
+  // 2. base_uom conflicts with existing baseunit (informational, not an error)
+  const legacyBase = item.baseUnit?.trim();
+  const newBase    = item.baseUomNew?.trim();
+  if (newBase && legacyBase && newBase !== legacyBase) {
+    try {
+      // If they convert to each other they're just aliases — not really conflicting
+      normalizeUnit(1, newBase, legacyBase);
+    } catch {
+      warnings.push(
+        `"${label}" base_uom="${newBase}" and baseunit="${legacyBase}" are in different measurement families. base_uom takes priority for costing.`
+      );
+    }
+  }
+
+  // 3. inner_unit_uom cannot convert to effectiveBase (cross-family conflict)
+  const innerUom = item.innerUnitUom?.trim();
+  if (innerUom && effectiveBase && effectiveBase !== 'ea') {
+    try {
+      normalizeUnit(1, innerUom, effectiveBase);
+    } catch {
+      warnings.push(
+        `"${label}" inner_unit_uom="${innerUom}" cannot convert to costing unit "${effectiveBase}" — they are different measurement families. Pack cost computation falls back to legacy.`
+      );
+    }
+  }
+
+  // 4. Soft warning: recipe ingredient unit not in allowed_recipe_uoms whitelist
+  if (
+    usedUnit &&
+    Array.isArray(item.allowedRecipeUoms) &&
+    item.allowedRecipeUoms.length > 0
+  ) {
+    const usedCanon    = canonicalizeUnit(usedUnit) ?? usedUnit.trim().toLowerCase();
+    const isWhitelisted = item.allowedRecipeUoms.some(
+      (u) => (canonicalizeUnit(u) ?? u.trim().toLowerCase()) === usedCanon
+    );
+    if (!isWhitelisted) {
+      warnings.push(
+        `"${label}" does not list "${usedUnit}" as an allowed recipe unit. Costing may be inaccurate — allowed: ${item.allowedRecipeUoms.join(', ')}.`
+      );
+    }
+  }
+
+  return warnings;
+}

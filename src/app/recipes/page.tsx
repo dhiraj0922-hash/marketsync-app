@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
 import { loadRecipes, saveRecipes, loadInventory, saveInventory, upsertRecipe, updateInventoryItemCost } from "@/lib/storage";
 
-import { normalizeUnit, canonicalizeUnit } from "@/lib/units";
+import { normalizeUnit, canonicalizeUnit, resolveEffectiveBaseUom, computeBaseUnitCostFromPack, auditItemUnitAmbiguity } from "@/lib/units";
 
 import { Plus, Search, SplitSquareVertical, Calculator, Trash2, Sparkles } from "lucide-react";
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
@@ -232,23 +232,29 @@ function RecipesPageContent() {
             (i.itemId && i.itemId.toString() === targetId.toString())
           );
           if (invItem) {
-            const baseTargetUnit = invItem.baseUnit || invItem.unit;
-            const normQty = normalizeUnit(ing.qty, ing.unit, baseTargetUnit);
+             // Phase 1: use resolveEffectiveBaseUom so base_uom takes priority over baseUnit when set
+             const baseTargetUnit = resolveEffectiveBaseUom(invItem);
+             const normQty = normalizeUnit(ing.qty, ing.unit, baseTargetUnit);
 
-            // Consistent cost derivation — single source of truth:
-            //   purchaseUnits present → effectiveBaseCost = purchaseCost / conversion
-            //   purchaseCost null (legacy) → reconstruct: cost * conversion / conversion = cost
-            //   no purchaseUnits → item.cost is already the base-unit cost
-            let effectiveBaseCost = invItem.cost;
-            if (invItem.purchaseUnits && invItem.purchaseUnits.length > 0) {
-              const primary = invItem.purchaseUnits.find((u: any) => u.isPrimary) || invItem.purchaseUnits[0];
-              const purchCost = (invItem.purchaseCost !== undefined && invItem.purchaseCost !== null)
-                ? invItem.purchaseCost
-                : invItem.cost * primary.conversion; // reconstruct for legacy rows
-              effectiveBaseCost = purchCost / primary.conversion;
-            }
-            total += (normQty * effectiveBaseCost);
-          }
+             // ── Effective base cost — three-path priority chain ────────────────────
+             // Path 1 (NEW): structured pack fields all populated
+             //   → computeBaseUnitCostFromPack (read-time only, no write-back)
+             // Path 2 (EXISTING): purchaseUnits JSONB
+             //   → effectiveBaseCost = purchaseCost / primary.conversion
+             // Path 3 (LEGACY): item.cost is already the base-unit cost
+             let effectiveBaseCost = invItem.cost;                                        // Path 3 default
+             const structuredCost = computeBaseUnitCostFromPack(invItem);
+             if (structuredCost !== null) {
+               effectiveBaseCost = structuredCost;                                         // Path 1
+             } else if (invItem.purchaseUnits && invItem.purchaseUnits.length > 0) {
+               const primary = invItem.purchaseUnits.find((u: any) => u.isPrimary) || invItem.purchaseUnits[0];
+               const purchCost = (invItem.purchaseCost !== undefined && invItem.purchaseCost !== null)
+                 ? invItem.purchaseCost
+                 : invItem.cost * primary.conversion;                                     // reconstruct for legacy rows
+               effectiveBaseCost = purchCost / primary.conversion;                        // Path 2
+             }
+             total += (normQty * effectiveBaseCost);
+           }
         }
       } catch (e) {
         errors++;
@@ -625,24 +631,33 @@ function RecipesPageContent() {
 
                   if (invItem) {
                      try {
-                        const baseTargetUnit = invItem.baseUnit || invItem.unit;
+                        // Phase 1: use resolveEffectiveBaseUom so base_uom takes priority over baseUnit when set
+                        const baseTargetUnit = resolveEffectiveBaseUom(invItem);
                         const normQty = normalizeUnit(ing.qty, ing.unit, baseTargetUnit);
 
-                        // ── Consistent cost derivation ────────────────────────────────────
-                        // Source of truth hierarchy (same in calculateCost + row render):
-                        //   1. If purchaseUnits exist: effectiveBaseCost = purchaseCost / primary.conversion
-                        //      purchaseCost now round-trips from DB (fixed in storage.ts)
-                        //   2. Otherwise: item.cost is already the base-unit cost
-                        // This matches what the inventory drawer calculates on save.
-                        let effectiveBaseCost = invItem.cost;
-                        if (invItem.purchaseUnits && invItem.purchaseUnits.length > 0) {
+                        // ── Effective base cost — three-path priority chain ──────
+                        // Path 1 (NEW): structured pack fields fully populated
+                        // Path 2 (EXISTING): purchaseUnits JSONB
+                        // Path 3 (LEGACY): item.cost is already base-unit cost
+                        let effectiveBaseCost = invItem.cost;                              // Path 3 default
+                        const structuredCost = computeBaseUnitCostFromPack(invItem);
+                        if (structuredCost !== null) {
+                           effectiveBaseCost = structuredCost;                             // Path 1
+                        } else if (invItem.purchaseUnits && invItem.purchaseUnits.length > 0) {
                             const primary = invItem.purchaseUnits.find((u: any) => u.isPrimary) || invItem.purchaseUnits[0];
                             const purchCost = (invItem.purchaseCost !== undefined && invItem.purchaseCost !== null)
                               ? invItem.purchaseCost
-                              : invItem.cost * primary.conversion; // reconstruct if missing
-                            effectiveBaseCost = purchCost / primary.conversion;
+                              : invItem.cost * primary.conversion;                         // reconstruct if missing
+                            effectiveBaseCost = purchCost / primary.conversion;            // Path 2
                         }
                         lineCost = normQty * effectiveBaseCost;
+
+                        // Soft-warning audit (Phase 1) — never blocks saving
+                        const unitWarnings = auditItemUnitAmbiguity(invItem, ing.unit);
+                        if (unitWarnings.length > 0 && !hasError) {
+                          // Surface first warning so ⚠ badge appears without overriding a real error
+                          costErrorMsg = unitWarnings[0];
+                        }
                      } catch (e: any) {
                         hasError = true;
                         costErrorMsg = e?.message ?? "Unit conversion error";
@@ -650,10 +665,9 @@ function RecipesPageContent() {
                   }
 
                   const mappedName = invItem ? invItem.name : "Unknown Item";
-                  // Bug fix: show baseUnit as the native constraint, fall back to unit.
-                  // Previously showed invItem?.unit which could be a display alias ("lit")
-                  // while baseUnit held the canonical cosing unit ("l").
-                  const mappedUnit = invItem ? (invItem.baseUnit || invItem.unit || 'N/A') : 'N/A';
+                  // Phase 1: use resolveEffectiveBaseUom so the "Native Constraint" badge
+                  // shows base_uom when set, falling back to baseUnit → unit.
+                  const mappedUnit = invItem ? resolveEffectiveBaseUom(invItem) : 'N/A';
 
                   // Extract visual type indicator if properly tagged in the native inventory ledger
                   const isPrepNode = invItem && (invItem.itemType === 'Preparation' || invItem.itemType === 'Finished Good');

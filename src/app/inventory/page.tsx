@@ -47,7 +47,19 @@ export default function Inventory() {
 
   // Add Item Drawer States
   const [isAddDrawerOpen, setIsAddDrawerOpen] = useState(false);
-  const [newItem, setNewItem] = useState({ name: "", category: "Produce", itemType: "Raw", unit: "kg", supplier: "Fresh Farms Produce", inStock: "", parLevel: "", cost: "", purchaseUnits: [{ name: "Case", conversion: '1', isPrimary: true }] as any[] });
+  const [newItem, setNewItem] = useState({
+    name: "", category: "Produce", itemType: "Raw", unit: "kg",
+    supplier: "Fresh Farms Produce", inStock: "", parLevel: "", cost: "",
+    purchaseUnits: [{ name: "Case", conversion: '1', isPrimary: true }] as any[],
+    // Phase 2: Structured packaging fields (all optional, all default null/empty)
+    purchaseUom:       "",   // e.g. 'case', 'bag'
+    packQty:           "",   // inner units per purchase_uom
+    innerUnitType:     "",   // e.g. 'can', 'bottle'
+    innerUnitSize:     "",   // qty per inner unit
+    innerUnitUom:      "",   // unit for innerUnitSize
+    baseUomNew:        "",   // preferred costing unit (backfills baseunit if blank)
+    allowedRecipeUoms: "",   // comma-separated, parsed on save
+  });
 
   // Import Drawer States
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -443,7 +455,19 @@ export default function Inventory() {
       cost: baseCost,
       priceTrend: "steady",
       priceIncrease: false,
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
+      // Phase 2: structured packaging fields — pass nulls when left blank so the
+      // DB columns stay NULL and costing falls back to legacy for this item.
+      purchaseUom:       newItem.purchaseUom.trim()       || null,
+      packQty:           newItem.packQty !== ""           ? Number(newItem.packQty)       : null,
+      innerUnitType:     newItem.innerUnitType.trim()     || null,
+      innerUnitSize:     newItem.innerUnitSize !== ""     ? Number(newItem.innerUnitSize) : null,
+      innerUnitUom:      newItem.innerUnitUom.trim()      || null,
+      baseUomNew:        newItem.baseUomNew.trim()        || null,
+      // allowedRecipeUoms: comma-separated in the UI → split into TEXT[] for the DB
+      allowedRecipeUoms: newItem.allowedRecipeUoms.trim()
+        ? newItem.allowedRecipeUoms.split(',').map(s => s.trim()).filter(Boolean)
+        : null,
     };
 
     const res = await insertInventoryItem(finalItem, locationId);
@@ -455,7 +479,13 @@ export default function Inventory() {
     // Use the returned UUID as the canonical id for local state
     const localItem = { ...finalItem, id: res.id };
     setInventoryData([localItem, ...inventoryData]);
-    setNewItem({ name: "", category: "Produce", itemType: "Raw", unit: "kg", supplier: "", inStock: "", parLevel: "", cost: "", purchaseUnits: [{ name: "", conversion: '1', isPrimary: true }] });
+    setNewItem({
+      name: "", category: "Produce", itemType: "Raw", unit: "kg",
+      supplier: "", inStock: "", parLevel: "", cost: "",
+      purchaseUnits: [{ name: "", conversion: '1', isPrimary: true }],
+      purchaseUom: "", packQty: "", innerUnitType: "",
+      innerUnitSize: "", innerUnitUom: "", baseUomNew: "", allowedRecipeUoms: "",
+    });
     setIsAddDrawerOpen(false);
   };
 
@@ -1234,6 +1264,158 @@ export default function Inventory() {
                  </div>
               ))}
            </div>
+           {/* ── Phase 2: Structured Packaging (Optional) ────────────────────── */}
+           <details className="group border border-neutral-200 rounded-lg bg-neutral-50 shadow-sm">
+             <summary className="flex items-center justify-between px-3 py-2.5 cursor-pointer select-none list-none">
+               <span className="text-xs font-semibold text-neutral-700 uppercase tracking-wider">
+                 Structured Packaging
+               </span>
+               <span className="text-[10px] text-neutral-400 font-medium group-open:hidden">Optional — for precise costing</span>
+               <span className="text-[10px] text-brand-600 font-medium hidden group-open:inline">Hide</span>
+             </summary>
+             <div className="px-3 pb-3 pt-1 space-y-3">
+               <p className="text-[11px] text-neutral-500 leading-relaxed">
+                 Fill these fields to enable pack-based recipe costing. Leave blank to keep legacy behaviour.
+               </p>
+
+               {/* Row 1: Purchase UOM + Pack Qty */}
+               <div className="grid grid-cols-2 gap-3">
+                 <div className="space-y-1">
+                   <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Purchase UOM</label>
+                   <select
+                     value={newItem.purchaseUom}
+                     onChange={e => setNewItem({...newItem, purchaseUom: e.target.value})}
+                     className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
+                   >
+                     <option value="">— not set —</option>
+                     <option>case</option>
+                     <option>bag</option>
+                     <option>box</option>
+                     <option>bottle</option>
+                     <option>can</option>
+                     <option>pack</option>
+                     <option>ea</option>
+                   </select>
+                 </div>
+                 <div className="space-y-1">
+                   <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Pack Qty</label>
+                   <input
+                     type="number" min="0" step="1"
+                     value={newItem.packQty}
+                     onChange={e => setNewItem({...newItem, packQty: e.target.value})}
+                     className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
+                     placeholder="e.g. 12"
+                   />
+                   <p className="text-[10px] text-neutral-400">Inner units per purchase pack</p>
+                 </div>
+               </div>
+
+               {/* Row 2: Inner Unit Type + Inner Unit Size + Inner Unit UOM */}
+               <div className="grid grid-cols-3 gap-3">
+                 <div className="space-y-1">
+                   <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Inner Type</label>
+                   <select
+                     value={newItem.innerUnitType}
+                     onChange={e => setNewItem({...newItem, innerUnitType: e.target.value})}
+                     className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
+                   >
+                     <option value="">— not set —</option>
+                     <option>can</option>
+                     <option>bottle</option>
+                     <option>bag</option>
+                     <option>ea</option>
+                     <option>portion</option>
+                   </select>
+                 </div>
+                 <div className="space-y-1">
+                   <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Inner Size</label>
+                   <input
+                     type="number" min="0" step="any"
+                     value={newItem.innerUnitSize}
+                     onChange={e => setNewItem({...newItem, innerUnitSize: e.target.value})}
+                     className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
+                     placeholder="e.g. 330"
+                   />
+                 </div>
+                 <div className="space-y-1">
+                   <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Inner UOM</label>
+                   <select
+                     value={newItem.innerUnitUom}
+                     onChange={e => setNewItem({...newItem, innerUnitUom: e.target.value})}
+                     className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
+                   >
+                     <option value="">— not set —</option>
+                     <option value="ml">ml</option>
+                     <option value="l">l</option>
+                     <option value="g">g</option>
+                     <option value="kg">kg</option>
+                     <option value="oz">oz</option>
+                     <option value="lb">lb</option>
+                     <option value="fl oz">fl oz</option>
+                     <option value="ea">ea</option>
+                   </select>
+                 </div>
+               </div>
+
+               {/* Row 3: Base UOM */}
+               <div className="space-y-1">
+                 <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Base UOM (Costing)</label>
+                 <select
+                   value={newItem.baseUomNew}
+                   onChange={e => setNewItem({...newItem, baseUomNew: e.target.value})}
+                   className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
+                 >
+                   <option value="">— same as Base Unit above —</option>
+                   <option value="ml">ml</option>
+                   <option value="l">l</option>
+                   <option value="g">g</option>
+                   <option value="kg">kg</option>
+                   <option value="oz">oz</option>
+                   <option value="lb">lb</option>
+                   <option value="fl oz">fl oz</option>
+                   <option value="ea">ea</option>
+                 </select>
+                 <p className="text-[10px] text-neutral-400">
+                   Preferred unit for recipe costing. Overrides Base Unit above when set.
+                   Backfills Base Unit only if Base Unit is currently blank.
+                 </p>
+               </div>
+
+               {/* Row 4: Allowed Recipe UOMs */}
+               <div className="space-y-1">
+                 <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Allowed Recipe UOMs</label>
+                 <input
+                   type="text"
+                   value={newItem.allowedRecipeUoms}
+                   onChange={e => setNewItem({...newItem, allowedRecipeUoms: e.target.value})}
+                   className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
+                   placeholder="ml, l, fl oz  (comma-separated, optional)"
+                 />
+                 <p className="text-[10px] text-neutral-400">
+                   If set, recipe builder shows a soft warning when a different unit is used. Does not block saving.
+                 </p>
+               </div>
+
+               {/* Live preview of pack cost computation */}
+               {newItem.packQty && newItem.innerUnitSize && newItem.innerUnitUom && newItem.cost && (() => {
+                 try {
+                   const totalQty = Number(newItem.packQty) * Number(newItem.innerUnitSize);
+                   const cost = parseFloat(newItem.cost as string);
+                   if (!isNaN(totalQty) && totalQty > 0 && !isNaN(cost) && cost > 0) {
+                     const estimatedPerUnit = cost / totalQty;
+                     return (
+                       <div className="bg-brand-50 border border-brand-100 rounded-lg px-3 py-2 text-[11px] text-brand-700 font-medium">
+                         Estimated: ${estimatedPerUnit.toFixed(4)} / {newItem.innerUnitUom || 'unit'} at recipe time
+                       </div>
+                     );
+                   }
+                 } catch { return null; }
+                 return null;
+               })()}
+             </div>
+           </details>
+
+           {/* Supplier */}
            <div className="space-y-1.5">
              <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Preferred Supplier</label>
                <input list="supplier-options" type="text" value={newItem.supplier} onChange={e => setNewItem({...newItem, supplier: e.target.value})} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="Select or type new supplier..." />

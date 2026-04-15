@@ -85,6 +85,9 @@ export default function Suppliers() {
   });
 
   const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving]   = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveSuccess, setSaveSuccess] = useState(false);
 
   useEffect(() => {
     async function fetchData() {
@@ -110,48 +113,80 @@ export default function Suppliers() {
   if (isLoading) return <div className="p-12 flex justify-center text-neutral-400 animate-pulse">Loading Suppliers...</div>;
 
   const handleSaveSupplier = async () => {
-    if (!newSupplier.name) {
+    console.log("[Suppliers] save click");
+
+    if (!newSupplier.name.trim()) {
+      console.log("[Suppliers] validation failed — name is empty");
       alert("Supplier name is required.");
       return;
     }
 
-    const testName = newSupplier.name.trim();
-    const resolvedId = await resolveSupplier(testName);
-    const freshData = await loadSuppliers();
-    const existing = freshData.find((s: any) => s.id === resolvedId);
+    if (isSaving) return; // prevent duplicate concurrent saves
+    setIsSaving(true);
+    setSaveError(null);
+    setSaveSuccess(false);
+    console.log("[Suppliers] submit start  name=", newSupplier.name.trim());
 
-    // Prevent duplicates if already actively managed
-    if (existing && existing.status !== "Auto-created" && existing.name.trim().toLowerCase() === testName.toLowerCase()) {
-      alert("An active supplier with this name already exists.");
-      return;
+    try {
+      const testName = newSupplier.name.trim().replace(/\s+/g, ' ');
+
+      // Duplicate check against the already-loaded list — do NOT use resolveSupplier
+      // here. resolveSupplier is read-only and throws for any new name, which
+      // silently killed this function before saveSuppliers was ever reached.
+      const duplicate = suppliersData.find(
+        (s: any) =>
+          s.name.trim().replace(/\s+/g, ' ').toLowerCase() === testName.toLowerCase() &&
+          s.status !== "Auto-created"
+      );
+      if (duplicate) {
+        console.log("[Suppliers] validation failed — duplicate name", testName);
+        alert("An active supplier with this name already exists.");
+        return;
+      }
+
+      // Generate a fresh numeric ID that won't collide with existing rows.
+      const newId = Date.now(); // millisecond timestamp — unique per session
+
+      const finalItem = {
+        id:           newId,
+        name:         testName,
+        category:     newSupplier.category  || "General",
+        contact:      newSupplier.contact   || "-",
+        phone:        newSupplier.phone     || "-",
+        email:        newSupplier.email     || "-",
+        location:     "Manual Entry",
+        minOrder:     newSupplier.minOrder     || "-",
+        paymentTerms: newSupplier.paymentTerms || "-",
+        leadTime:     newSupplier.leadTime     || "-",
+        status:       "Active",
+        notes:        newSupplier.notes || "",
+      };
+
+      console.log("[Suppliers] request start", finalItem);
+
+      const res = await saveSuppliers([...suppliersData, finalItem]);
+
+      if (!res?.success) {
+        const msg = `Database Error: ${res?.error?.message ?? JSON.stringify(res?.error)}`;
+        console.log("[Suppliers] request error", msg);
+        setSaveError(msg);
+        alert(msg);
+        return;
+      }
+
+      console.log("[Suppliers] request success  id=", newId);
+      setSuppliersData(prev => [...prev, finalItem]);
+      setSaveSuccess(true);
+      setNewSupplier({ name: "", category: "General", contact: "", email: "", phone: "", leadTime: "", minOrder: "", paymentTerms: "", notes: "" });
+      setIsAddDrawerOpen(false);
+    } catch (err: any) {
+      const msg = err?.message ?? "Unexpected error saving supplier.";
+      console.log("[Suppliers] request error (caught)", msg);
+      setSaveError(msg);
+      alert(msg);
+    } finally {
+      setIsSaving(false);
     }
-
-    const finalItem = {
-      ...(existing || {}),
-      id: resolvedId,
-      name: testName.replace(/\s+/g, ' '),
-      category: newSupplier.category || "General",
-      contact: newSupplier.contact || "-",
-      phone: newSupplier.phone || "-",
-      email: newSupplier.email || "-",
-      location: "Manual Entry",
-      minOrder: newSupplier.minOrder || "-",
-      paymentTerms: newSupplier.paymentTerms || "-",
-      leadTime: newSupplier.leadTime || "-",
-      status: "Active",
-      notes: newSupplier.notes || ""
-    };
-
-    const finalSuppliersList = freshData.map((s: any) => s.id === resolvedId ? finalItem : s);
-    const res = await saveSuppliers(finalSuppliersList);
-    if (!res?.success) {
-       alert(`Database Error (Save Supplier): ${res?.error?.message}`);
-       return;
-    }
-    setSuppliersData(finalSuppliersList);
-
-    setNewSupplier({ name: "", category: "General", contact: "", email: "", phone: "", leadTime: "", minOrder: "", paymentTerms: "", notes: "" });
-    setIsAddDrawerOpen(false);
   };
 
   const handleUpdateSupplier = async () => {
@@ -789,14 +824,27 @@ export default function Suppliers() {
         title="Add New Vendor"
         description="Register a new supplier to start issuing purchase orders and tracking intake."
         footer={
-          <div className="flex gap-3 items-center w-full">
-             <button onClick={() => setIsAddDrawerOpen(false)} className="px-4 py-2 flex-1 text-sm font-medium bg-neutral-100 text-neutral-700 border border-neutral-200 rounded-lg hover:bg-neutral-200 transition-colors">
-               Cancel
-             </button>
-             <button onClick={handleSaveSupplier} className="px-4 py-2 flex-1 text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors shadow-sm">
-               Save Vendor
-             </button>
-          </div>
+           <div className="flex gap-3 items-center w-full flex-col">
+             {saveError && (
+               <div className="w-full text-xs text-danger-600 bg-danger-50 border border-danger-100 rounded-lg px-3 py-2">{saveError}</div>
+             )}
+             <div className="flex gap-3 w-full">
+               <button onClick={() => { setIsAddDrawerOpen(false); setSaveError(null); }} className="px-4 py-2 flex-1 text-sm font-medium bg-neutral-100 text-neutral-700 border border-neutral-200 rounded-lg hover:bg-neutral-200 transition-colors">
+                 Cancel
+               </button>
+               <button
+                 onClick={handleSaveSupplier}
+                 disabled={isSaving}
+                 className={`px-4 py-2 flex-1 text-sm font-medium rounded-lg transition-colors shadow-sm flex items-center justify-center gap-2 ${
+                   isSaving ? "bg-neutral-400 cursor-not-allowed text-white" : "bg-brand-600 text-white hover:bg-brand-700"
+                 }`}
+               >
+                 {isSaving
+                   ? <><div className="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Saving...</>
+                   : "Save Vendor"}
+               </button>
+             </div>
+           </div>
         }
       >
          <div className="space-y-5">
