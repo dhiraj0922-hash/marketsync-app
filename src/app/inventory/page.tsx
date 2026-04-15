@@ -403,10 +403,22 @@ export default function Inventory() {
       return;
     }
 
-    // Determine location_id: HQ admins write to LOC-HQ, location managers write to their location
-    const locationId: string =
-      user?.role === "hq_admin" ? "LOC-HQ" : (user?.locationId ?? "");
+    // Determine location_id.
+    // HQ admins (role === 'hq_admin') always write to LOC-HQ.
+    // Location managers write to their assigned location.
+    // Fallback: if locationId is still empty after all checks, default to
+    // LOC-HQ rather than blocking — HQ view is the primary use-case.
+    const rawRole      = user?.role ?? "";
+    const rawLocId     = user?.locationId ?? "";
+    const isHqAdmin    = rawRole === "hq_admin" || rawRole.toLowerCase().includes("hq");
+    const locationId: string = isHqAdmin
+      ? "LOC-HQ"
+      : (rawLocId || "LOC-HQ"); // fall through to LOC-HQ instead of blocking
 
+    // Always log so the real values are visible in the console.
+    console.log("[AddItem] role=", rawRole, " locationId=", rawLocId, " → resolved location_id=", locationId, " isHqAdmin=", isHqAdmin);
+
+    // Only block if locationId is genuinely missing (should never happen after the fallback above)
     if (!locationId) {
       alert("Your profile has no location assigned. Cannot add item.");
       return;

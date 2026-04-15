@@ -189,10 +189,21 @@ export async function insertInventoryItem(
     instock:       isNaN(parseFloat(item.inStock)) ? 0 : parseFloat(item.inStock),
     parlevel:      isNaN(parseFloat(item.parLevel)) ? 0 : parseFloat(item.parLevel),
     cost:          isNaN(parseFloat(item.cost)) ? 0 : parseFloat(item.cost),
+    purchasecost:  (item.purchaseCost !== undefined && item.purchaseCost !== null)
+                     ? parseFloat(item.purchaseCost) || null
+                     : null,
     supplierid:    typeof item.supplierId === 'number' ? item.supplierId : null,
     pricetrend:    item.priceTrend || 'steady',
     priceincrease: Boolean(item.priceIncrease),
     purchaseunits: Array.isArray(item.purchaseUnits) ? item.purchaseUnits : [],
+    // Phase 2: structured packaging fields — null when not provided
+    purchase_uom:        item.purchaseUom        ?? null,
+    pack_qty:            item.packQty        != null ? Number(item.packQty)       : null,
+    inner_unit_type:     item.innerUnitType      ?? null,
+    inner_unit_size:     item.innerUnitSize  != null ? Number(item.innerUnitSize) : null,
+    inner_unit_uom:      item.innerUnitUom       ?? null,
+    base_uom:            item.baseUomNew?.trim() || null,
+    allowed_recipe_uoms: Array.isArray(item.allowedRecipeUoms) ? item.allowedRecipeUoms : null,
   };
 
   const { error } = await supabase.from('inventory_items').insert(row);
