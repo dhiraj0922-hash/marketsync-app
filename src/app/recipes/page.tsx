@@ -817,14 +817,9 @@ function RecipesPageContent() {
                      {inventory
                        .filter((i: any) => (i.itemType === 'Raw' || !i.itemType) && (!user?.locationId || i.locationId === user.locationId))
                        .map((item: any) => {
-                         const sameNameCount = inventory.filter(
-                           (x: any) => x.name.toLowerCase() === item.name.toLowerCase()
-                         ).length;
-                         const idSuffix = sameNameCount > 1
-                           ? ` [#${String(item.id).slice(-6)}]`
-                           : '';
+                         const shortId = String(item.id).slice(-6);
                          const catPart = item.category ? ` · ${item.category}` : '';
-                         const label = `${item.name}${catPart} (${item.unit}) — $${(item.cost || 0).toFixed(2)}/${item.unit}${idSuffix}`;
+                         const label = `${item.name}${catPart} (${item.unit}) — $${(item.cost || 0).toFixed(2)}/${item.unit} [#${shortId}]`;
                          return (
                            <option key={`inv-${item.id}`} value={item.id.toString()}>
                              {label}
@@ -837,14 +832,9 @@ function RecipesPageContent() {
                      {inventory
                        .filter((i: any) => (i.itemType === 'Preparation' || i.itemType === 'Finished Good') && (!user?.locationId || i.locationId === user.locationId))
                        .map((item: any) => {
-                         const sameNameCount = inventory.filter(
-                           (x: any) => x.name.toLowerCase() === item.name.toLowerCase()
-                         ).length;
-                         const idSuffix = sameNameCount > 1
-                           ? ` [#${String(item.id).slice(-6)}]`
-                           : '';
+                         const shortId = String(item.id).slice(-6);
                          const catPart = item.category ? ` · ${item.category}` : '';
-                         const label = `${item.name}${catPart} (${item.unit}) — $${(item.cost || 0).toFixed(2)}/${item.unit}${idSuffix}`;
+                         const label = `${item.name}${catPart} (${item.unit}) — $${(item.cost || 0).toFixed(2)}/${item.unit} [#${shortId}]`;
                          return (
                            <option key={`prep-${item.id}`} value={item.id.toString()}>
                              {label}
