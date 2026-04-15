@@ -77,6 +77,22 @@ export default function Inventory() {
   const [selectedItemIds, setSelectedItemIds] = useState<number[]>([]);
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
 
+  // Action menu state — tracks which row's ⋯ menu is open
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+
+  // Edit Item Drawer States
+  const [isEditDrawerOpen, setIsEditDrawerOpen]   = useState(false);
+  const [isSavingEdit, setIsSavingEdit]           = useState(false);
+  const [editItem, setEditItem]                   = useState<any>(null);
+  // Edit packaging fields (separate string state for controlled inputs)
+  const [editPurchaseUom,    setEditPurchaseUom]    = useState("");
+  const [editPackQty,        setEditPackQty]        = useState("");
+  const [editInnerUnitType,  setEditInnerUnitType]  = useState("");
+  const [editInnerUnitSize,  setEditInnerUnitSize]  = useState("");
+  const [editInnerUnitUom,   setEditInnerUnitUom]   = useState("");
+  const [editBaseUomNew,     setEditBaseUomNew]     = useState("");
+  const [editAllowedUoms,    setEditAllowedUoms]    = useState("");
+
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
@@ -239,6 +255,110 @@ export default function Inventory() {
     await saveOrders(newMatrix);
     alert(`Successfully staged a Draft PO for ${qtyNeeded} ${item.unit} of ${item.name}! Redirecting to Orders...`);
     router.push("/orders");
+  };
+
+  // ── Open Edit Drawer ──────────────────────────────────────────────────────
+  const openEditDrawer = (item: any) => {
+    setEditItem(JSON.parse(JSON.stringify(item))); // deep copy so edits don't mutate list
+    setEditBaseUnit(item.baseUnit || item.unit || "");
+    setEditPurchaseUnits(item.purchaseUnits ? JSON.parse(JSON.stringify(item.purchaseUnits)) : []);
+    setEditPurchaseCost(
+      item.purchaseCost !== undefined && item.purchaseCost !== null
+        ? String(item.purchaseCost)
+        : item.cost !== undefined ? String(item.cost) : ""
+    );
+    // Packaging fields — coerce null → ""
+    setEditPurchaseUom(item.purchaseUom   ?? "");
+    setEditPackQty(item.packQty           != null ? String(item.packQty)       : "");
+    setEditInnerUnitType(item.innerUnitType ?? "");
+    setEditInnerUnitSize(item.innerUnitSize != null ? String(item.innerUnitSize) : "");
+    setEditInnerUnitUom(item.innerUnitUom  ?? "");
+    setEditBaseUomNew(item.baseUomNew      ?? "");
+    setEditAllowedUoms(
+      Array.isArray(item.allowedRecipeUoms) ? item.allowedRecipeUoms.join(", ") : ""
+    );
+    setOpenMenuId(null);
+    setIsEditDrawerOpen(true);
+  };
+
+  // ── Save Edit ─────────────────────────────────────────────────────────────
+  const handleEditSave = async () => {
+    if (!editItem) return;
+    if (!editItem.name?.trim()) { alert("Item name is required."); return; }
+    if (isSavingEdit) return;
+    setIsSavingEdit(true);
+    console.log("[EditItem] save start  id=", editItem.id);
+
+    try {
+      let pUnits = editItem.purchaseUnits
+        ? JSON.parse(JSON.stringify(editItem.purchaseUnits))
+        : editPurchaseUnits;
+      pUnits = pUnits
+        .map((u: any) => ({ ...u, conversion: parseFloat(u.conversion) }))
+        .filter((u: any) => u.name?.trim());
+      if (pUnits.length > 0 && !pUnits.some((u: any) => u.isPrimary)) pUnits[0].isPrimary = true;
+
+      const primaryUnit  = pUnits.find((u: any) => u.isPrimary) || pUnits[0];
+      const hasValidPrim = primaryUnit && primaryUnit.name && primaryUnit.conversion > 0;
+
+      const parsedCost = parseFloat(editPurchaseCost);
+      const baseCost   = hasValidPrim && !isNaN(parsedCost)
+        ? parsedCost / primaryUnit.conversion
+        : (!isNaN(parsedCost) ? parsedCost : editItem.cost);
+      const purchCost  = hasValidPrim && !isNaN(parsedCost) ? parsedCost : null;
+
+      const updated = {
+        ...editItem,
+        baseUnit:      editBaseUnit || editItem.unit || "",
+        unit:          editBaseUnit || editItem.unit || "",
+        purchaseUnits: pUnits,
+        cost:          baseCost,
+        purchaseCost:  purchCost,
+        updatedAt:     Date.now(),
+        // Packaging fields
+        purchaseUom:       editPurchaseUom.trim()   || null,
+        packQty:           editPackQty !== ""        ? Number(editPackQty)       : null,
+        innerUnitType:     editInnerUnitType.trim()  || null,
+        innerUnitSize:     editInnerUnitSize !== ""  ? Number(editInnerUnitSize) : null,
+        innerUnitUom:      editInnerUnitUom.trim()   || null,
+        // base_uom: only backfill baseunit when currently blank
+        baseUomNew:        editBaseUomNew.trim()     || null,
+        allowedRecipeUoms: editAllowedUoms.trim()
+          ? editAllowedUoms.split(",").map(s => s.trim()).filter(Boolean)
+          : null,
+      };
+
+      const newInventory = inventoryData.map(i => i.id === updated.id ? updated : i);
+      console.log("[EditItem] request start  id=", updated.id);
+      const res = await saveInventory(newInventory);
+      if (!res?.success) {
+        const msg = `Save failed: ${res?.error?.message ?? JSON.stringify(res?.error)}`;
+        console.log("[EditItem] request error", msg);
+        alert(msg);
+        return;
+      }
+      console.log("[EditItem] request success");
+      setInventoryData(newInventory);
+      setIsEditDrawerOpen(false);
+    } catch (err: any) {
+      console.log("[EditItem] caught error", err?.message);
+      alert(err?.message ?? "Unexpected error saving item.");
+    } finally {
+      setIsSavingEdit(false);
+    }
+  };
+
+  // ── Delete Item ───────────────────────────────────────────────────────────
+  const handleDeleteItem = async (item: any) => {
+    if (!confirm(`Delete "${item.name}" from inventory? This cannot be undone.`)) return;
+    setOpenMenuId(null);
+    const newInventory = inventoryData.filter(i => i.id !== item.id);
+    const res = await saveInventory(newInventory);
+    if (!res?.success) {
+      alert(`Delete failed: ${res?.error?.message ?? "Unknown error"}`);
+      return;
+    }
+    setInventoryData(newInventory);
   };
 
   const openItemDrawer = (item: any) => {
@@ -976,7 +1096,10 @@ export default function Inventory() {
                       )}
                     </TableCell>
                     <TableCell className="px-6 py-4 text-right">
-                      <div className="flex items-center justify-end gap-2">
+                      <div
+                        className="flex items-center justify-end gap-2"
+                        onClick={e => e.stopPropagation()}
+                      >
                         {(isLowStock || isCritical) && (
                           <button 
                             onClick={(e) => handleQuickReorder(item, e)}
@@ -985,9 +1108,46 @@ export default function Inventory() {
                             <ShoppingCart className="h-3 w-3" /> Quick Reorder
                           </button>
                         )}
-                        <button className="p-1.5 text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100 rounded-md transition-colors">
-                          <MoreHorizontal className="h-4 w-4" />
-                        </button>
+                        {/* Three-dot action menu */}
+                        <div className="relative">
+                          <button
+                            className="p-1.5 text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100 rounded-md transition-colors"
+                            onClick={() => setOpenMenuId(openMenuId === item.id ? null : item.id)}
+                            aria-label="Item actions"
+                          >
+                            <MoreHorizontal className="h-4 w-4" />
+                          </button>
+                          {openMenuId === item.id && (
+                            <>
+                              {/* Backdrop to close on outside click */}
+                              <div
+                                className="fixed inset-0 z-10"
+                                onClick={() => setOpenMenuId(null)}
+                              />
+                              <div className="absolute right-0 top-8 z-20 bg-white border border-neutral-200 rounded-xl shadow-xl py-1 min-w-[160px] animate-in fade-in slide-in-from-top-1 duration-100">
+                                <button
+                                  className="w-full text-left px-4 py-2.5 text-sm font-medium text-neutral-700 hover:bg-neutral-50 flex items-center gap-2.5 transition-colors"
+                                  onClick={() => openEditDrawer(item)}
+                                >
+                                  <Save className="h-3.5 w-3.5 text-brand-600" /> Edit Item
+                                </button>
+                                <button
+                                  className="w-full text-left px-4 py-2.5 text-sm font-medium text-neutral-700 hover:bg-neutral-50 flex items-center gap-2.5 transition-colors"
+                                  onClick={() => { setOpenMenuId(null); openItemDrawer(item); }}
+                                >
+                                  <ArrowUp className="h-3.5 w-3.5 text-success-600" /> Adjust Stock
+                                </button>
+                                <div className="border-t border-neutral-100 my-1" />
+                                <button
+                                  className="w-full text-left px-4 py-2.5 text-sm font-medium text-danger-600 hover:bg-danger-50 flex items-center gap-2.5 transition-colors"
+                                  onClick={() => handleDeleteItem(item)}
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" /> Delete Item
+                                </button>
+                              </div>
+                            </>
+                          )}
+                        </div>
                       </div>
                     </TableCell>
                   </TableRow>
@@ -1198,6 +1358,255 @@ export default function Inventory() {
                  )}
                </div>
             </div>
+          </div>
+        )}
+      </Drawer>
+
+      {/* ── Edit Item Drawer ─────────────────────────────────────────────────── */}
+      <Drawer
+        isOpen={isEditDrawerOpen}
+        onClose={() => setIsEditDrawerOpen(false)}
+        title="Edit Item"
+        description={editItem ? `Editing: ${editItem.name}` : ""}
+        footer={
+          <div className="flex gap-3">
+            <button
+              onClick={() => setIsEditDrawerOpen(false)}
+              className="px-4 py-2 flex-1 text-sm font-medium bg-neutral-100 text-neutral-700 border border-neutral-200 rounded-lg hover:bg-neutral-200 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleEditSave}
+              disabled={isSavingEdit}
+              className={`px-4 py-2 flex-1 text-sm font-medium rounded-lg transition-colors shadow-sm flex items-center justify-center gap-2 ${
+                isSavingEdit ? "bg-neutral-400 cursor-not-allowed text-white" : "bg-brand-600 text-white hover:bg-brand-700"
+              }`}
+            >
+              {isSavingEdit
+                ? <><div className="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Saving...</>
+                : <><Save className="h-4 w-4" /> Save Changes</>}
+            </button>
+          </div>
+        }
+      >
+        {editItem && (
+          <div className="space-y-4">
+            {/* Name */}
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Item Name *</label>
+              <input
+                type="text"
+                value={editItem.name}
+                onChange={e => setEditItem({...editItem, name: e.target.value})}
+                className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
+                placeholder="e.g. Garlic Powder"
+              />
+            </div>
+
+            {/* Type + Category + Base Unit */}
+            <div className="grid grid-cols-3 gap-3">
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Type</label>
+                <select
+                  value={editItem.itemType || "Raw"}
+                  onChange={e => setEditItem({...editItem, itemType: e.target.value})}
+                  className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
+                >
+                  <option value="Raw">Raw Asset</option>
+                  <option value="Preparation">Preparation</option>
+                  <option value="Finished Good">Finished Good</option>
+                </select>
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Category</label>
+                <select
+                  value={editItem.category}
+                  onChange={e => setEditItem({...editItem, category: e.target.value})}
+                  className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
+                >
+                  {categories.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Base Unit</label>
+                <input
+                  type="text"
+                  value={editBaseUnit}
+                  onChange={e => setEditBaseUnit(e.target.value)}
+                  className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
+                  placeholder="kg, L, ea…"
+                />
+              </div>
+            </div>
+
+            {/* Purchase Units */}
+            <div className="space-y-2 border border-neutral-200 p-3 rounded-lg bg-neutral-50">
+              <label className="text-xs font-semibold text-neutral-900 uppercase flex justify-between">
+                Purchase Units (Ordering)
+                <button
+                  onClick={() => setEditItem({...editItem, purchaseUnits: [...(editItem.purchaseUnits || []), { name: "", conversion: 1, isPrimary: !(editItem.purchaseUnits?.length) }]})}
+                  className="text-brand-600 hover:text-brand-700 font-bold flex items-center gap-1"
+                >
+                  <Plus className="h-3 w-3" /> Add
+                </button>
+              </label>
+              {(!editItem.purchaseUnits || editItem.purchaseUnits.length === 0) ? (
+                <div className="text-xs text-neutral-500 italic py-1">No purchase units — falls back to base unit.</div>
+              ) : editItem.purchaseUnits.map((pu: any, idx: number) => (
+                <div key={idx} className="flex gap-2 items-center bg-white p-2 rounded border border-neutral-200">
+                  <input type="radio" name="edit_primary_unit" checked={pu.isPrimary} onChange={() => {
+                    const copy = [...editItem.purchaseUnits];
+                    copy.forEach((u: any) => u.isPrimary = false);
+                    copy[idx].isPrimary = true;
+                    setEditItem({...editItem, purchaseUnits: copy});
+                  }} className="w-4 h-4 text-brand-600" />
+                  <input type="text" value={pu.name} onChange={e => {
+                    const copy = [...editItem.purchaseUnits];
+                    copy[idx].name = e.target.value;
+                    setEditItem({...editItem, purchaseUnits: copy});
+                  }} className="flex-1 py-1.5 px-2 border border-neutral-200 rounded text-sm outline-none focus:border-brand-500" placeholder="e.g. Case" />
+                  <span className="text-xs text-neutral-500">=</span>
+                  <input type="number" min="0" step="0.01" value={pu.conversion} onChange={e => {
+                    const copy = [...editItem.purchaseUnits];
+                    copy[idx].conversion = e.target.value;
+                    setEditItem({...editItem, purchaseUnits: copy});
+                  }} className="w-20 py-1.5 px-2 border border-neutral-200 rounded text-sm outline-none focus:border-brand-500" placeholder="Qty" />
+                  <span className="text-xs text-neutral-500 w-8 truncate">{editBaseUnit || "base"}</span>
+                  <button onClick={() => {
+                    const copy = editItem.purchaseUnits.filter((_: any, i: number) => i !== idx);
+                    if (pu.isPrimary && copy.length > 0) copy[0].isPrimary = true;
+                    setEditItem({...editItem, purchaseUnits: copy});
+                  }} className="p-1.5 text-neutral-400 hover:text-danger-600 hover:bg-danger-50 rounded transition-colors">
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            {/* Supplier */}
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Preferred Supplier</label>
+              <input
+                list="edit-supplier-options"
+                type="text"
+                value={suppliersData.find(s => s.id === editItem.supplierId)?.name ?? ""}
+                onChange={async e => {
+                  const name = e.target.value;
+                  try {
+                    const { resolveSupplier: rs } = await import("@/lib/storage");
+                    const id = await rs(name).catch(() => null);
+                    setEditItem({...editItem, supplierId: id});
+                  } catch { setEditItem({...editItem, supplierId: null}); }
+                }}
+                className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
+                placeholder="Select supplier…"
+              />
+              <datalist id="edit-supplier-options">
+                {suppliersData.map(s => <option key={s.id} value={s.name} />)}
+              </datalist>
+            </div>
+
+            {/* Stock / Par / Cost */}
+            <div className="grid grid-cols-3 gap-3">
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Current Stock</label>
+                <input
+                  type="number" step="any"
+                  value={editItem.inStock}
+                  onChange={e => setEditItem({...editItem, inStock: e.target.value})}
+                  className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Par Level</label>
+                <input
+                  type="number" step="any"
+                  value={editItem.parLevel}
+                  onChange={e => setEditItem({...editItem, parLevel: e.target.value})}
+                  className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">
+                  {editItem.purchaseUnits?.some((u: any) => u.isPrimary && parseFloat(u.conversion) > 0)
+                    ? `Cost / ${(editItem.purchaseUnits.find((u: any) => u.isPrimary) || editItem.purchaseUnits[0]).name}`
+                    : "Cost / Base Unit"}
+                </label>
+                <input
+                  type="number" step="0.01"
+                  value={editPurchaseCost}
+                  onChange={e => setEditPurchaseCost(e.target.value)}
+                  className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
+                  placeholder="$0.00"
+                />
+              </div>
+            </div>
+
+            {/* Structured Packaging accordion */}
+            <details className="group border border-neutral-200 rounded-lg bg-neutral-50 shadow-sm">
+              <summary className="flex items-center justify-between px-3 py-2.5 cursor-pointer select-none list-none">
+                <span className="text-xs font-semibold text-neutral-700 uppercase tracking-wider">Structured Packaging</span>
+                <span className="text-[10px] text-neutral-400 font-medium group-open:hidden">Optional — pack-based costing</span>
+                <span className="text-[10px] text-brand-600 font-medium hidden group-open:inline">Hide</span>
+              </summary>
+              <div className="px-3 pb-3 pt-1 space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Purchase UOM</label>
+                    <select value={editPurchaseUom} onChange={e => setEditPurchaseUom(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white">
+                      <option value="">— not set —</option>
+                      <option>case</option><option>bag</option><option>box</option>
+                      <option>bottle</option><option>can</option><option>pack</option><option>ea</option>
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Pack Qty</label>
+                    <input type="number" min="0" step="1" value={editPackQty} onChange={e => setEditPackQty(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="e.g. 12" />
+                    <p className="text-[10px] text-neutral-400">Inner units per pack</p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Inner Type</label>
+                    <select value={editInnerUnitType} onChange={e => setEditInnerUnitType(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white">
+                      <option value="">— not set —</option>
+                      <option>can</option><option>bottle</option><option>bag</option><option>ea</option><option>portion</option>
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Inner Size</label>
+                    <input type="number" min="0" step="any" value={editInnerUnitSize} onChange={e => setEditInnerUnitSize(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="e.g. 330" />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Inner UOM</label>
+                    <select value={editInnerUnitUom} onChange={e => setEditInnerUnitUom(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white">
+                      <option value="">— not set —</option>
+                      <option value="ml">ml</option><option value="l">l</option>
+                      <option value="g">g</option><option value="kg">kg</option>
+                      <option value="oz">oz</option><option value="lb">lb</option>
+                      <option value="fl oz">fl oz</option><option value="ea">ea</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Base UOM (Costing)</label>
+                  <select value={editBaseUomNew} onChange={e => setEditBaseUomNew(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white">
+                    <option value="">— same as Base Unit above —</option>
+                    <option value="ml">ml</option><option value="l">l</option>
+                    <option value="g">g</option><option value="kg">kg</option>
+                    <option value="oz">oz</option><option value="lb">lb</option>
+                    <option value="fl oz">fl oz</option><option value="ea">ea</option>
+                  </select>
+                  <p className="text-[10px] text-neutral-400">Overrides Base Unit for recipe costing. Backfills Base Unit only when Base Unit is blank.</p>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Allowed Recipe UOMs</label>
+                  <input type="text" value={editAllowedUoms} onChange={e => setEditAllowedUoms(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="ml, l, fl oz (comma-separated)" />
+                  <p className="text-[10px] text-neutral-400">Soft warning only — does not block recipe saving.</p>
+                </div>
+              </div>
+            </details>
           </div>
         )}
       </Drawer>
