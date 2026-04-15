@@ -695,45 +695,78 @@ function RecipesPageContent() {
                           onChange={e => updateIngredient(idx, 'qty', Number(e.target.value))}
                           className="w-full p-1.5 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
                         />
-                        <select
-                          value={ing.unit}
-                          onChange={e => updateIngredient(idx, 'unit', e.target.value)}
-                          className="w-full p-1.5 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
-                        >
-                          <optgroup label="Weight">
-                            <option value="g">Grams (g)</option>
-                            <option value="kg">Kilograms (kg)</option>
-                            <option value="mg">Milligrams (mg)</option>
-                            <option value="oz">Ounces (oz)</option>
-                            <option value="lb">Pounds (lb)</option>
-                          </optgroup>
-                          <optgroup label="Volume">
-                            <option value="ml">Milliliters (ml)</option>
-                            <option value="l">Liters (l)</option>
-                            <option value="tsp">Teaspoon (tsp)</option>
-                            <option value="tbsp">Tablespoon (tbsp)</option>
-                            <option value="cup">Cup</option>
-                            <option value="fl oz">Fl. Oz.</option>
-                          </optgroup>
-                          <optgroup label="Count / Each">
-                            <option value="ea">Each (ea)</option>
-                            <option value="each">Each (each)</option>
-                            <option value="pcs">Pieces (pcs)</option>
-                            <option value="piece">Piece</option>
-                          </optgroup>
-                          <optgroup label="Packaging">
-                            <option value="pack">Pack</option>
-                            <option value="box">Box</option>
-                            <option value="bag">Bag</option>
-                            <option value="can">Can / Tin</option>
-                            <option value="bottle">Bottle</option>
-                            <option value="bunch">Bunch</option>
-                            <option value="clove">Clove</option>
-                            <option value="sprig">Sprig</option>
-                            <option value="slice">Slice</option>
-                            <option value="knob">Knob</option>
-                          </optgroup>
-                        </select>
+                        {(() => {
+                           const allowedUoms: string[] = Array.isArray(invItem?.allowedRecipeUoms)
+                             ? invItem.allowedRecipeUoms.filter(Boolean)
+                             : [];
+                           const isUomMismatch = allowedUoms.length > 0 && !allowedUoms.includes(ing.unit);
+                           const uomLabel: Record<string, string> = {
+                             g: "Grams (g)", kg: "Kilograms (kg)", mg: "Milligrams (mg)",
+                             oz: "Ounces (oz)", lb: "Pounds (lb)",
+                             ml: "Milliliters (ml)", l: "Liters (l)",
+                             tsp: "Teaspoon (tsp)", tbsp: "Tablespoon (tbsp)",
+                             cup: "Cup", "fl oz": "Fl. Oz.",
+                             ea: "Each (ea)", each: "Each (each)", pcs: "Pieces (pcs)", piece: "Piece",
+                             pack: "Pack", box: "Box", bag: "Bag", can: "Can / Tin",
+                             bottle: "Bottle", bunch: "Bunch", clove: "Clove",
+                             sprig: "Sprig", slice: "Slice", knob: "Knob",
+                           };
+                           return (
+                             <select
+                               value={ing.unit}
+                               onChange={e => updateIngredient(idx, 'unit', e.target.value)}
+                               className={`w-full p-1.5 border rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white transition-colors ${
+                                 isUomMismatch
+                                   ? "border-warning-400 ring-1 ring-warning-300 bg-warning-50"
+                                   : "border-neutral-200"
+                               }`}
+                               title={isUomMismatch
+                                 ? `\u26a0 "${ing.unit}" is outside recommended units: ${allowedUoms.join(", ")}`
+                                 : undefined}
+                             >
+                               {allowedUoms.length > 0 && (
+                                 <optgroup label={`\u2605 Recommended for this item`}>
+                                   {allowedUoms.map(u => (
+                                     <option key={u} value={u}>{uomLabel[u] ?? u}</option>
+                                   ))}
+                                 </optgroup>
+                               )}
+                               <optgroup label={allowedUoms.length > 0 ? "All Units \u2014 Weight" : "Weight"}>
+                                 <option value="g">Grams (g)</option>
+                                 <option value="kg">Kilograms (kg)</option>
+                                 <option value="mg">Milligrams (mg)</option>
+                                 <option value="oz">Ounces (oz)</option>
+                                 <option value="lb">Pounds (lb)</option>
+                               </optgroup>
+                               <optgroup label={allowedUoms.length > 0 ? "All Units \u2014 Volume" : "Volume"}>
+                                 <option value="ml">Milliliters (ml)</option>
+                                 <option value="l">Liters (l)</option>
+                                 <option value="tsp">Teaspoon (tsp)</option>
+                                 <option value="tbsp">Tablespoon (tbsp)</option>
+                                 <option value="cup">Cup</option>
+                                 <option value="fl oz">Fl. Oz.</option>
+                               </optgroup>
+                               <optgroup label="Count / Each">
+                                 <option value="ea">Each (ea)</option>
+                                 <option value="each">Each (each)</option>
+                                 <option value="pcs">Pieces (pcs)</option>
+                                 <option value="piece">Piece</option>
+                               </optgroup>
+                               <optgroup label="Packaging">
+                                 <option value="pack">Pack</option>
+                                 <option value="box">Box</option>
+                                 <option value="bag">Bag</option>
+                                 <option value="can">Can / Tin</option>
+                                 <option value="bottle">Bottle</option>
+                                 <option value="bunch">Bunch</option>
+                                 <option value="clove">Clove</option>
+                                 <option value="sprig">Sprig</option>
+                                 <option value="slice">Slice</option>
+                                 <option value="knob">Knob</option>
+                               </optgroup>
+                             </select>
+                           );
+                        })()}
                       </div>
                       
                       <div className="w-20 text-right shrink-0">
