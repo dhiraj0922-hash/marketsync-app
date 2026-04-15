@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
-import { loadRecipes, saveRecipes, loadInventory, saveInventory, upsertRecipe, updateInventoryItemCost } from "@/lib/storage";
+import { loadRecipes, saveRecipes, loadInventory, saveInventory, upsertRecipe, updateInventoryItemCost, loadSuppliers } from "@/lib/storage";
 
 import { normalizeUnit, canonicalizeUnit, resolveEffectiveBaseUom, computeBaseUnitCostFromPack, auditItemUnitAmbiguity } from "@/lib/units";
 
@@ -89,6 +89,11 @@ function RecipesPageContent() {
   const [isSaving, setIsSaving] = useState(false);
   const [builderError, setBuilderError] = useState<string | null>(null);
 
+  // Ingredient combobox state
+  const [ingSearch, setIngSearch]         = useState("");
+  const [ingPanelOpen, setIngPanelOpen]   = useState(false);
+  const [suppliersData, setSuppliersData] = useState<any[]>([]);
+
   useEffect(() => {
     async function fetchData() {
       setIsLoading(true);
@@ -101,12 +106,14 @@ function RecipesPageContent() {
             ? "LOC-HQ"
             : (user?.locationId ?? "");
 
-        const [loadedRec, loadedInv] = await Promise.all([
+        const [loadedRec, loadedInv, loadedSups] = await Promise.all([
           loadRecipes(),
-          loadInventory(locationId || undefined)
+          loadInventory(locationId || undefined),
+          loadSuppliers(),
         ]);
         setRecipes(loadedRec);
         setInventory(loadedInv);
+        setSuppliersData(Array.isArray(loadedSups) ? loadedSups : []);
       } catch(e) {
         console.error(e);
       } finally {
@@ -806,52 +813,96 @@ function RecipesPageContent() {
                   );
                })}
 
-               <div className="p-3 rounded-lg border border-dashed border-neutral-300 bg-neutral-50 flex items-center gap-3">
-                 <select 
-                   value={selectedInvId}
-                   onChange={e => setSelectedInvId(e.target.value)}
-                   className="flex-1 p-2 border border-neutral-300 rounded text-sm bg-white focus:outline-none focus:ring-1 focus:ring-brand-500"
-                 >
-                   <option value="">Select inventory item or preparation to append...</option>
-                   <optgroup label="Raw Inventory Nodes">
-                     {inventory
-                       .filter((i: any) => (i.itemType === 'Raw' || !i.itemType) && (!user?.locationId || i.locationId === user.locationId))
-                       .map((item: any) => {
-                         const shortId = String(item.id).slice(-6);
-                         const catPart = item.category ? ` · ${item.category}` : '';
-                         const label = `${item.name}${catPart} (${item.unit}) — $${(item.cost || 0).toFixed(2)}/${item.unit} [#${shortId}]`;
-                         return (
-                           <option key={`inv-${item.id}`} value={item.id.toString()}>
-                             {label}
-                           </option>
-                         );
-                       })
-                     }
-                   </optgroup>
-                   <optgroup label="Finished Goods &amp; Preparations">
-                     {inventory
-                       .filter((i: any) => (i.itemType === 'Preparation' || i.itemType === 'Finished Good') && (!user?.locationId || i.locationId === user.locationId))
-                       .map((item: any) => {
-                         const shortId = String(item.id).slice(-6);
-                         const catPart = item.category ? ` · ${item.category}` : '';
-                         const label = `${item.name}${catPart} (${item.unit}) — $${(item.cost || 0).toFixed(2)}/${item.unit} [#${shortId}]`;
-                         return (
-                           <option key={`prep-${item.id}`} value={item.id.toString()}>
-                             {label}
-                           </option>
-                         );
-                       })
-                     }
-                   </optgroup>
-                 </select>
-                 <button 
-                   onClick={addIngredient}
-                   disabled={!selectedInvId}
-                   className="px-4 py-2 bg-neutral-900 text-white text-sm font-medium rounded-md hover:bg-black transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                 >
-                   Append
-                 </button>
-               </div>
+               {/* ── Ingredient search combobox ── */}
+               {(() => {
+                  const supMap: Record<number, string> = {};
+                  suppliersData.forEach((s: any) => { supMap[s.id] = s.name; });
+                  const q = ingSearch.toLowerCase().trim();
+                  const filtered = q
+                    ? inventory.filter((i: any) =>
+                        i.name?.toLowerCase().includes(q) ||
+                        i.category?.toLowerCase().includes(q) ||
+                        (i.supplierId && supMap[i.supplierId]?.toLowerCase().includes(q))
+                      )
+                    : inventory;
+                  const selectedItem = inventory.find((i: any) => i.id.toString() === selectedInvId);
+                  return (
+                    <div className="relative mt-1">
+                      <div className="flex items-center gap-2">
+                        <div className="relative flex-1">
+                          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-neutral-400 pointer-events-none" />
+                          <input
+                            type="text"
+                            value={ingSearch}
+                            onChange={e => { setIngSearch(e.target.value); setIngPanelOpen(true); setSelectedInvId(""); }}
+                            onFocus={() => setIngPanelOpen(true)}
+                            onKeyDown={e => {
+                              if (e.key === "Enter" && selectedInvId) { addIngredient(); setIngSearch(""); setIngPanelOpen(false); }
+                              if (e.key === "Escape") setIngPanelOpen(false);
+                            }}
+                            placeholder="Search by name, category, or supplier…"
+                            className="w-full pl-8 pr-3 py-2 border border-neutral-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-400"
+                          />
+                        </div>
+                        <button
+                          onClick={() => { addIngredient(); setIngSearch(""); setIngPanelOpen(false); }}
+                          disabled={!selectedInvId}
+                          className="px-4 py-2 bg-neutral-900 text-white text-sm font-semibold rounded-lg hover:bg-black transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                        >
+                          {selectedItem ? `+ ${selectedItem.name}` : "Append"}
+                        </button>
+                      </div>
+                      {ingPanelOpen && (
+                        <>
+                          <div className="fixed inset-0 z-10" onClick={() => setIngPanelOpen(false)} />
+                          <div className="absolute left-0 right-0 top-[calc(100%+4px)] z-20 bg-white border border-neutral-200 rounded-xl shadow-2xl overflow-y-auto max-h-72">
+                            {filtered.length === 0 ? (
+                              <div className="px-4 py-6 text-center text-sm text-neutral-400">No items match your search.</div>
+                            ) : (
+                              <div className="divide-y divide-neutral-100">
+                                {filtered.map((item: any) => {
+                                  const shortId      = String(item.id).slice(-6);
+                                  const supplierName = item.supplierId ? (supMap[item.supplierId] ?? null) : null;
+                                  const isPrepNode   = item.itemType === "Preparation" || item.itemType === "Finished Good";
+                                  const isSelected   = item.id.toString() === selectedInvId;
+                                  return (
+                                    <button
+                                      key={item.id}
+                                      type="button"
+                                      onClick={() => { setSelectedInvId(item.id.toString()); setIngSearch(item.name); setIngPanelOpen(false); }}
+                                      className={`w-full text-left px-4 py-2.5 flex items-center justify-between gap-3 transition-colors ${isSelected ? "bg-brand-50 border-l-2 border-brand-500" : "hover:bg-neutral-50"}`}
+                                    >
+                                      <div className="min-w-0 flex-1">
+                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                          <span className="text-sm font-semibold text-neutral-900">{item.name}</span>
+                                          {isPrepNode && (
+                                            <span className="text-[9px] font-bold px-1.5 py-0.5 bg-orange-100 text-orange-700 rounded uppercase shrink-0">
+                                              {item.itemType === "Finished Good" ? "FG" : "PREP"}
+                                            </span>
+                                          )}
+                                          <span className="text-[10px] font-mono text-neutral-300 shrink-0">#{shortId}</span>
+                                        </div>
+                                        {supplierName && <p className="text-[11px] text-neutral-400 mt-0.5 truncate">{supplierName}</p>}
+                                      </div>
+                                      <div className="text-right shrink-0 space-y-0.5">
+                                        {item.category && (
+                                          <span className="block text-[10px] font-semibold px-1.5 py-0.5 bg-neutral-100 text-neutral-500 rounded uppercase">{item.category}</span>
+                                        )}
+                                        <span className="block text-xs text-neutral-600 font-medium">
+                                          {item.unit}&nbsp;·&nbsp;${(item.cost || 0).toFixed(2)}/{item.unit}
+                                        </span>
+                                      </div>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  );
+               })()}
              </div>
           </div>
         </div>
