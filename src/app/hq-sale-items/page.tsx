@@ -18,6 +18,7 @@ import { HQOnlyGuard } from "@/components/HQOnlyGuard";
 
 // ─── FG category presets ───────────────────────────────────────────────────────
 const CATEGORY_OPTIONS = [
+  // Existing
   "Sauces & Condiments",
   "Breads & Baked",
   "Proteins",
@@ -27,6 +28,14 @@ const CATEGORY_OPTIONS = [
   "Beverages",
   "Sides",
   "Meal Kits",
+  // New
+  "Tandoor",
+  "Curries",
+  "Meat",
+  "Masala",
+  "Batter",
+  "Tray",
+  "Chutneys",
   "Other",
 ];
 
