@@ -12,6 +12,7 @@ import {
 import {
   loadSaleItems, upsertSaleItem, loadRecipes, loadLocations,
   loadFgLocationPricing, upsertFgLocationPricing, deleteFgLocationPricing,
+  loadCategories, addCategory,
   type SaleItem, type FgLocationPricing
 } from "@/lib/storage";
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
@@ -109,6 +110,13 @@ function HQSaleItemsContent() {
   const [filterCategory, setFilterCategory] = useState("All");
   const [filterCommissary, setFilterCommissary] = useState("All");
 
+  // DB-driven category list (loaded from categories table)
+  const [dbCategories, setDbCategories] = useState<string[]>([]);
+  // Inline "+ Add Category" form in drawer
+  const [addCatInput, setAddCatInput]   = useState("");
+  const [isAddingCat, setIsAddingCat]   = useState(false);
+  const [addCatError, setAddCatError]   = useState<string | null>(null);
+
   // Drawer state
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [editing, setEditing]  = useState<SaleItem | null>(null);
@@ -141,7 +149,10 @@ function HQSaleItemsContent() {
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [si, rec, locs] = await Promise.all([loadSaleItems(), loadRecipes(), loadLocations()]);
+      const [si, rec, locs, cats] = await Promise.all([
+        loadSaleItems(), loadRecipes(), loadLocations(),
+        loadCategories('finished_goods'),
+      ]);
       setItems(Array.isArray(si) ? si : []);
       setRecipes(Array.isArray(rec) ? rec : []);
       setLocations(
@@ -149,6 +160,8 @@ function HQSaleItemsContent() {
           ? locs.filter((l: any) => !l.status || l.status === "active").map((l: any) => ({ id: l.id, name: l.name }))
           : []
       );
+      // DB categories — if empty (pre-migration), UI falls back to CATEGORY_OPTIONS
+      setDbCategories(Array.isArray(cats) ? cats : []);
     } finally {
       setIsLoading(false);
     }
@@ -195,6 +208,26 @@ function HQSaleItemsContent() {
     setSaveError(null); setPricingError(null);
     loadPricing(item.id);
     setIsDrawerOpen(true);
+  };
+
+  // ── Add category inline ───────────────────────────────────────────────────────
+  const handleAddCategory = async () => {
+    const name = addCatInput.trim();
+    if (!name) return;
+    setIsAddingCat(true as any); // keep form open while saving
+    setAddCatError(null);
+    const res = await addCategory(name, 'finished_goods');
+    if (!res.success) {
+      setAddCatError(res.error?.message ?? 'Failed to add category.');
+      setIsAddingCat(true);
+      return;
+    }
+    // Reload categories from DB so the new one appears in the dropdown
+    const fresh = await loadCategories('finished_goods');
+    setDbCategories(fresh.length > 0 ? fresh : dbCategories);
+    setFormCategory(name);    // auto-select the just-created category
+    setAddCatInput('');
+    setIsAddingCat(false);
   };
 
   // ── Save finished good ────────────────────────────────────────────────────────
@@ -296,7 +329,14 @@ function HQSaleItemsContent() {
   };
 
   // ── Filters ───────────────────────────────────────────────────────────────────
-  const allCategories = Array.from(new Set(items.map(i => i.category).filter(Boolean))) as string[];
+  // allCategories = DB-managed list (sort_order respected) UNION any legacy
+  // category strings already on items but not yet in the categories table.
+  // This keeps the filter backward-compatible with pre-migration data.
+  const legacyCats = items.map(i => i.category).filter(Boolean) as string[];
+  const allCategories = Array.from(
+    new Set([...(dbCategories.length > 0 ? dbCategories : CATEGORY_OPTIONS), ...legacyCats])
+  );
+
 
   const filtered = items.filter(i => {
     const matchSearch = !search
@@ -382,17 +422,15 @@ function HQSaleItemsContent() {
               className="pl-9 pr-4 py-1.5 border border-neutral-200 rounded-md text-sm w-full bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
             />
           </div>
-          {/* Category filter */}
-          {allCategories.length > 0 && (
-            <select
-              value={filterCategory}
-              onChange={e => setFilterCategory(e.target.value)}
-              className="px-3 py-1.5 text-sm border border-neutral-200 rounded-md bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
-            >
-              <option value="All">All categories</option>
-              {allCategories.map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
-          )}
+          {/* Category filter — always visible; options come from DB (or CATEGORY_OPTIONS fallback) */}
+          <select
+            value={filterCategory}
+            onChange={e => setFilterCategory(e.target.value)}
+            className="px-3 py-1.5 text-sm border border-neutral-200 rounded-md bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
+          >
+            <option value="All">All categories</option>
+            {allCategories.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
           {/* Commissary filter */}
           <select
             value={filterCommissary}
@@ -594,24 +632,57 @@ function HQSaleItemsContent() {
             <label className="block text-xs font-semibold text-neutral-600 uppercase tracking-wider mb-1.5">
               Category <span className="text-neutral-400 font-normal">(optional)</span>
             </label>
-            <div className="flex gap-2">
-              <select
-                value={formCategory}
-                onChange={e => setFormCategory(e.target.value)}
-                className="flex-1 px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
+            {/* DB-driven select — falls back to CATEGORY_OPTIONS pre-migration */}
+            <select
+              value={formCategory}
+              onChange={e => setFormCategory(e.target.value)}
+              className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
+            >
+              <option value="">— Uncategorized —</option>
+              {allCategories.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+
+            {/* ── Inline "+ Add Category" ──────────────────────────────────── */}
+            {!isAddingCat ? (
+              <button
+                type="button"
+                onClick={() => { setAddCatInput(""); setAddCatError(null); setIsAddingCat(true); }}
+                className="mt-2 flex items-center gap-1 text-xs text-brand-600 hover:text-brand-800 font-medium transition-colors"
               >
-                <option value="">— Uncategorized —</option>
-                {CATEGORY_OPTIONS.map(c => <option key={c} value={c}>{c}</option>)}
-              </select>
-              {/* Also allow free-text override */}
-              <input
-                type="text"
-                value={formCategory}
-                onChange={e => setFormCategory(e.target.value)}
-                placeholder="or type custom…"
-                className="w-36 px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
-              />
-            </div>
+                <PlusCircle className="h-3.5 w-3.5" /> Add new category
+              </button>
+            ) : (
+              <div className="mt-2 flex items-start gap-2">
+                <input
+                  type="text"
+                  placeholder="New category name…"
+                  value={addCatInput}
+                  onChange={e => { setAddCatInput(e.target.value); setAddCatError(null); }}
+                  onKeyDown={async e => {
+                    if (e.key === "Enter") { e.preventDefault(); await handleAddCategory(); }
+                    if (e.key === "Escape") setIsAddingCat(false);
+                  }}
+                  autoFocus
+                  className="flex-1 px-3 py-1.5 text-sm border border-brand-300 rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-brand-500"
+                />
+                <button
+                  type="button"
+                  disabled={!addCatInput.trim() || isAddingCat === null}
+                  onClick={handleAddCategory}
+                  className="px-3 py-1.5 text-xs font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50 transition-colors whitespace-nowrap"
+                >
+                  Add
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsAddingCat(false)}
+                  className="px-2 py-1.5 text-xs text-neutral-500 hover:text-neutral-800 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+            {addCatError && <p className="mt-1 text-xs text-danger-600">{addCatError}</p>}
           </div>
 
           {/* Source Commissary */}

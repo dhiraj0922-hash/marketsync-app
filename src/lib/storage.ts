@@ -344,6 +344,136 @@ const mapSaleItemToDB = (item: Partial<SaleItem> & { id: string }) => ({
   updated_at:              new Date().toISOString(),
 });
 
+// ----------------------------------------------------------------------------
+// CATEGORIES
+// ----------------------------------------------------------------------------
+
+export interface CategoryRow {
+  id:         string;
+  name:       string;
+  type:       'finished_goods' | 'inventory';
+  sortOrder:  number;
+  isActive:   boolean;
+  createdAt:  string;
+  updatedAt:  string;
+}
+
+const mapCategoryRow = (db: any): CategoryRow => ({
+  id:        db.id,
+  name:      db.name,
+  type:      db.type,
+  sortOrder: db.sort_order ?? 0,
+  isActive:  db.is_active ?? true,
+  createdAt: db.created_at,
+  updatedAt: db.updated_at,
+});
+
+/**
+ * Load active category NAMES for a given type, ordered by sort_order → name.
+ * Returns [] gracefully if the table doesn't exist yet (pre-migration).
+ * The caller should fall back to CATEGORY_OPTIONS when [] is returned.
+ */
+export async function loadCategories(
+  type: 'finished_goods' | 'inventory'
+): Promise<string[]> {
+  const { data, error } = await supabase
+    .from('categories')
+    .select('name')
+    .eq('type', type)
+    .eq('is_active', true)
+    .order('sort_order', { ascending: true })
+    .order('name',       { ascending: true });
+
+  if (error) {
+    console.warn('[loadCategories] failed (migration not applied?):', error.message);
+    return [];
+  }
+  return (data ?? []).map((r: any) => r.name as string);
+}
+
+/**
+ * Load full CategoryRow objects (for a management UI).
+ * Returns all rows including inactive ones.
+ */
+export async function loadCategoryRows(
+  type: 'finished_goods' | 'inventory'
+): Promise<CategoryRow[]> {
+  const { data, error } = await supabase
+    .from('categories')
+    .select('*')
+    .eq('type', type)
+    .order('sort_order', { ascending: true })
+    .order('name',       { ascending: true });
+
+  if (error) {
+    console.warn('[loadCategoryRows]', error.message);
+    return [];
+  }
+  return (data ?? []).map(mapCategoryRow);
+}
+
+/**
+ * Add (or reactivate) a category.
+ * If the name already exists but is inactive, it is reactivated.
+ * sort_order defaults to 0 (will appear at top — reorder manually if needed).
+ */
+export async function addCategory(
+  name: string,
+  type: 'finished_goods' | 'inventory',
+  sortOrder = 0
+): Promise<{ success: boolean; row?: CategoryRow; error?: any }> {
+  const trimmed = name.trim();
+  if (!trimmed) return { success: false, error: { message: 'Category name cannot be empty.' } };
+
+  const { data, error } = await supabase
+    .from('categories')
+    .upsert(
+      { name: trimmed, type, sort_order: sortOrder, is_active: true, updated_at: new Date().toISOString() },
+      { onConflict: 'name,type' }
+    )
+    .select('*')
+    .single();
+
+  if (error) { console.error('[addCategory]', error); return { success: false, error }; }
+  return { success: true, row: mapCategoryRow(data) };
+}
+
+/**
+ * Soft-deactivate a category by id.
+ * Existing hq_sale_items.category strings are unaffected (stored as text snapshot).
+ * Use loadCategoryRows to get ids.
+ */
+export async function deactivateCategory(
+  id: string
+): Promise<{ success: boolean; error?: any }> {
+  const { error } = await supabase
+    .from('categories')
+    .update({ is_active: false, updated_at: new Date().toISOString() })
+    .eq('id', id);
+
+  if (error) { console.error('[deactivateCategory]', error); return { success: false, error }; }
+  return { success: true };
+}
+
+/**
+ * Hard-delete — use only for truly erroneous rows.
+ * Existing items referencing this category string display it safely
+ * (they hold the string directly, not a FK).
+ */
+export async function deleteCategory(
+  name: string,
+  type: 'finished_goods' | 'inventory'
+): Promise<{ success: boolean; error?: any }> {
+  const { error } = await supabase
+    .from('categories')
+    .delete()
+    .eq('name', name)
+    .eq('type', type);
+
+  if (error) { console.error('[deleteCategory]', error); return { success: false, error }; }
+  return { success: true };
+}
+
 /**
  * Load all HQ sale items.
  *
@@ -1511,18 +1641,6 @@ export async function saveInventoryActivity(activityMap: Record<string, any[]>) 
       const { error } = await supabase.from('inventory_activity').insert(rows);
       if (error) return { success: false, error };
   }
-  return { success: true };
-}
-
-
-// ----------------------------------------------------------------------------
-// LOCAL CATEGORIES STUB
-// ----------------------------------------------------------------------------
-export async function loadCategories() {
-  return ["Produce", "Meat", "Pantry", "Dairy", "Beverages"];
-}
-
-export async function saveCategories(data: any[]) {
   return { success: true };
 }
 

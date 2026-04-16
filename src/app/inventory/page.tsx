@@ -9,7 +9,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
 import { Search, Plus, Upload, MoreHorizontal, ShoppingCart, History, Save, Trash2, ArrowDown, ArrowUp, AlertTriangle, X, Download, Loader2 } from "lucide-react";
-import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, loadSuppliers, saveSuppliers, resolveSupplier, saveCategories, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId } from "@/lib/storage";
+import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId } from "@/lib/storage";
 
 export default function Inventory() {
   const router = useRouter();
@@ -103,7 +103,7 @@ export default function Inventory() {
           const [inv, act, cats, batches, sups] = await Promise.all([
              loadInventory(),
              loadInventoryActivity(),
-             loadCategories(),
+             loadCategories('inventory'),
              loadImportBatches(),
              loadSuppliers()
           ]);
@@ -799,7 +799,10 @@ export default function Inventory() {
 
       if (newlyCreatedCategories.length > 0) {
          setCategories(finalCategoriesList);
-         await saveCategories(finalCategoriesList);
+         // Persist newly discovered categories to DB
+         await Promise.all(
+           newlyCreatedCategories.map((cat: string) => addCategory(cat, 'inventory'))
+         );
       }
       
       const newBatch = {
