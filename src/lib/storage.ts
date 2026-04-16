@@ -1654,6 +1654,50 @@ function mapReqItemRow(row: any) {
 
 
 
+
+
+/**
+ * Batch-load line items for multiple requisitions in a single query.
+ * Used by HQ Production to aggregate demand without N+1 fetches.
+ *
+ * Returns a Map<requisitionId, mappedLineItem[]> so callers can use
+ *   itemsByReqId.get(req.id) ?? []
+ *
+ * Falls back gracefully if the hq_sale_items join fails (pre-migration).
+ */
+export async function loadRequisitionItemsBatch(
+  requisitionIds: string[]
+): Promise<Map<string, any[]>> {
+  if (!requisitionIds.length) return new Map();
+
+  const run = (select: string) =>
+    supabase
+      .from("requisition_items")
+      .select(select)
+      .in("requisition_id", requisitionIds)
+      .order("created_at", { ascending: true });
+
+  let { data, error } = await run("*, inventory_items(name), hq_sale_items(name, base_unit)");
+
+  if (error) {
+    console.warn("[loadRequisitionItemsBatch] join failed, retrying without hq_sale_items", error.message);
+    ({ data, error } = await run("*, inventory_items(name)"));
+    if (error) {
+      console.error("[loadRequisitionItemsBatch] fallback failed", error);
+      return new Map();
+    }
+  }
+
+  const result = new Map<string, any[]>();
+  (data ?? []).forEach((row: any) => {
+    const mapped = mapReqItemRow(row);
+    const list = result.get(row.requisition_id) ?? [];
+    list.push(mapped);
+    result.set(row.requisition_id, list);
+  });
+  return result;
+}
+
 // ─── HQ Location ID ───────────────────────────────────────────────────────────
 const HQ_LOCATION_ID = "LOC-HQ";
 

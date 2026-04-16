@@ -33,6 +33,7 @@ import {
   loadSaleItems,
   saveNewRequisition,
   loadRequisitionItems,
+  loadRequisitionItemsBatch,
   updateRequisitionStatus,
   updateRequisitionItemFulfilled,
   type SaleItem,
@@ -709,6 +710,15 @@ function HQAdminView({
   // Cache line items per req id so table rows show real values once a req is opened
   const [reqItemsCache, setReqItemsCache] = useState<Map<string, any[]>>(new Map());
 
+  // ── HQ Production: pre-load line items for all requisitions matching  ─────
+  // the selected production date. This avoids N+1 fetches when hqProductionDemand
+  // aggregates item-level data. productionItems is a Map<reqId, lineItems[]>.
+  const [productionItems, setProductionItems] = useState<Map<string, any[]>>(new Map());
+
+  // All statuses that represent active demand HQ must prepare for.
+  // Defined here (not inside hqProductionDemand) so the useEffect below can use it too.
+  const PRODUCTION_STATUSES = new Set(["submitted", "approved", "partial", "backordered", "fulfilled"]);
+
   useEffect(() => {
     async function fetchData() {
       setIsLoading(true);
@@ -722,6 +732,29 @@ function HQAdminView({
     }
     fetchData();
   }, []);
+
+  // Batch-load line items for production date whenever date or requisitions list changes
+  useEffect(() => {
+    if (!requisitions.length || !productionDate) return;
+    const normalize = (d: string): string => {
+      if (!d) return "";
+      if (isNaN(Date.parse(d))) return d.trim();
+      return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    };
+    const targetDate = normalize(productionDate);
+    const relevant = requisitions.filter((r) => {
+      const s = (r.status ?? "").toLowerCase();
+      return PRODUCTION_STATUSES.has(s) && normalize(r.date ?? "") === targetDate;
+    });
+    if (!relevant.length) { setProductionItems(new Map()); return; }
+    let cancelled = false;
+    loadRequisitionItemsBatch(relevant.map((r) => r.id)).then((map) => {
+      if (!cancelled) setProductionItems(map);
+    });
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [productionDate, requisitions]);
+
 
   // Fetch line items from requisition_items whenever a requisition is opened
   useEffect(() => {
@@ -942,23 +975,65 @@ function HQAdminView({
   };
 
   const hqProductionDemand = () => {
-    const relevant = requisitions.filter(
-      (r) => r.date === productionDate &&
-        FULFILLABLE_STATUSES.has((r.status ?? "").toLowerCase()) ||
-        PENDING_STATUSES.has((r.status ?? "").toLowerCase())
-    );
+    // BUG-FIX 1: operator precedence — original was:
+    //   (r.date === productionDate && FULFILLABLE_STATUSES.has(status)) || PENDING_STATUSES.has(status)
+    // which passed ALL pending-status rows regardless of date.
+    //
+    // BUG-FIX 2: date normalization — productionDate is "Apr 16, 2026" (en-US locale);
+    // req.date may be the same format, but we normalize both sides to be safe.
+    //
+    // BUG-FIX 3: req.lineItems is ALWAYS [] for new DB-backed requisitions;
+    // items live in requisition_items table, accessed via productionItems Map.
+    //
+    // BUG-FIX 4: correct field names — quantityRequested, quantityFulfilled, itemName.
+    //
+    // BUG-FIX 5: included statuses expanded to all active demand:
+    //   submitted + approved + partial + backordered + fulfilled
+
+    const normalize = (d: string): string => {
+      if (!d) return "";
+      if (isNaN(Date.parse(d))) return d.trim(); // already locale string
+      return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    };
+    const targetDate = normalize(productionDate);
+
+    const relevant = requisitions.filter((r) => {
+      const s = (r.status ?? "").toLowerCase();
+      if (!PRODUCTION_STATUSES.has(s)) return false;           // exclude draft + rejected
+      return normalize(r.date ?? "") === targetDate;           // date must match
+    });
+
     const agg: Record<string, { totalQty: number; unit: string; locations: { loc: string; qty: number }[] }> = {};
+
     relevant.forEach((req) => {
-      (req.lineItems || []).forEach((li: any) => {
-        const rem = li.requestedQty - (li.fulfilledQty || 0);
-        if (rem > 0) {
-          if (!agg[li.name]) agg[li.name] = { totalQty: 0, unit: li.unit, locations: [] };
-          agg[li.name].totalQty += rem;
-          const existing = agg[li.name].locations.find((l) => l.loc === req.location);
-          if (existing) existing.qty += rem; else agg[li.name].locations.push({ loc: req.location, qty: rem });
-        }
+      // Use batch-loaded items from requisition_items table (NOT req.lineItems which is always [])
+      const items = productionItems.get(req.id) ?? [];
+      items.forEach((li: any) => {
+        // For submitted/approved: show full requested qty.
+        // For partial/fulfilled: show only the outstanding remainder (requested - fulfilled).
+        const requested  = Number(li.quantityRequested  ?? 0);
+        const fulfilled  = Number(li.quantityFulfilled  ?? 0);
+        const status     = (req.status ?? "").toLowerCase();
+        const qty = (status === "fulfilled" || status === "partial")
+          ? Math.max(0, requested - fulfilled)  // remainder only
+          : requested;                           // full requested qty
+
+        // For submitted/approved show all items; for fulfilled show only items with remainder
+        if (status === "fulfilled" && qty <= 0) return;
+
+        const name = li.itemName ?? li.item_name_snapshot ?? li.itemId ?? "Unknown";
+        const unit = li.unit ?? li.unit_snapshot ?? "";
+        if (!name) return;
+
+        if (!agg[name]) agg[name] = { totalQty: 0, unit, locations: [] };
+        agg[name].totalQty += qty;
+        const locKey = req.location || req.location_id || "HQ";
+        const existing = agg[name].locations.find((l) => l.loc === locKey);
+        if (existing) existing.qty += qty;
+        else agg[name].locations.push({ loc: locKey, qty });
       });
     });
+
     return agg;
   };
 
