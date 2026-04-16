@@ -1615,18 +1615,19 @@ export async function saveNewRequisition(
   // ── Build rows with confirmed id ───────────────────────────────────────────
   const rows = lineItems.map((li, idx) => {
     const row = {
-      requisition_id:     confirmedId,
-      item_id:            li.item_id            ?? null,
-      finished_good_id:   li.finished_good_id   ?? null,
-      item_name_snapshot: li.item_name_snapshot ?? null,
-      unit_snapshot:      li.unit_snapshot      ?? null,
-      quantity_requested: li.quantity_requested,
-      unit_price:         li.unit_price,
-      line_total:         li.line_total,
-      quantity_approved:  null,
-      quantity_fulfilled: null,
+      requisition_id:              confirmedId,
+      item_id:                     li.item_id            ?? null,
+      finished_good_id:            li.finished_good_id   ?? null,
+      item_name_snapshot:          li.item_name_snapshot ?? null,
+      unit_snapshot:               li.unit_snapshot      ?? null,
+      source_commissary_snapshot:  (li as any).source_commissary_snapshot ?? null,
+      quantity_requested:          li.quantity_requested,
+      unit_price:                  li.unit_price,
+      line_total:                  li.line_total,
+      quantity_approved:           null,
+      quantity_fulfilled:          null,
     };
-    console.log(`[saveNewRequisition] row[${idx}] item_id=${row.item_id} fg_id=${row.finished_good_id} qty=${row.quantity_requested} name="${row.item_name_snapshot}"`);
+    console.log(`[saveNewRequisition] row[${idx}] item_id=${row.item_id} fg_id=${row.finished_good_id} commissary=${row.source_commissary_snapshot} qty=${row.quantity_requested} name="${row.item_name_snapshot}"`);
     return row;
   });
 
@@ -1735,6 +1736,9 @@ function mapReqItemRow(row: any) {
     isFGMode,
     itemId:            row.item_id ?? null,
     finishedGoodId:    row.finished_good_id ?? null,
+    // Commissary that should fulfill this line (snapshot at order time).
+    // NULL on legacy rows — treat as 'Commissary HQ'.
+    sourceCommissary:  row.source_commissary_snapshot ?? 'Commissary HQ',
     itemName,
     unit,
     quantityRequested: Number(row.quantity_requested),

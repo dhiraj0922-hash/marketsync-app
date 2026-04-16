@@ -49,13 +49,24 @@ import {
 
 interface LineItemDraft {
   // One of itemId (raw mode) or finishedGoodId (FG mode) will be set
-  itemId:         string | null;
-  finishedGoodId: string | null;
-  itemName:       string;         // snapshot: captured at selection time
-  unit:           string;         // snapshot: captured at selection time
-  unitPrice:      number;         // effective_price at selection time
+  itemId:            string | null;
+  finishedGoodId:    string | null;
+  itemName:          string;         // snapshot: captured at selection time
+  unit:              string;         // snapshot: captured at selection time
+  unitPrice:         number;         // effective_price at selection time
   quantityRequested: number;
+  sourceCommissary:  string;         // snapshot: which commissary fulfills this line
 }
+
+// ─── Commissary routing constants ─────────────────────────────────────────────
+const COMMISSARY_OPTIONS = ["Commissary HQ", "MOMOLOCO", "Veggie Paradise"] as const;
+type CommissaryKey = typeof COMMISSARY_OPTIONS[number];
+
+const COMMISSARY_COLORS: Record<string, string> = {
+  "Commissary HQ":   "bg-brand-50   text-brand-700   border-brand-200",
+  "MOMOLOCO":        "bg-warning-50  text-warning-700  border-warning-200",
+  "Veggie Paradise": "bg-success-50  text-success-700  border-success-200",
+};
 
 // ─── Status badge helper ───────────────────────────────────────────────────────
 
@@ -173,10 +184,11 @@ function LocationManagerView({
         {
           itemId:            null,
           finishedGoodId:    saleItem.id,
-          itemName:          saleItem.name,          // snapshot
-          unit:              saleItem.baseUnit,       // snapshot
-          unitPrice:         saleItem.effectivePrice, // price captured at selection time
+          itemName:          saleItem.name,               // snapshot
+          unit:              saleItem.baseUnit,            // snapshot
+          unitPrice:         saleItem.effectivePrice,      // price captured at selection time
           quantityRequested: selectedQty,
+          sourceCommissary:  saleItem.sourceCommissary,   // commissary snapshot
         },
       ]);
     } else {
@@ -193,6 +205,7 @@ function LocationManagerView({
           unit:              inv.unit || inv.baseUnit || "",
           unitPrice:         Number(inv.cost ?? 0),
           quantityRequested: selectedQty,
+          sourceCommissary:  "Commissary HQ",   // raw items always route to HQ
         },
       ]);
     }
@@ -236,13 +249,14 @@ function LocationManagerView({
         },
         lineItems.map(li => ({
           // FG-mode: set finished_good_id; raw-mode: set item_id
-          item_id:              li.finishedGoodId ? null     : li.itemId,
-          finished_good_id:     li.finishedGoodId ?? null,
-          item_name_snapshot:   li.itemName,
-          unit_snapshot:        li.unit,
-          quantity_requested:   li.quantityRequested,
-          unit_price:           li.unitPrice,
-          line_total:           parseFloat((li.quantityRequested * li.unitPrice).toFixed(2)),
+          item_id:                     li.finishedGoodId ? null     : li.itemId,
+          finished_good_id:            li.finishedGoodId ?? null,
+          item_name_snapshot:          li.itemName,
+          unit_snapshot:               li.unit,
+          source_commissary_snapshot:  li.sourceCommissary ?? "Commissary HQ",
+          quantity_requested:          li.quantityRequested,
+          unit_price:                  li.unitPrice,
+          line_total:                  parseFloat((li.quantityRequested * li.unitPrice).toFixed(2)),
         }))
       );
 
@@ -627,6 +641,7 @@ function LocationManagerView({
                   <TableHeader className="bg-neutral-50 text-[11px] uppercase text-neutral-500 tracking-wider">
                     <TableRow>
                       <TableHead className="py-2 px-4">Item</TableHead>
+                      <TableHead className="py-2">Commissary</TableHead>
                       <TableHead className="py-2">Qty</TableHead>
                       <TableHead className="py-2 text-right">Unit Price</TableHead>
                       <TableHead className="py-2 text-right">Line Total</TableHead>
@@ -635,10 +650,15 @@ function LocationManagerView({
                   </TableHeader>
                   <TableBody>
                     {lineItems.map((li) => (
-                      <TableRow key={li.itemId}>
+                      <TableRow key={li.finishedGoodId ?? li.itemId}>
                         <TableCell className="py-2 px-4 text-sm font-medium text-neutral-800">
                           {li.itemName}
                           <span className="ml-1 text-xs text-neutral-400">{li.unit}</span>
+                        </TableCell>
+                        <TableCell className="py-2">
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold border ${COMMISSARY_COLORS[li.sourceCommissary] ?? "bg-neutral-50 text-neutral-600 border-neutral-200"}`}>
+                            {li.sourceCommissary}
+                          </span>
                         </TableCell>
                         <TableCell className="py-2">
                           <input
@@ -699,6 +719,7 @@ function HQAdminView({
   const [selectedReq, setSelectedReq] = useState<any>(null);
   const [selectedReqIds, setSelectedReqIds] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState<"overview" | "hq-production">("overview");
+  const [activeCommissary, setActiveCommissary] = useState<string>("Commissary HQ");
   const [productionDate, setProductionDate] = useState<string>(
     new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
   );
@@ -975,11 +996,12 @@ function HQAdminView({
   };
 
   const hqProductionDemand = () => {
-    // Returns two separate aggregations:
-    //   pending   — items still to be produced (submitted/approved/partial/backordered)
-    //               qty = quantityRequested (full demand)
-    //   completed — items already fulfilled today
-    //               qty = quantityFulfilled (what was actually made)
+    // Returns per-commissary aggregations:
+    //   pending[commissary]   — items still to be produced by that commissary
+    //   completed[commissary] — items fulfilled by that commissary today
+    //
+    // source_commissary_snapshot on each line item determines the commissary.
+    // NULL (legacy rows) defaults to 'Commissary HQ'.
 
     const normalize = (d: string): string => {
       if (!d) return "";
@@ -989,8 +1011,10 @@ function HQAdminView({
     const targetDate = normalize(productionDate);
 
     type AggMap = Record<string, { totalQty: number; unit: string; locations: { loc: string; qty: number }[] }>;
-    const pending:   AggMap = {};
-    const completed: AggMap = {};
+    // One AggMap per commissary per section
+    const pending:   Record<string, AggMap> = {};
+    const completed: Record<string, AggMap> = {};
+    for (const c of COMMISSARY_OPTIONS) { pending[c] = {}; completed[c] = {}; }
 
     const addToAgg = (agg: AggMap, name: string, unit: string, qty: number, loc: string) => {
       if (!name || qty <= 0) return;
@@ -1003,8 +1027,8 @@ function HQAdminView({
 
     requisitions.forEach((req) => {
       const s = (req.status ?? "").toLowerCase();
-      if (!PRODUCTION_STATUSES.has(s)) return;                 // exclude draft + rejected
-      if (normalize(req.date ?? "") !== targetDate) return;   // must match selected date
+      if (!PRODUCTION_STATUSES.has(s)) return;
+      if (normalize(req.date ?? "") !== targetDate) return;
 
       const items = productionItems.get(req.id) ?? [];
       const locKey = req.location || req.location_id || "HQ";
@@ -1014,14 +1038,16 @@ function HQAdminView({
         const fulfilled  = Number(li.quantityFulfilled  ?? 0);
         const name = li.itemName ?? li.item_name_snapshot ?? li.itemId ?? "Unknown";
         const unit = li.unit ?? li.unit_snapshot ?? "";
+        // Route to commissary — snapshot at order time, NULL falls back to HQ
+        const commissary: string = li.sourceCommissary ?? "Commissary HQ";
+        // Ensure the commissary bucket exists (for any future/custom values)
+        if (!pending[commissary])   pending[commissary]   = {};
+        if (!completed[commissary]) completed[commissary] = {};
 
         if (s === "fulfilled") {
-          // Show in completed section: what was actually produced
-          addToAgg(completed, name, unit, fulfilled, locKey);
+          addToAgg(completed[commissary], name, unit, fulfilled, locKey);
         } else {
-          // submitted / approved / partial / backordered:
-          // Show full requested qty in pending (partial already partially done, but HQ still needs to prepare)
-          addToAgg(pending, name, unit, requested, locKey);
+          addToAgg(pending[commissary], name, unit, requested, locKey);
         }
       });
     });
@@ -1029,9 +1055,15 @@ function HQAdminView({
     return { pending, completed };
   };
 
-  const { pending: pendingData, completed: completedData } = hqProductionDemand();
-  const pendingEntries   = Object.entries(pendingData);
-  const completedEntries = Object.entries(completedData);
+  const { pending: pendingByCommissary, completed: completedByCommissary } = hqProductionDemand();
+  // For backward compat with renderProductionTable which takes flat entries
+  const activePendingEntries   = Object.entries(pendingByCommissary[activeCommissary]   ?? {});
+  const activeCompletedEntries = Object.entries(completedByCommissary[activeCommissary] ?? {});
+
+  // Legacy names kept so renderProductionTable call sites don't need changes
+  const pendingEntries   = activePendingEntries;
+  const completedEntries = activeCompletedEntries;
+
   const toggleExpand = (name: string) =>
     setExpandedRows((prev) => prev.includes(name) ? prev.filter((i) => i !== name) : [...prev, name]);
 
@@ -1317,7 +1349,7 @@ function HQAdminView({
                   <TableBody>
                     {hqItemsLoading ? (
                       <TableRow>
-                        <TableCell colSpan={4} className="text-center py-6 text-neutral-400 text-sm">
+                        <TableCell colSpan={5} className="text-center py-6 text-neutral-400 text-sm">
                           <div className="flex items-center justify-center gap-2">
                             <Loader2 className="h-4 w-4 animate-spin" /> Loading items…
                           </div>
@@ -1325,81 +1357,94 @@ function HQAdminView({
                       </TableRow>
                     ) : hqReqItems.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={4} className="text-center py-6 text-neutral-400 text-sm">
+                        <TableCell colSpan={5} className="text-center py-6 text-neutral-400 text-sm">
                           No items found for this requisition.
                         </TableCell>
                       </TableRow>
-                    ) : hqReqItems.map((item: any) => {
-                      const requested = Number(item.quantityRequested ?? 0);
-                      const fulfilled = Number(item.quantityFulfilled ?? 0);
-                      const gap = Math.max(0, requested - fulfilled);
-                      const isComplete = fulfilled >= requested;
-                      return (
-                        <TableRow key={item.id} className="hover:bg-neutral-50/50">
-                          <TableCell>
-                            <div className="font-medium text-sm text-neutral-900">{item.itemName}</div>
-                          </TableCell>
-                          <TableCell>
-                            <span className="text-xs font-medium text-neutral-800">{requested}</span>
-                          </TableCell>
-                          <TableCell>
-                            {item.unitPrice != null
-                              ? <span className="text-xs font-medium text-neutral-700">${Number(item.unitPrice).toFixed(2)}</span>
-                              : <span className="text-neutral-400 text-xs">—</span>}
-                          </TableCell>
-                          {/* Editable fulfilled input — HQ only */}
-                          <TableCell>
-                            <input
-                              type="number"
-                              min={0}
-                              max={requested}
-                              defaultValue={fulfilled}
-                              key={`${item.id}-${fulfilled}`}
-                              onBlur={async (e) => {
-                                const newVal = Math.max(0, Math.min(requested, Number(e.target.value)));
-                                if (newVal === fulfilled) return;
-                                // Optimistic local update
-                                setHqReqItems((prev) =>
-                                  prev.map((li) =>
-                                    li.id === item.id ? { ...li, quantityFulfilled: newVal } : li
-                                  )
-                                );
-                                const res = await updateRequisitionItemFulfilled(
-                                  item.id,
-                                  newVal,
-                                  item.requisitionId   // triggers auto status recalc in storage
-                                );
-                                if (!res.success) {
-                                  alert(`Failed to save: ${res.error?.message}`);
-                                  // Revert on failure
-                                  setHqReqItems((prev) =>
-                                    prev.map((li) =>
-                                      li.id === item.id ? { ...li, quantityFulfilled: fulfilled } : li
-                                    )
-                                  );
-                                } else if (res.newStatus) {
-                                  // Sync parent requisition status in local state
-                                  setSelectedReq((prev: any) => prev ? { ...prev, status: res.newStatus } : prev);
-                                  setRequisitions((prev: any[]) =>
-                                    prev.map((r) => r.id === item.requisitionId ? { ...r, status: res.newStatus } : r)
-                                  );
-                                }
-                              }}
-                              className={`w-20 px-2 py-1 text-sm font-bold rounded-md border text-center ${
-                                isComplete
-                                  ? "border-success-300 bg-success-50 text-success-800"
-                                  : "border-neutral-300 bg-white text-neutral-800"
-                              } focus:outline-none focus:ring-2 focus:ring-brand-400`}
-                            />
-                          </TableCell>
-                          <TableCell>
-                            {gap > 0
-                              ? <span className="text-xs font-bold text-danger-600">{gap} needed</span>
-                              : <span className="text-xs font-bold text-success-600">Complete</span>}
-                          </TableCell>
-                        </TableRow>
-                      );
-                    })}
+                    ) : (() => {
+                      const groups: Record<string, any[]> = {};
+                      hqReqItems.forEach((item: any) => {
+                        const c = item.sourceCommissary ?? "Commissary HQ";
+                        if (!groups[c]) groups[c] = [];
+                        groups[c].push(item);
+                      });
+                      return Object.entries(groups).map(([commissary, groupItems]) => (
+                        <React.Fragment key={commissary}>
+                          <TableRow className="bg-neutral-50">
+                            <TableCell colSpan={5} className="py-1.5 px-4">
+                              <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold border ${COMMISSARY_COLORS[commissary] ?? "bg-neutral-50 text-neutral-600 border-neutral-200"}`}>
+                                {commissary}
+                              </span>
+                            </TableCell>
+                          </TableRow>
+                          {groupItems.map((item: any) => {
+                            const requested = Number(item.quantityRequested ?? 0);
+                            const fulfilled = Number(item.quantityFulfilled ?? 0);
+                            const gap = Math.max(0, requested - fulfilled);
+                            const isComplete = fulfilled >= requested;
+                            return (
+                              <TableRow key={item.id} className="hover:bg-neutral-50/50">
+                                <TableCell>
+                                  <div className="font-medium text-sm text-neutral-900">{item.itemName}</div>
+                                </TableCell>
+                                <TableCell>
+                                  <span className="text-xs font-medium text-neutral-800">{requested}</span>
+                                </TableCell>
+                                <TableCell>
+                                  {item.unitPrice != null
+                                    ? <span className="text-xs font-medium text-neutral-700">${Number(item.unitPrice).toFixed(2)}</span>
+                                    : <span className="text-neutral-400 text-xs">—</span>}
+                                </TableCell>
+                                <TableCell>
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    max={requested}
+                                    defaultValue={fulfilled}
+                                    key={`${item.id}-${fulfilled}`}
+                                    onBlur={async (e) => {
+                                      const newVal = Math.max(0, Math.min(requested, Number(e.target.value)));
+                                      if (newVal === fulfilled) return;
+                                      setHqReqItems((prev) =>
+                                        prev.map((li) =>
+                                          li.id === item.id ? { ...li, quantityFulfilled: newVal } : li
+                                        )
+                                      );
+                                      const res = await updateRequisitionItemFulfilled(
+                                        item.id, newVal, item.requisitionId
+                                      );
+                                      if (!res.success) {
+                                        alert(`Failed to save: ${res.error?.message}`);
+                                        setHqReqItems((prev) =>
+                                          prev.map((li) =>
+                                            li.id === item.id ? { ...li, quantityFulfilled: fulfilled } : li
+                                          )
+                                        );
+                                      } else if (res.newStatus) {
+                                        setSelectedReq((prev: any) => prev ? { ...prev, status: res.newStatus } : prev);
+                                        setRequisitions((prev: any[]) =>
+                                          prev.map((r) => r.id === item.requisitionId ? { ...r, status: res.newStatus } : r)
+                                        );
+                                      }
+                                    }}
+                                    className={`w-20 px-2 py-1 text-sm font-bold rounded-md border text-center ${
+                                      isComplete
+                                        ? "border-success-300 bg-success-50 text-success-800"
+                                        : "border-neutral-300 bg-white text-neutral-800"
+                                    } focus:outline-none focus:ring-2 focus:ring-brand-400`}
+                                  />
+                                </TableCell>
+                                <TableCell>
+                                  {gap > 0
+                                    ? <span className="text-xs font-bold text-danger-600">{gap} needed</span>
+                                    : <span className="text-xs font-bold text-success-600">Complete</span>}
+                                </TableCell>
+                              </TableRow>
+                            );
+                          })}
+                        </React.Fragment>
+                      ));
+                    })()}
                   </TableBody>
                 </Table>
               </div>
@@ -1407,7 +1452,6 @@ function HQAdminView({
           </Drawer>
         </>
       ) : (
-        /* HQ Production tab — unchanged */
         <div className="space-y-6">
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-neutral-100 pb-4 print:border-none print:pb-0">
             <div>
@@ -1429,6 +1473,29 @@ function HQAdminView({
               </button>
             </div>
           </div>
+
+          {/* ── Commissary tabs ─────────────────────────────────────────── */}
+          <div className="flex gap-1 bg-neutral-100 p-1 rounded-lg border border-neutral-200 shadow-inner w-fit print:hidden">
+            {COMMISSARY_OPTIONS.map(c => {
+              const pCount = Object.keys(pendingByCommissary[c] ?? {}).length;
+              const dCount = Object.keys(completedByCommissary[c] ?? {}).length;
+              const total = pCount + dCount;
+              return (
+                <button key={c} onClick={() => setActiveCommissary(c)}
+                  className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors flex items-center gap-2 ${
+                    activeCommissary === c ? "bg-white text-brand-700 shadow-sm" : "text-neutral-600 hover:text-neutral-900"
+                  }`}>
+                  {c}
+                  {total > 0 && (
+                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
+                      activeCommissary === c ? "bg-brand-100 text-brand-700" : "bg-neutral-200 text-neutral-600"
+                    }`}>{total}</span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
           <div className="print:block space-y-6">
             <div className="hidden print:block text-sm text-neutral-500 mb-4 pb-2 border-b border-neutral-200">Date: {productionDate}</div>
 
@@ -1444,7 +1511,7 @@ function HQAdminView({
               {pendingEntries.length === 0 ? (
                 <div className="text-center py-8 bg-neutral-50 border border-neutral-200 border-dashed rounded-xl">
                   <PackageCheck className="h-8 w-8 text-neutral-300 mx-auto mb-2" />
-                  <p className="text-sm font-semibold text-neutral-500">No pending production for {productionDate}</p>
+                  <p className="text-sm font-semibold text-neutral-500">No pending items for {activeCommissary} on {productionDate}</p>
                 </div>
               ) : renderProductionTable(pendingEntries, "text-brand-700 bg-brand-50")}
             </div>
@@ -1461,7 +1528,7 @@ function HQAdminView({
               {completedEntries.length === 0 ? (
                 <div className="text-center py-8 bg-neutral-50 border border-neutral-200 border-dashed rounded-xl">
                   <CheckCircle2 className="h-8 w-8 text-neutral-300 mx-auto mb-2" />
-                  <p className="text-sm font-semibold text-neutral-500">No fulfilled requisitions for {productionDate}</p>
+                  <p className="text-sm font-semibold text-neutral-500">No fulfilled items for {activeCommissary} on {productionDate}</p>
                 </div>
               ) : renderProductionTable(completedEntries, "text-success-700 bg-success-50")}
             </div>
