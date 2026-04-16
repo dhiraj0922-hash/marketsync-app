@@ -746,54 +746,106 @@ function HQAdminView({
     return () => { cancelled = true; };
   }, [selectedReq]);
 
-  // Value helpers — use cached requisition_items when available;
-  // fall back to header total_amount for requested value on not-yet-opened rows.
-  const getReqValue = (req: any) => {
-    // items available if this req was opened (cache) or is currently selected
+  // ─── Value helpers ────────────────────────────────────────────────────────────
+  //
+  // Root cause of $0.00:
+  //   getReqValue() only used cached line items (loaded on drawer open).
+  //   For rows never opened the cache is empty → returns 0 for every row.
+  //
+  // Fix strategy:
+  //   getDisplayValue(req)  — what to show in the table for any row:
+  //     • If fulfilled/partial and items are cached → use actual fulfilled qty * price
+  //     • If fulfilled/partial and items NOT cached → use req.totalAmount (best available)
+  //     • If approved/submitted/draft → show req.totalAmount (requested value estimate)
+  //   getReqFulfilledValue  — cache-only fulfilled value (used in drawer footer)
+  //   getReqRequestedValue  — requested value (cache first, header fallback)
+  //
+  // req.totalAmount is written at requisition create time as sum(qty * unit_price)
+  // and is accurate for the requested value. It's always present.
+
+  /** Compute best available fulfilled value from cached items (0 if not cached). */
+  const getReqFulfilledValue = (req: any): number => {
     const items = reqItemsCache.get(req.id) ?? (req.id === selectedReq?.id ? hqReqItems : null);
-    if (items) {
-      return items.reduce((sum: number, li: any) => {
-        const price     = Number(li.unitPrice          ?? li.unit_price           ?? 0);
-        const fulfilled = Number(li.quantityFulfilled  ?? li.quantity_fulfilled   ?? 0);
-        return sum + fulfilled * price;
-      }, 0);
-    }
-    // Line items not loaded yet — fulfilled value unknown, show 0
-    return 0;
+    if (!items) return 0;
+    return items.reduce((sum: number, li: any) => {
+      const price     = Number(li.unitPrice         ?? li.unit_price          ?? 0);
+      const fulfilled = Number(li.quantityFulfilled ?? li.quantity_fulfilled  ?? 0);
+      return sum + fulfilled * price;
+    }, 0);
   };
 
-  const getReqRequestedValue = (req: any) => {
+  /**
+   * Status-aware display value for a requisition row.
+   * - fulfilled / partial: actual fulfilled value (cache) or totalAmount fallback
+   * - approved / submitted / draft: totalAmount (requested estimate)
+   * - rejected: totalAmount (informational)
+   * Never returns NaN or negative.
+   */
+  const getDisplayValue = (req: any): { amount: number; isEstimate: boolean } => {
+    const status = (req.status ?? "").toLowerCase();
+    const headerAmount = Math.max(0, Number(req.totalAmount ?? req.total_amount ?? 0));
+
+    if (status === "fulfilled" || status === "partial") {
+      const fulfilledVal = getReqFulfilledValue(req);
+      // If items are cached and fulfilled > 0, show exact fulfilled value
+      const items = reqItemsCache.get(req.id) ?? (req.id === selectedReq?.id ? hqReqItems : null);
+      if (items && fulfilledVal > 0) return { amount: fulfilledVal, isEstimate: false };
+      // Items not yet loaded or 0 qty fulfilled — fall back to totalAmount
+      return { amount: headerAmount, isEstimate: true };
+    }
+
+    // For all other statuses (approved, submitted, draft, rejected): show requested amount
+    return { amount: headerAmount, isEstimate: status !== "rejected" };
+  };
+
+  const getReqRequestedValue = (req: any): number => {
     const items = reqItemsCache.get(req.id) ?? (req.id === selectedReq?.id ? hqReqItems : null);
-    if (items) {
+    if (items && items.length > 0) {
       return items.reduce((sum: number, li: any) => {
         const price     = Number(li.unitPrice         ?? li.unit_price          ?? 0);
         const requested = Number(li.quantityRequested ?? li.quantity_requested  ?? 0);
         return sum + requested * price;
       }, 0);
     }
-    // Fall back to header total_amount — always present, accurate for requested value
-    return Number(req.total_amount ?? req.totalAmount ?? 0);
+    return Math.max(0, Number(req.totalAmount ?? req.total_amount ?? 0));
   };
 
-  // Canonical status sets — DB stores lowercase; normalize before comparing
+  // Keep getReqValue as an alias so the drawer footer still works unchanged
+  const getReqValue = (req: any): number => getReqFulfilledValue(req);
+
+  // ─── Canonical status sets ────────────────────────────────────────────────────
   const FULFILLABLE_STATUSES  = new Set(["approved", "partial", "backordered"]);
   const FULFILLED_STATUSES    = new Set(["fulfilled", "partial"]);
   const PENDING_STATUSES      = new Set(["draft", "submitted"]);
 
-  const pendingCount    = requisitions.filter((r) => PENDING_STATUSES.has((r.status ?? "").toLowerCase())).length;
-  const backorderCount  = requisitions.filter((r) => (r.status ?? "").toLowerCase() === "backordered").length;
+  const pendingCount   = requisitions.filter((r) => PENDING_STATUSES.has((r.status ?? "").toLowerCase())).length;
+  const backorderCount = requisitions.filter((r) => (r.status ?? "").toLowerCase() === "backordered").length;
 
+  // KPI: Total Value Supplied — use getDisplayValue so it works without requiring
+  // every row to be opened first. For fulfilled rows getDisplayValue returns actual
+  // fulfilled amount (if cached) or totalAmount (if not cached yet).
   let locValues = new Map<string, number>();
   let totalValueSupplied = 0;
   requisitions.forEach((r) => {
-    if (FULFILLED_STATUSES.has((r.status ?? "").toLowerCase())) {
-      const val = getReqValue(r);
-      locValues.set(r.location, (locValues.get(r.location) || 0) + val);
-      totalValueSupplied += val;
+    const { amount } = getDisplayValue(r);
+    if (!isNaN(amount) && amount > 0) {
+      // Only count fulfilled/partial toward "supplied" KPI; others are "in flight"
+      if (FULFILLED_STATUSES.has((r.status ?? "").toLowerCase())) {
+        locValues.set(r.location, (locValues.get(r.location) || 0) + amount);
+        totalValueSupplied += amount;
+      }
     }
   });
+  // topLocation: location with the largest committed/fulfilled value
   let topLocation = "N/A";
   let maxVal = 0;
+  // Also include approved (committed) value in top-location ranking
+  requisitions.forEach((r) => {
+    if ([...FULFILLED_STATUSES, "approved"].includes((r.status ?? "").toLowerCase())) {
+      const { amount } = getDisplayValue(r);
+      locValues.set(r.location, (locValues.get(r.location) || 0) + amount);
+    }
+  });
   locValues.forEach((v, k) => { if (v > maxVal) { maxVal = v; topLocation = k; } });
 
   const filteredReqs = requisitions.filter((r) => {
@@ -1028,7 +1080,7 @@ function HQAdminView({
                     <TableHead className="py-3">Requested By</TableHead>
                     <TableHead className="py-3">Date</TableHead>
                     <TableHead className="py-3">Items</TableHead>
-                    <TableHead className="py-3">Value Supplied</TableHead>
+                    <TableHead className="py-3">Req. Value</TableHead>
                     <TableHead className="py-3">Status</TableHead>
                     <TableHead className="px-6 py-3 text-right">Actions</TableHead>
                   </TableRow>
@@ -1054,7 +1106,21 @@ function HQAdminView({
                         <div className="flex items-center gap-1.5"><Clock className="h-3.5 w-3.5 text-neutral-400" />{req.date}</div>
                       </TableCell>
                       <TableCell className="py-4 text-sm font-medium text-neutral-700">{req.items}</TableCell>
-                      <TableCell className="py-4 text-sm font-semibold text-success-600">${getReqValue(req).toFixed(2)}</TableCell>
+                       <TableCell className="py-4 text-sm font-semibold">
+                        {(() => {
+                          const { amount, isEstimate } = getDisplayValue(req);
+                          const status = (req.status ?? "").toLowerCase();
+                          const isFulfilled = FULFILLED_STATUSES.has(status);
+                          return (
+                            <span className={isFulfilled ? "text-success-600" : "text-neutral-700"}>
+                              ${amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              {isEstimate && !isFulfilled && (
+                                <span className="ml-1 text-[10px] font-normal text-neutral-400 align-middle">est.</span>
+                              )}
+                            </span>
+                          );
+                        })()}
+                      </TableCell>
                       <TableCell className="py-4"><StatusBadge status={req.status} /></TableCell>
                       <TableCell className="px-6 py-4 text-right">
                         <span className="text-brand-600 hover:text-brand-700 text-sm font-medium transition-colors">Review</span>
