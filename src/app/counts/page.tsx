@@ -6,11 +6,11 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Drawer } from "@/components/ui/drawer";
 import { Calendar, CheckCircle2, Clock, Smartphone, Play, Save, Send, ShieldCheck, FileEdit, Calculator, ArrowRight } from "lucide-react";
-import { loadCounts, saveCounts, loadInventory, saveInventory } from "@/lib/storage";
+import { loadCounts, saveCounts, loadInventory, saveInventory, loadLocations } from "@/lib/storage";
 import { useAuth } from "@/components/AuthProvider";
 import { isHqAdmin, resolveLocationId } from "@/lib/roles";
 
-const locationsData = ["Downtown", "Uptown", "Westside", "HQ"];
+// countTypes is static — no need to load from DB
 const countTypes = ["Daily", "Weekly", "Monthly", "Spot Check"];
 
 export default function Counts() {
@@ -23,6 +23,8 @@ export default function Counts() {
 
   const [counts, setCounts] = useState<any[]>([]);
   const [inventoryData, setInventoryData] = useState<any[]>([]);
+  // Live locations from DB — replaces the old hardcoded array
+  const [locations, setLocations] = useState<{ id: string; name: string }[]>([]);
   
   // Drawer States
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -31,7 +33,8 @@ export default function Counts() {
   // Form States
   const [countName, setCountName] = useState("");
   const [countType, setCountType] = useState("Weekly");
-  const [countLocation, setCountLocation] = useState("Downtown");
+  // Default to "" until live locations load, then set to first location or user's location
+  const [countLocation, setCountLocation] = useState("");
   const [countItems, setCountItems] = useState<any[]>([]);
   const [notes, setNotes] = useState("");
   const [step, setStep] = useState<1|2>(1);
@@ -42,12 +45,32 @@ export default function Counts() {
     async function fetchData() {
       setIsLoading(true);
       try {
-        const [loadedCounts, loadedInv] = await Promise.all([
+        const [loadedCounts, loadedInv, loadedLocs] = await Promise.all([
           loadCounts(queryLocationId),
-          loadInventory()
+          loadInventory(),
+          loadLocations(),
         ]);
         setCounts(loadedCounts);
         setInventoryData(loadedInv);
+
+        // Filter to active locations only (status === 'active' or no status field)
+        const activeLocs: { id: string; name: string }[] = Array.isArray(loadedLocs)
+          ? loadedLocs
+              .filter((l: any) => !l.status || l.status === "active")
+              .map((l: any) => ({ id: l.id, name: l.name }))
+          : [];
+        setLocations(activeLocs);
+
+        // Set the default location for new count sessions:
+        //   - location_manager: pre-select their assigned location name
+        //   - hq_admin: pre-select first live location, or empty if none exist
+        if (!isHqAdmin(user) && user?.locationId) {
+          // Find the name that corresponds to the user's locationId
+          const myLoc = activeLocs.find((l) => l.id === user.locationId);
+          setCountLocation(myLoc?.name ?? user.locationId);
+        } else {
+          setCountLocation(activeLocs[0]?.name ?? "");
+        }
       } catch (err) {
         console.error(err);
       } finally {
@@ -55,6 +78,7 @@ export default function Counts() {
       }
     }
     fetchData();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   if (isLoading) return <div className="animate-pulse flex p-12 text-neutral-400 justify-center">Loading Active Counts...</div>;
@@ -69,7 +93,13 @@ export default function Counts() {
     setActiveCount(null);
     setCountName(`Count Session ${new Date().toLocaleDateString()}`);
     setCountType("Weekly");
-    setCountLocation("Downtown");
+    // Default: for location_manager keep their location; for HQ use first live location
+    if (!isHqAdmin(user) && user?.locationId) {
+      const myLoc = locations.find((l) => l.id === user.locationId);
+      setCountLocation(myLoc?.name ?? user.locationId);
+    } else {
+      setCountLocation(locations[0]?.name ?? "");
+    }
     setNotes("");
     setCountItems([]);
     setStep(1);
@@ -376,15 +406,30 @@ export default function Counts() {
                     </select>
                   </div>
                   <div className="space-y-1.5">
-                    <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Location</label>
-                    <select 
-                      className="w-full bg-white border border-neutral-200 rounded-lg py-2 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
-                      value={countLocation}
-                      onChange={(e) => setCountLocation(e.target.value)}
-                    >
-                      {locationsData.map(l => <option key={l} value={l}>{l}</option>)}
-                    </select>
-                  </div>
+                     <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Location</label>
+                     {isHqAdmin(user) ? (
+                       // HQ admin: full dropdown of all active live locations
+                       <select
+                         className="w-full bg-white border border-neutral-200 rounded-lg py-2 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
+                         value={countLocation}
+                         onChange={(e) => setCountLocation(e.target.value)}
+                       >
+                         {locations.length === 0 && (
+                           <option value="">No locations found…</option>
+                         )}
+                         {locations.map(l => (
+                           <option key={l.id} value={l.name}>{l.name}</option>
+                         ))}
+                       </select>
+                     ) : (
+                       // Location manager: locked to their assigned location
+                       <div className="w-full bg-neutral-50 border border-neutral-200 rounded-lg py-2 px-3 text-sm text-neutral-700 font-medium flex items-center gap-2">
+                         <span className="h-2 w-2 rounded-full bg-brand-500 shrink-0" />
+                         {countLocation || user?.locationId || "—"}
+                         <input type="hidden" value={countLocation} />
+                       </div>
+                     )}
+                   </div>
                 </div>
                 <div className="space-y-1.5">
                   <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider flex items-center gap-1">
