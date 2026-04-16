@@ -960,7 +960,7 @@ function HQAdminView({
         else { allFulfilled = false; fullSuccess = false; return li; }
       });
       _reqs[reqIndex].lineItems = updatedLineItems;
-      if (allFulfilled) { _reqs[reqIndex].status = "Fulfilled"; } else { _reqs[reqIndex].status = "Partial"; partialCount++; }
+      if (allFulfilled) { _reqs[reqIndex].status = "fulfilled"; } else { _reqs[reqIndex].status = "partial"; partialCount++; }
     });
     const fgRes = await saveFinishedGoods(_fg);
     if (!fgRes?.success) { alert(`DB Error (Inventory): ${fgRes?.error?.message}`); return; }
@@ -975,72 +975,114 @@ function HQAdminView({
   };
 
   const hqProductionDemand = () => {
-    // BUG-FIX 1: operator precedence — original was:
-    //   (r.date === productionDate && FULFILLABLE_STATUSES.has(status)) || PENDING_STATUSES.has(status)
-    // which passed ALL pending-status rows regardless of date.
-    //
-    // BUG-FIX 2: date normalization — productionDate is "Apr 16, 2026" (en-US locale);
-    // req.date may be the same format, but we normalize both sides to be safe.
-    //
-    // BUG-FIX 3: req.lineItems is ALWAYS [] for new DB-backed requisitions;
-    // items live in requisition_items table, accessed via productionItems Map.
-    //
-    // BUG-FIX 4: correct field names — quantityRequested, quantityFulfilled, itemName.
-    //
-    // BUG-FIX 5: included statuses expanded to all active demand:
-    //   submitted + approved + partial + backordered + fulfilled
+    // Returns two separate aggregations:
+    //   pending   — items still to be produced (submitted/approved/partial/backordered)
+    //               qty = quantityRequested (full demand)
+    //   completed — items already fulfilled today
+    //               qty = quantityFulfilled (what was actually made)
 
     const normalize = (d: string): string => {
       if (!d) return "";
-      if (isNaN(Date.parse(d))) return d.trim(); // already locale string
+      if (isNaN(Date.parse(d))) return d.trim();
       return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
     };
     const targetDate = normalize(productionDate);
 
-    const relevant = requisitions.filter((r) => {
-      const s = (r.status ?? "").toLowerCase();
-      if (!PRODUCTION_STATUSES.has(s)) return false;           // exclude draft + rejected
-      return normalize(r.date ?? "") === targetDate;           // date must match
-    });
+    type AggMap = Record<string, { totalQty: number; unit: string; locations: { loc: string; qty: number }[] }>;
+    const pending:   AggMap = {};
+    const completed: AggMap = {};
 
-    const agg: Record<string, { totalQty: number; unit: string; locations: { loc: string; qty: number }[] }> = {};
+    const addToAgg = (agg: AggMap, name: string, unit: string, qty: number, loc: string) => {
+      if (!name || qty <= 0) return;
+      if (!agg[name]) agg[name] = { totalQty: 0, unit, locations: [] };
+      agg[name].totalQty += qty;
+      const existing = agg[name].locations.find((l) => l.loc === loc);
+      if (existing) existing.qty += qty;
+      else agg[name].locations.push({ loc, qty });
+    };
 
-    relevant.forEach((req) => {
-      // Use batch-loaded items from requisition_items table (NOT req.lineItems which is always [])
+    requisitions.forEach((req) => {
+      const s = (req.status ?? "").toLowerCase();
+      if (!PRODUCTION_STATUSES.has(s)) return;                 // exclude draft + rejected
+      if (normalize(req.date ?? "") !== targetDate) return;   // must match selected date
+
       const items = productionItems.get(req.id) ?? [];
+      const locKey = req.location || req.location_id || "HQ";
+
       items.forEach((li: any) => {
-        // For submitted/approved: show full requested qty.
-        // For partial/fulfilled: show only the outstanding remainder (requested - fulfilled).
         const requested  = Number(li.quantityRequested  ?? 0);
         const fulfilled  = Number(li.quantityFulfilled  ?? 0);
-        const status     = (req.status ?? "").toLowerCase();
-        const qty = (status === "fulfilled" || status === "partial")
-          ? Math.max(0, requested - fulfilled)  // remainder only
-          : requested;                           // full requested qty
-
-        // For submitted/approved show all items; for fulfilled show only items with remainder
-        if (status === "fulfilled" && qty <= 0) return;
-
         const name = li.itemName ?? li.item_name_snapshot ?? li.itemId ?? "Unknown";
         const unit = li.unit ?? li.unit_snapshot ?? "";
-        if (!name) return;
 
-        if (!agg[name]) agg[name] = { totalQty: 0, unit, locations: [] };
-        agg[name].totalQty += qty;
-        const locKey = req.location || req.location_id || "HQ";
-        const existing = agg[name].locations.find((l) => l.loc === locKey);
-        if (existing) existing.qty += qty;
-        else agg[name].locations.push({ loc: locKey, qty });
+        if (s === "fulfilled") {
+          // Show in completed section: what was actually produced
+          addToAgg(completed, name, unit, fulfilled, locKey);
+        } else {
+          // submitted / approved / partial / backordered:
+          // Show full requested qty in pending (partial already partially done, but HQ still needs to prepare)
+          addToAgg(pending, name, unit, requested, locKey);
+        }
       });
     });
 
-    return agg;
+    return { pending, completed };
   };
 
-  const productionData = hqProductionDemand();
-  const productionEntries = Object.entries(productionData);
+  const { pending: pendingData, completed: completedData } = hqProductionDemand();
+  const pendingEntries   = Object.entries(pendingData);
+  const completedEntries = Object.entries(completedData);
   const toggleExpand = (name: string) =>
     setExpandedRows((prev) => prev.includes(name) ? prev.filter((i) => i !== name) : [...prev, name]);
+
+  // Helper to render a production aggregation table (shared by pending and completed sections)
+  const renderProductionTable = (
+    entries: [string, { totalQty: number; unit: string; locations: { loc: string; qty: number }[] }][],
+    colorClass: string
+  ) => (
+    <div className="overflow-x-auto rounded-xl border border-neutral-200 print:border-none shadow-sm print:shadow-none">
+      <Table className="bg-white print:bg-transparent">
+        <TableHeader className="bg-neutral-50/80 text-xs text-neutral-500 uppercase tracking-wider print:bg-transparent">
+          <TableRow>
+            <TableHead className="w-[40px] px-4 print:px-0">#</TableHead>
+            <TableHead className="py-3 px-4 print:px-0">Item Name</TableHead>
+            <TableHead className="py-3 px-4 print:px-0">Qty</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {entries.map(([itemName, data], idx) => {
+            const isExpanded = expandedRows.includes(itemName);
+            return (
+              <React.Fragment key={idx}>
+                <TableRow className="hover:bg-brand-50/30 cursor-pointer print:hover:bg-transparent" onClick={() => toggleExpand(itemName)}>
+                  <TableCell className="px-4 py-3 print:px-0">
+                    <div className="print:hidden">{isExpanded ? <ChevronDown className="h-4 w-4 text-brand-600" /> : <ChevronRight className="h-4 w-4 text-neutral-400" />}</div>
+                    <div className="hidden print:block text-neutral-500 font-medium">#{idx + 1}</div>
+                  </TableCell>
+                  <TableCell className="py-3 px-4 print:px-0"><span className="font-bold text-neutral-900 text-base">{itemName}</span></TableCell>
+                  <TableCell className="py-3 px-4 print:px-0">
+                    <span className={`font-bold text-base px-2 py-1 rounded-md print:bg-transparent ${colorClass}`}>{data.totalQty} {data.unit}</span>
+                  </TableCell>
+                </TableRow>
+                <TableRow className={`bg-neutral-50/50 print:table-row print:bg-transparent ${isExpanded ? "table-row" : "hidden print:table-row"}`}>
+                  <TableCell colSpan={3} className="px-10 py-3 print:px-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 py-2">
+                      {data.locations.map((loc, lIdx) => (
+                        <div key={lIdx} className="flex justify-between items-center text-sm py-1 border-b border-neutral-200 border-dashed last:border-0">
+                          <span className="text-neutral-600 font-medium">{loc.loc}</span>
+                          <span className="text-neutral-900 font-bold bg-white border border-neutral-200 px-2 rounded-md shadow-sm">{loc.qty} {data.unit}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </TableCell>
+                </TableRow>
+              </React.Fragment>
+            );
+          })}
+        </TableBody>
+      </Table>
+    </div>
+  );
 
   if (isLoading) return <div className="p-12 flex justify-center text-neutral-400 animate-pulse">Loading Requisitions HQ Pipeline…</div>;
 
@@ -1387,58 +1429,42 @@ function HQAdminView({
               </button>
             </div>
           </div>
-          <div className="print:block">
+          <div className="print:block space-y-6">
             <div className="hidden print:block text-sm text-neutral-500 mb-4 pb-2 border-b border-neutral-200">Date: {productionDate}</div>
-            {productionEntries.length === 0 ? (
-              <div className="text-center py-16 bg-neutral-50 border border-neutral-200 border-dashed rounded-xl">
-                <PackageCheck className="h-12 w-12 text-neutral-300 mx-auto mb-3" />
-                <h3 className="text-lg font-bold text-neutral-900">No Production Required</h3>
-                <p className="text-neutral-500 text-sm mt-1 max-w-sm mx-auto">No open requisitions pending fulfillment for {productionDate}.</p>
+
+            {/* ── Pending Production ─────────────────────────────────── */}
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <span className="h-2.5 w-2.5 rounded-full bg-warning-500" />
+                <h4 className="text-sm font-bold text-neutral-700 uppercase tracking-wider">Pending Production</h4>
+                {pendingEntries.length > 0 && (
+                  <span className="ml-1 text-xs font-semibold bg-warning-50 border border-warning-200 text-warning-700 rounded-full px-2 py-0.5">{pendingEntries.length} item{pendingEntries.length !== 1 ? "s" : ""}</span>
+                )}
               </div>
-            ) : (
-              <div className="overflow-x-auto rounded-xl border border-neutral-200 print:border-none shadow-sm print:shadow-none">
-                <Table className="bg-white print:bg-transparent">
-                  <TableHeader className="bg-neutral-50/80 text-xs text-neutral-500 uppercase tracking-wider print:bg-transparent">
-                    <TableRow>
-                      <TableHead className="w-[40px] px-4 print:px-0">#</TableHead>
-                      <TableHead className="py-3 px-4 print:px-0">Item Name</TableHead>
-                      <TableHead className="py-3 px-4 print:px-0">Total Quantity</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {productionEntries.map(([itemName, data], idx) => {
-                      const isExpanded = expandedRows.includes(itemName);
-                      return (
-                        <React.Fragment key={idx}>
-                          <TableRow className="hover:bg-brand-50/30 cursor-pointer print:hover:bg-transparent" onClick={() => toggleExpand(itemName)}>
-                            <TableCell className="px-4 py-3 print:px-0">
-                              <div className="print:hidden">{isExpanded ? <ChevronDown className="h-4 w-4 text-brand-600" /> : <ChevronRight className="h-4 w-4 text-neutral-400" />}</div>
-                              <div className="hidden print:block text-neutral-500 font-medium">#{idx + 1}</div>
-                            </TableCell>
-                            <TableCell className="py-3 px-4 print:px-0"><span className="font-bold text-neutral-900 text-base">{itemName}</span></TableCell>
-                            <TableCell className="py-3 px-4 print:px-0">
-                              <span className="font-bold text-brand-700 text-base bg-brand-50 print:bg-transparent px-2 py-1 rounded-md">{data.totalQty} {data.unit}</span>
-                            </TableCell>
-                          </TableRow>
-                          <TableRow className={`bg-neutral-50/50 print:table-row print:bg-transparent ${isExpanded ? "table-row" : "hidden print:table-row"}`}>
-                            <TableCell colSpan={3} className="px-10 py-3 print:px-4">
-                              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 py-2">
-                                {data.locations.map((loc, lIdx) => (
-                                  <div key={lIdx} className="flex justify-between items-center text-sm py-1 border-b border-neutral-200 border-dashed last:border-0">
-                                    <span className="text-neutral-600 font-medium">{loc.loc}</span>
-                                    <span className="text-neutral-900 font-bold bg-white border border-neutral-200 px-2 rounded-md shadow-sm">{loc.qty} {data.unit}</span>
-                                  </div>
-                                ))}
-                              </div>
-                            </TableCell>
-                          </TableRow>
-                        </React.Fragment>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
+              {pendingEntries.length === 0 ? (
+                <div className="text-center py-8 bg-neutral-50 border border-neutral-200 border-dashed rounded-xl">
+                  <PackageCheck className="h-8 w-8 text-neutral-300 mx-auto mb-2" />
+                  <p className="text-sm font-semibold text-neutral-500">No pending production for {productionDate}</p>
+                </div>
+              ) : renderProductionTable(pendingEntries, "text-brand-700 bg-brand-50")}
+            </div>
+
+            {/* ── Completed Today ───────────────────────────────────────── */}
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <span className="h-2.5 w-2.5 rounded-full bg-success-500" />
+                <h4 className="text-sm font-bold text-neutral-700 uppercase tracking-wider">Completed Today</h4>
+                {completedEntries.length > 0 && (
+                  <span className="ml-1 text-xs font-semibold bg-success-50 border border-success-200 text-success-700 rounded-full px-2 py-0.5">{completedEntries.length} item{completedEntries.length !== 1 ? "s" : ""}</span>
+                )}
               </div>
-            )}
+              {completedEntries.length === 0 ? (
+                <div className="text-center py-8 bg-neutral-50 border border-neutral-200 border-dashed rounded-xl">
+                  <CheckCircle2 className="h-8 w-8 text-neutral-300 mx-auto mb-2" />
+                  <p className="text-sm font-semibold text-neutral-500">No fulfilled requisitions for {productionDate}</p>
+                </div>
+              ) : renderProductionTable(completedEntries, "text-success-700 bg-success-50")}
+            </div>
           </div>
         </div>
       )}
