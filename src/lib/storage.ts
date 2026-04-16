@@ -277,6 +277,7 @@ export interface SaleItem {
   id:                   string;
   name:                 string;
   category:             string | null;   // e.g. "Sauces", "Breads", "Desserts"
+  sourceCommissary:     string;          // which commissary produces this FG; default 'Commissary HQ'
   description:          string | null;
   baseUnit:             string;
   instock:              number;
@@ -299,6 +300,7 @@ const mapSaleItemToFrontend = (db: any): SaleItem => ({
   id:                   db.id,
   name:                 db.name,
   category:             db.category ?? null,
+  sourceCommissary:     db.source_commissary ?? 'Commissary HQ',
   description:          db.description ?? null,
   baseUnit:             db.base_unit ?? 'ea',
   instock:              Number(db.instock ?? 0),
@@ -327,6 +329,7 @@ const mapSaleItemToDB = (item: Partial<SaleItem> & { id: string }) => ({
   id:                      item.id,
   name:                    item.name ?? '',
   category:                item.category ?? null,
+  source_commissary:       item.sourceCommissary ?? 'Commissary HQ',
   description:             item.description ?? null,
   base_unit:               item.baseUnit ?? 'ea',
   instock:                 isNaN(Number(item.instock)) ? 0 : Number(item.instock),

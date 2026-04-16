@@ -30,6 +30,21 @@ const CATEGORY_OPTIONS = [
   "Other",
 ];
 
+// ─── Source commissary options ─────────────────────────────────────────────────
+const COMMISSARY_OPTIONS = [
+  "Commissary HQ",
+  "MOMOLOCO",
+  "Veggie Paradise",
+] as const;
+type CommissaryOption = typeof COMMISSARY_OPTIONS[number];
+
+// Badge colour per commissary
+const COMMISSARY_COLORS: Record<string, string> = {
+  "Commissary HQ":   "bg-brand-50   text-brand-700   border-brand-200",
+  "MOMOLOCO":        "bg-warning-50  text-warning-700  border-warning-200",
+  "Veggie Paradise": "bg-success-50  text-success-700  border-success-200",
+};
+
 // ─── Food cost % helper ────────────────────────────────────────────────────────
 function foodCostPct(makingCost: number, salesPrice: number): string {
   if (!salesPrice || salesPrice <= 0) return "—";
@@ -83,6 +98,7 @@ function HQSaleItemsContent() {
   const [isLoading, setIsLoading] = useState(true);
   const [search, setSearch]     = useState("");
   const [filterCategory, setFilterCategory] = useState("All");
+  const [filterCommissary, setFilterCommissary] = useState("All");
 
   // Drawer state
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
@@ -103,6 +119,7 @@ function HQSaleItemsContent() {
   // Form state
   const [formName, setFormName]               = useState("");
   const [formCategory, setFormCategory]       = useState("");
+  const [formCommissary, setFormCommissary]   = useState<string>("Commissary HQ");
   const [formDesc, setFormDesc]               = useState("");
   const [formUnit, setFormUnit]               = useState("ea");
   const [formParLevel, setFormParLevel]       = useState<number>(0);
@@ -144,7 +161,7 @@ function HQSaleItemsContent() {
   // ── Drawer open helpers ───────────────────────────────────────────────────────
   const openCreate = () => {
     setEditing(null);
-    setFormName(""); setFormCategory(""); setFormDesc(""); setFormUnit("ea");
+    setFormName(""); setFormCategory(""); setFormCommissary("Commissary HQ"); setFormDesc(""); setFormUnit("ea");
     setFormParLevel(0); setFormManualPrice(""); setFormRecipeId("");
     setFormActive(true); setFormRequisitionable(true);
     setLocationPricing([]);
@@ -157,6 +174,7 @@ function HQSaleItemsContent() {
     setEditing(item);
     setFormName(item.name);
     setFormCategory(item.category ?? "");
+    setFormCommissary(item.sourceCommissary ?? "Commissary HQ");
     setFormDesc(item.description ?? "");
     setFormUnit(item.baseUnit);
     setFormParLevel(item.parLevel);
@@ -194,6 +212,7 @@ function HQSaleItemsContent() {
         id,
         name:                 formName.trim(),
         category:             formCategory.trim() || null,
+        sourceCommissary:     formCommissary || "Commissary HQ",
         description:          formDesc.trim() || null,
         baseUnit:             formUnit,
         parLevel:             formParLevel,
@@ -275,7 +294,8 @@ function HQSaleItemsContent() {
       || i.name.toLowerCase().includes(search.toLowerCase())
       || i.id.toLowerCase().includes(search.toLowerCase());
     const matchCat = filterCategory === "All" || i.category === filterCategory;
-    return matchSearch && matchCat;
+    const matchCom = filterCommissary === "All" || i.sourceCommissary === filterCommissary;
+    return matchSearch && matchCat && matchCom;
   });
 
   // ── Stats ─────────────────────────────────────────────────────────────────────
@@ -364,6 +384,15 @@ function HQSaleItemsContent() {
               {allCategories.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
           )}
+          {/* Commissary filter */}
+          <select
+            value={filterCommissary}
+            onChange={e => setFilterCommissary(e.target.value)}
+            className="px-3 py-1.5 text-sm border border-neutral-200 rounded-md bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
+          >
+            <option value="All">All commissaries</option>
+            {COMMISSARY_OPTIONS.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
         </CardHeader>
         <CardContent className="p-0">
           <Table>
@@ -371,6 +400,7 @@ function HQSaleItemsContent() {
               <TableRow>
                 <TableHead className="py-3 px-6">Item / SKU</TableHead>
                 <TableHead className="py-3">Category</TableHead>
+                <TableHead className="py-3">Commissary</TableHead>
                 <TableHead className="py-3">Unit</TableHead>
                 <TableHead className="py-3">Making Cost</TableHead>
                 <TableHead className="py-3">Effective Price</TableHead>
@@ -406,6 +436,12 @@ function HQSaleItemsContent() {
                       ) : (
                         <span className="text-neutral-300 text-xs">—</span>
                       )}
+                    </TableCell>
+                    {/* Commissary badge */}
+                    <TableCell className="py-4">
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold border ${COMMISSARY_COLORS[item.sourceCommissary] ?? "bg-neutral-50 text-neutral-600 border-neutral-200"}`}>
+                        {item.sourceCommissary}
+                      </span>
                     </TableCell>
                     <TableCell className="py-4 text-sm text-neutral-700">{item.baseUnit}</TableCell>
                     <TableCell className="py-4 text-sm text-neutral-600">
@@ -454,8 +490,8 @@ function HQSaleItemsContent() {
                 );
               }) : (
                 <TableRow>
-                  <TableCell colSpan={8} className="text-center py-12 text-neutral-400 text-sm">
-                    {search || filterCategory !== "All"
+                  <TableCell colSpan={9} className="text-center py-12 text-neutral-400 text-sm">
+                    {search || filterCategory !== "All" || filterCommissary !== "All"
                       ? "No finished goods match your filters."
                       : "No finished goods yet. Create your first one to make it available for franchise locations to requisition."}
                   </TableCell>
@@ -565,6 +601,23 @@ function HQSaleItemsContent() {
                 className="w-36 px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
               />
             </div>
+          </div>
+
+          {/* Source Commissary */}
+          <div>
+            <label className="block text-xs font-semibold text-neutral-600 uppercase tracking-wider mb-1.5">
+              Source Commissary
+            </label>
+            <select
+              value={formCommissary}
+              onChange={e => setFormCommissary(e.target.value)}
+              className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
+            >
+              {COMMISSARY_OPTIONS.map(c => (
+                <option key={c} value={c}>{c}</option>
+              ))}
+            </select>
+            <p className="text-xs text-neutral-400 mt-1">Determines which commissary kitchen produces and ships this finished good.</p>
           </div>
 
           {/* Description */}
