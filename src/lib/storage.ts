@@ -640,6 +640,25 @@ export async function upsertRecipe(
   }
 }
 
+/**
+ * Hard-delete a single recipe row by its UUID primary key.
+ *
+ * Returns { success: true } on success, or { success: false, error } if Supabase
+ * returns an error. The caller should remove the row from local state optimistically
+ * (or on success) to avoid a full page reload.
+ *
+ * Note: recipes are not FK-referenced by any other table in the current schema,
+ * so deletion is always safe. If that changes, add a reference check here.
+ */
+export async function deleteRecipe(id: string): Promise<{ success: boolean; error?: any }> {
+  const { error } = await supabase.from('recipes').delete().eq('id', id);
+  if (error) {
+    console.error('[deleteRecipe] error', error);
+    return { success: false, error };
+  }
+  return { success: true };
+}
+
 
 // ----------------------------------------------------------------------------
 // 4. ORDERS

@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
-import { loadRecipes, saveRecipes, loadInventory, saveInventory, upsertRecipe, updateInventoryItemCost, loadSuppliers } from "@/lib/storage";
+import { loadRecipes, saveRecipes, loadInventory, saveInventory, upsertRecipe, updateInventoryItemCost, loadSuppliers, deleteRecipe } from "@/lib/storage";
 
 import { normalizeUnit, canonicalizeUnit, resolveEffectiveBaseUom, computeBaseUnitCostFromPack, auditItemUnitAmbiguity } from "@/lib/units";
 
@@ -95,6 +95,10 @@ function RecipesPageContent() {
   const [ingPanelOpen, setIngPanelOpen]   = useState(false);
   const [suppliersData, setSuppliersData] = useState<any[]>([]);
 
+  // Delete confirmation state
+  const [deleteTarget, setDeleteTarget] = useState<any | null>(null); // recipe pending deletion
+  const [isDeleting, setIsDeleting]     = useState(false);
+
   useEffect(() => {
     async function fetchData() {
       setIsLoading(true);
@@ -122,6 +126,25 @@ function RecipesPageContent() {
   }, [user?.locationId, user?.role]);
 
   if (isLoading) return <div className="animate-pulse flex p-12 justify-center text-neutral-400">Loading Recipes...</div>;
+
+  // ── Delete handler ────────────────────────────────────────────────────────
+  const handleDeleteConfirm = async () => {
+    if (!deleteTarget) return;
+    setIsDeleting(true);
+    try {
+      const result = await deleteRecipe(deleteTarget.id);
+      if (!result.success) {
+        const msg = result.error?.message ?? result.error?.detail ?? "Unknown error from database.";
+        alert(`Failed to delete "${deleteTarget.name}": ${msg}`);
+        return;
+      }
+      // Optimistic removal — no page reload needed
+      setRecipes(prev => prev.filter(r => r.id !== deleteTarget.id));
+    } finally {
+      setIsDeleting(false);
+      setDeleteTarget(null);
+    }
+  };
 
   const openBuilder = (recipe: any = null) => {
     if (recipe) {
@@ -481,12 +504,20 @@ function RecipesPageContent() {
                     <p className="text-[10px] uppercase text-neutral-400 font-semibold tracking-wider mt-1">{recipe.margin}% target margin</p>
                   </TableCell>
                   <TableCell className="pr-6 py-4 text-right">
-                    <button 
-                      onClick={() => openBuilder(recipe)}
-                      className="px-3 py-1.5 bg-white border border-neutral-200 text-neutral-700 rounded-md text-xs font-semibold hover:bg-neutral-50 transition-colors shadow-sm inline-flex items-center gap-1.5"
-                    >
-                      <SplitSquareVertical className="h-3.5 w-3.5" /> Open Matrix
-                    </button>
+                    <div className="inline-flex items-center gap-2">
+                      <button
+                        onClick={() => openBuilder(recipe)}
+                        className="px-3 py-1.5 bg-white border border-neutral-200 text-neutral-700 rounded-md text-xs font-semibold hover:bg-neutral-50 transition-colors shadow-sm inline-flex items-center gap-1.5"
+                      >
+                        <SplitSquareVertical className="h-3.5 w-3.5" /> Open Matrix
+                      </button>
+                      <button
+                        onClick={() => setDeleteTarget(recipe)}
+                        className="px-3 py-1.5 bg-white border border-danger-200 text-danger-600 rounded-md text-xs font-semibold hover:bg-danger-50 transition-colors shadow-sm inline-flex items-center gap-1.5"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" /> Delete
+                      </button>
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
@@ -494,6 +525,59 @@ function RecipesPageContent() {
           </Table>
         </CardContent>
       </Card>
+
+      {/* ── Delete confirmation modal ───────────────────────────────────── */}
+      {deleteTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          {/* Backdrop */}
+          <div
+            className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+            onClick={() => !isDeleting && setDeleteTarget(null)}
+          />
+          {/* Dialog */}
+          <div className="relative bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 space-y-4">
+            {/* Icon + title */}
+            <div className="flex items-start gap-4">
+              <div className="h-10 w-10 rounded-full bg-danger-50 flex items-center justify-center shrink-0">
+                <Trash2 className="h-5 w-5 text-danger-500" />
+              </div>
+              <div>
+                <h2 className="text-base font-bold text-neutral-900">Delete Recipe</h2>
+                <p className="text-sm text-neutral-500 mt-0.5">
+                  <span className="font-semibold text-neutral-800">{deleteTarget.name}</span>
+                </p>
+              </div>
+            </div>
+
+            {/* Warning body */}
+            <div className="bg-danger-50 border border-danger-100 rounded-lg p-3 text-sm text-danger-700 leading-relaxed">
+              Are you sure you want to delete this recipe? <strong>This cannot be undone.</strong>
+            </div>
+
+            {/* Actions */}
+            <div className="flex justify-end gap-3 pt-1">
+              <button
+                onClick={() => setDeleteTarget(null)}
+                disabled={isDeleting}
+                className="px-4 py-2 text-sm font-semibold bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteConfirm}
+                disabled={isDeleting}
+                className="px-4 py-2 text-sm font-semibold bg-danger-600 text-white rounded-lg hover:bg-danger-700 transition-colors disabled:opacity-50 inline-flex items-center gap-2"
+              >
+                {isDeleting ? (
+                  <><div className="h-3.5 w-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" /> Deleting…</>
+                ) : (
+                  <><Trash2 className="h-3.5 w-3.5" /> Yes, Delete Recipe</>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <Drawer
         isOpen={isBuilderOpen}
