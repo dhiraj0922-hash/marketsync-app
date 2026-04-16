@@ -345,26 +345,35 @@ const mapSaleItemToDB = (item: Partial<SaleItem> & { id: string }) => ({
 });
 
 /**
- * Load all HQ sale items via the hq_sale_items_priced VIEW which pre-computes
- * effective_price and stock_status. Falls back to the base table if the view
- * doesn't exist yet (pre-migration environments).
+ * Load all HQ sale items.
+ *
+ * WHY we query the base table instead of hq_sale_items_priced VIEW:
+ *   Postgres materialises SELECT * at view-creation time. When new columns
+ *   (category, source_commissary) are added to the base table AFTER the view
+ *   was created, SELECT * on the view returns the old column list and silently
+ *   drops the new fields. The fix is:
+ *     CREATE OR REPLACE VIEW hq_sale_items_priced AS SELECT * ...
+ *   but that requires a manual SQL migration. To be resilient we query the
+ *   base table directly with explicit columns so new fields are always present.
+ *
+ * effective_price and stock_status are computed here to match what the view
+ *   previously provided.
  */
+const SALE_ITEM_COLS = [
+  'id', 'name', 'category', 'source_commissary', 'description',
+  'base_unit', 'instock', 'par_level', 'is_active', 'is_requisitionable',
+  'source_recipe_id', 'source_recipe_yield_qty',
+  'making_cost', 'making_cost_updated_at',
+  'suggested_price', 'manual_price',
+  'created_at', 'updated_at',
+].join(',');
+
 export async function loadSaleItems(): Promise<SaleItem[]> {
-  // Try the convenience view first (has effective_price + stock_status)
-  const { data: viewData, error: viewErr } = await supabase
-    .from('hq_sale_items_priced')
-    .select('*')
-    .order('name', { ascending: true });
-
-  if (!viewErr && Array.isArray(viewData)) {
-    return viewData.map(mapSaleItemToFrontend);
-  }
-
-  // Fallback: base table (migration not yet applied)
   const { data, error } = await supabase
     .from('hq_sale_items')
-    .select('*')
+    .select(SALE_ITEM_COLS)
     .order('name', { ascending: true });
+
   if (error) { console.error('[loadSaleItems]', error); return []; }
   return Array.isArray(data) ? data.map(mapSaleItemToFrontend) : [];
 }

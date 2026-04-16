@@ -411,6 +411,8 @@ function HQSaleItemsContent() {
             </TableHeader>
             <TableBody>
               {filtered.length > 0 ? filtered.map(item => {
+                // DEBUG: verify sourceCommissary coming from DB — remove once confirmed correct
+                console.log('[FG Row]', item.id, item.sourceCommissary);
                 const linkedRecipe = recipes.find(r => r.id === item.sourceRecipeId);
                 return (
                   <TableRow key={item.id} className="hover:bg-neutral-50/50 transition-colors">
