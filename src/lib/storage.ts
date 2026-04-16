@@ -276,6 +276,7 @@ export async function saveFinishedGoods(fgs: any[]) {
 export interface SaleItem {
   id:                   string;
   name:                 string;
+  category:             string | null;   // e.g. "Sauces", "Breads", "Desserts"
   description:          string | null;
   baseUnit:             string;
   instock:              number;
@@ -297,6 +298,7 @@ export interface SaleItem {
 const mapSaleItemToFrontend = (db: any): SaleItem => ({
   id:                   db.id,
   name:                 db.name,
+  category:             db.category ?? null,
   description:          db.description ?? null,
   baseUnit:             db.base_unit ?? 'ea',
   instock:              Number(db.instock ?? 0),
@@ -309,7 +311,6 @@ const mapSaleItemToFrontend = (db: any): SaleItem => ({
   makingCostUpdatedAt:  db.making_cost_updated_at ?? null,
   suggestedPrice:       Number(db.suggested_price ?? 0),
   manualPrice:          db.manual_price != null ? Number(db.manual_price) : null,
-  // effective_price comes from the hq_sale_items_priced VIEW; fall back to compute
   effectivePrice:       db.effective_price != null
                           ? Number(db.effective_price)
                           : (db.manual_price != null ? Number(db.manual_price) : Number(db.suggested_price ?? 0)),
@@ -325,6 +326,7 @@ const mapSaleItemToFrontend = (db: any): SaleItem => ({
 const mapSaleItemToDB = (item: Partial<SaleItem> & { id: string }) => ({
   id:                      item.id,
   name:                    item.name ?? '',
+  category:                item.category ?? null,
   description:             item.description ?? null,
   base_unit:               item.baseUnit ?? 'ea',
   instock:                 isNaN(Number(item.instock)) ? 0 : Number(item.instock),
@@ -373,6 +375,88 @@ export async function upsertSaleItem(
     .from('hq_sale_items')
     .upsert(row, { onConflict: 'id' });
   if (error) { console.error('[upsertSaleItem]', error); return { success: false, error }; }
+  return { success: true };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FG LOCATION PRICING  (fg_location_pricing table)
+// location-level sales prices for finished goods, used to compute food cost %
+// food_cost_pct = making_cost / sales_price * 100  (computed in UI, not stored)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface FgLocationPricing {
+  id:           number;
+  saleItemId:   string;
+  locationId:   string;
+  locationName: string | null;
+  salesPrice:   number;
+  notes:        string | null;
+  createdAt:    string | null;
+  updatedAt:    string | null;
+}
+
+const mapFgPricingToFrontend = (db: any): FgLocationPricing => ({
+  id:           Number(db.id),
+  saleItemId:   db.sale_item_id,
+  locationId:   db.location_id,
+  locationName: db.location_name ?? null,
+  salesPrice:   Number(db.sales_price ?? 0),
+  notes:        db.notes ?? null,
+  createdAt:    db.created_at ?? null,
+  updatedAt:    db.updated_at ?? null,
+});
+
+/**
+ * Load all location pricing rows for a specific finished good.
+ * Falls back gracefully if the table doesn't exist yet (pre-migration).
+ */
+export async function loadFgLocationPricing(
+  saleItemId: string
+): Promise<FgLocationPricing[]> {
+  const { data, error } = await supabase
+    .from('fg_location_pricing')
+    .select('*')
+    .eq('sale_item_id', saleItemId)
+    .order('location_name', { ascending: true });
+  if (error) {
+    console.warn('[loadFgLocationPricing] table may not exist yet:', error.message);
+    return [];
+  }
+  return Array.isArray(data) ? data.map(mapFgPricingToFrontend) : [];
+}
+
+/**
+ * Upsert a single location-pricing row.
+ * Conflict target: (sale_item_id, location_id) — one price per item+location.
+ */
+export async function upsertFgLocationPricing(
+  row: Omit<FgLocationPricing, 'id' | 'createdAt' | 'updatedAt'>
+): Promise<{ success: boolean; error?: any }> {
+  const { error } = await supabase
+    .from('fg_location_pricing')
+    .upsert({
+      sale_item_id:  row.saleItemId,
+      location_id:   row.locationId,
+      location_name: row.locationName ?? null,
+      sales_price:   Number(row.salesPrice),
+      notes:         row.notes ?? null,
+      updated_at:    new Date().toISOString(),
+    }, { onConflict: 'sale_item_id,location_id' });
+  if (error) { console.error('[upsertFgLocationPricing]', error); return { success: false, error }; }
+  return { success: true };
+}
+
+/**
+ * Delete a single location-pricing row by its serial id.
+ */
+export async function deleteFgLocationPricing(
+  id: number
+): Promise<{ success: boolean; error?: any }> {
+  const { error } = await supabase
+    .from('fg_location_pricing')
+    .delete()
+    .eq('id', id);
+  if (error) { console.error('[deleteFgLocationPricing]', error); return { success: false, error }; }
   return { success: true };
 }
 

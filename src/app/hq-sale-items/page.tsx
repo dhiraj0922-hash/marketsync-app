@@ -7,13 +7,50 @@ import { Drawer } from "@/components/ui/drawer";
 import {
   PackageCheck, Search, Plus, Edit2, ToggleLeft, ToggleRight,
   TrendingUp, AlertCircle, Loader2, ChevronRight, DollarSign, Factory,
-  CheckCircle2, XCircle, Layers
+  CheckCircle2, XCircle, Layers, MapPin, Trash2, PlusCircle, Tag
 } from "lucide-react";
 import {
-  loadSaleItems, upsertSaleItem, loadRecipes,
-  type SaleItem
+  loadSaleItems, upsertSaleItem, loadRecipes, loadLocations,
+  loadFgLocationPricing, upsertFgLocationPricing, deleteFgLocationPricing,
+  type SaleItem, type FgLocationPricing
 } from "@/lib/storage";
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
+
+// ─── FG category presets ───────────────────────────────────────────────────────
+const CATEGORY_OPTIONS = [
+  "Sauces & Condiments",
+  "Breads & Baked",
+  "Proteins",
+  "Salads & Bowls",
+  "Soups & Stocks",
+  "Desserts",
+  "Beverages",
+  "Sides",
+  "Meal Kits",
+  "Other",
+];
+
+// ─── Food cost % helper ────────────────────────────────────────────────────────
+function foodCostPct(makingCost: number, salesPrice: number): string {
+  if (!salesPrice || salesPrice <= 0) return "—";
+  const pct = (makingCost / salesPrice) * 100;
+  return `${pct.toFixed(1)}%`;
+}
+
+function FoodCostBadge({ pct }: { pct: string }) {
+  if (pct === "—") return <span className="text-neutral-400 text-xs">—</span>;
+  const val = parseFloat(pct);
+  const cls = val > 35
+    ? "bg-danger-50 text-danger-700 border-danger-200"
+    : val > 28
+    ? "bg-warning-50 text-warning-700 border-warning-200"
+    : "bg-success-50 text-success-700 border-success-200";
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold border ${cls}`}>
+      <TrendingUp className="h-3 w-3 mr-1" />{pct}
+    </span>
+  );
+}
 
 // ─── Stock status chip ─────────────────────────────────────────────────────────
 function StockChip({ status }: { status: SaleItem["stockStatus"] }) {
@@ -42,8 +79,10 @@ function ActiveChip({ active }: { active: boolean }) {
 function HQSaleItemsContent() {
   const [items, setItems]       = useState<SaleItem[]>([]);
   const [recipes, setRecipes]   = useState<any[]>([]);
+  const [locations, setLocations] = useState<{ id: string; name: string }[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [search, setSearch]     = useState("");
+  const [filterCategory, setFilterCategory] = useState("All");
 
   // Drawer state
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
@@ -51,8 +90,19 @@ function HQSaleItemsContent() {
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
+  // Location pricing state (for edit drawer)
+  const [locationPricing, setLocationPricing] = useState<FgLocationPricing[]>([]);
+  const [isPricingLoading, setIsPricingLoading] = useState(false);
+  // Inline add-pricing form
+  const [newPricingLocId, setNewPricingLocId]       = useState("");
+  const [newPricingPrice, setNewPricingPrice]       = useState("");
+  const [newPricingNotes, setNewPricingNotes]       = useState("");
+  const [isPricingSaving, setIsPricingSaving]       = useState(false);
+  const [pricingError, setPricingError]             = useState<string | null>(null);
+
   // Form state
   const [formName, setFormName]               = useState("");
+  const [formCategory, setFormCategory]       = useState("");
   const [formDesc, setFormDesc]               = useState("");
   const [formUnit, setFormUnit]               = useState("ea");
   const [formParLevel, setFormParLevel]       = useState<number>(0);
@@ -65,9 +115,14 @@ function HQSaleItemsContent() {
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [si, rec] = await Promise.all([loadSaleItems(), loadRecipes()]);
+      const [si, rec, locs] = await Promise.all([loadSaleItems(), loadRecipes(), loadLocations()]);
       setItems(Array.isArray(si) ? si : []);
       setRecipes(Array.isArray(rec) ? rec : []);
+      setLocations(
+        Array.isArray(locs)
+          ? locs.filter((l: any) => !l.status || l.status === "active").map((l: any) => ({ id: l.id, name: l.name }))
+          : []
+      );
     } finally {
       setIsLoading(false);
     }
@@ -75,19 +130,33 @@ function HQSaleItemsContent() {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  // ── Helpers ──────────────────────────────────────────────────────────────────
+  // ── Load location pricing when opening edit drawer ───────────────────────────
+  const loadPricing = useCallback(async (itemId: string) => {
+    setIsPricingLoading(true);
+    try {
+      const rows = await loadFgLocationPricing(itemId);
+      setLocationPricing(rows);
+    } finally {
+      setIsPricingLoading(false);
+    }
+  }, []);
+
+  // ── Drawer open helpers ───────────────────────────────────────────────────────
   const openCreate = () => {
     setEditing(null);
-    setFormName(""); setFormDesc(""); setFormUnit("ea");
+    setFormName(""); setFormCategory(""); setFormDesc(""); setFormUnit("ea");
     setFormParLevel(0); setFormManualPrice(""); setFormRecipeId("");
     setFormActive(true); setFormRequisitionable(true);
-    setSaveError(null);
+    setLocationPricing([]);
+    setNewPricingLocId(""); setNewPricingPrice(""); setNewPricingNotes("");
+    setSaveError(null); setPricingError(null);
     setIsDrawerOpen(true);
   };
 
   const openEdit = (item: SaleItem) => {
     setEditing(item);
     setFormName(item.name);
+    setFormCategory(item.category ?? "");
     setFormDesc(item.description ?? "");
     setFormUnit(item.baseUnit);
     setFormParLevel(item.parLevel);
@@ -95,10 +164,13 @@ function HQSaleItemsContent() {
     setFormRecipeId(item.sourceRecipeId ?? "");
     setFormActive(item.isActive);
     setFormRequisitionable(item.isRequisitionable);
-    setSaveError(null);
+    setNewPricingLocId(""); setNewPricingPrice(""); setNewPricingNotes("");
+    setSaveError(null); setPricingError(null);
+    loadPricing(item.id);
     setIsDrawerOpen(true);
   };
 
+  // ── Save finished good ────────────────────────────────────────────────────────
   const handleSave = async () => {
     setSaveError(null);
     if (!formName.trim()) { setSaveError("Name is required."); return; }
@@ -107,7 +179,6 @@ function HQSaleItemsContent() {
       const id = editing?.id ?? `SKU-${Date.now().toString(36).toUpperCase()}`;
       const linkedRecipe = recipes.find(r => r.id === formRecipeId);
 
-      // Compute making_cost from linked recipe if available
       let makingCost = editing?.makingCost ?? 0;
       let sourceYieldQty = editing?.sourceRecipeYieldQty ?? 1;
       if (linkedRecipe) {
@@ -122,6 +193,7 @@ function HQSaleItemsContent() {
       const res = await upsertSaleItem({
         id,
         name:                 formName.trim(),
+        category:             formCategory.trim() || null,
         description:          formDesc.trim() || null,
         baseUnit:             formUnit,
         parLevel:             formParLevel,
@@ -131,14 +203,13 @@ function HQSaleItemsContent() {
         sourceRecipeYieldQty: sourceYieldQty,
         makingCost,
         manualPrice,
-        // These are computed server-side; pass zeros so mapSaleItemToDB only writes what we send
-        instock:      editing?.instock ?? 0,
-        suggestedPrice: 0,    // generated column — ignored by mapSaleItemToDB
-        effectivePrice: 0,    // computed in app
-        stockStatus:    'in_stock',
-        makingCostUpdatedAt: null,
-        createdAt: null,
-        updatedAt: null,
+        instock:              editing?.instock ?? 0,
+        suggestedPrice:       0,
+        effectivePrice:       0,
+        stockStatus:          'in_stock',
+        makingCostUpdatedAt:  null,
+        createdAt:            null,
+        updatedAt:            null,
       });
 
       if (!res.success) {
@@ -152,6 +223,40 @@ function HQSaleItemsContent() {
     }
   };
 
+  // ── Save a location pricing row ───────────────────────────────────────────────
+  const handleAddPricing = async () => {
+    if (!editing) return;
+    setPricingError(null);
+    if (!newPricingLocId) { setPricingError("Select a location."); return; }
+    const price = parseFloat(newPricingPrice);
+    if (isNaN(price) || price < 0) { setPricingError("Enter a valid sales price."); return; }
+    setIsPricingSaving(true);
+    try {
+      const loc = locations.find(l => l.id === newPricingLocId);
+      const res = await upsertFgLocationPricing({
+        saleItemId:   editing.id,
+        locationId:   newPricingLocId,
+        locationName: loc?.name ?? null,
+        salesPrice:   price,
+        notes:        newPricingNotes.trim() || null,
+      });
+      if (!res.success) { setPricingError(res.error?.message ?? "Save failed."); return; }
+      // Optimistically update the list
+      setNewPricingLocId(""); setNewPricingPrice(""); setNewPricingNotes("");
+      await loadPricing(editing.id);
+    } finally {
+      setIsPricingSaving(false);
+    }
+  };
+
+  const handleDeletePricing = async (row: FgLocationPricing) => {
+    if (!editing) return;
+    const res = await deleteFgLocationPricing(row.id);
+    if (!res.success) { alert(res.error?.message ?? "Delete failed."); return; }
+    setLocationPricing(prev => prev.filter(r => r.id !== row.id));
+  };
+
+  // ── Toggle helpers ────────────────────────────────────────────────────────────
   const toggleActive = async (item: SaleItem) => {
     await upsertSaleItem({ ...item, isActive: !item.isActive });
     setItems(prev => prev.map(i => i.id === item.id ? { ...i, isActive: !i.isActive } : i));
@@ -162,17 +267,22 @@ function HQSaleItemsContent() {
     setItems(prev => prev.map(i => i.id === item.id ? { ...i, isRequisitionable: !i.isRequisitionable } : i));
   };
 
-  // ── Filtered list ─────────────────────────────────────────────────────────────
-  const filtered = items.filter(i =>
-    !search || i.name.toLowerCase().includes(search.toLowerCase()) ||
-    i.id.toLowerCase().includes(search.toLowerCase())
-  );
+  // ── Filters ───────────────────────────────────────────────────────────────────
+  const allCategories = Array.from(new Set(items.map(i => i.category).filter(Boolean))) as string[];
+
+  const filtered = items.filter(i => {
+    const matchSearch = !search
+      || i.name.toLowerCase().includes(search.toLowerCase())
+      || i.id.toLowerCase().includes(search.toLowerCase());
+    const matchCat = filterCategory === "All" || i.category === filterCategory;
+    return matchSearch && matchCat;
+  });
 
   // ── Stats ─────────────────────────────────────────────────────────────────────
-  const totalActive       = items.filter(i => i.isActive).length;
+  const totalActive          = items.filter(i => i.isActive).length;
   const totalRequisitionable = items.filter(i => i.isRequisitionable).length;
-  const totalValue        = items.reduce((s, i) => s + i.instock * i.effectivePrice, 0);
-  const outOfStock        = items.filter(i => i.stockStatus === "out_of_stock").length;
+  const totalValue           = items.reduce((s, i) => s + i.instock * i.effectivePrice, 0);
+  const outOfStock           = items.filter(i => i.stockStatus === "out_of_stock").length;
 
   if (isLoading) return (
     <div className="flex items-center justify-center p-16 text-neutral-400 gap-2">
@@ -233,7 +343,7 @@ function HQSaleItemsContent() {
       {/* ── Table ──────────────────────────────────────────────────────── */}
       <Card className="shadow-sm border-neutral-200 overflow-hidden">
         <CardHeader className="flex flex-col sm:flex-row gap-3 items-start sm:items-center pb-4 border-b border-neutral-100 bg-white pt-4 px-4">
-          <div className="relative w-full sm:w-80">
+          <div className="relative w-full sm:w-72">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-neutral-400 pointer-events-none" />
             <input
               type="text"
@@ -243,16 +353,26 @@ function HQSaleItemsContent() {
               className="pl-9 pr-4 py-1.5 border border-neutral-200 rounded-md text-sm w-full bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
             />
           </div>
+          {/* Category filter */}
+          {allCategories.length > 0 && (
+            <select
+              value={filterCategory}
+              onChange={e => setFilterCategory(e.target.value)}
+              className="px-3 py-1.5 text-sm border border-neutral-200 rounded-md bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
+            >
+              <option value="All">All categories</option>
+              {allCategories.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          )}
         </CardHeader>
         <CardContent className="p-0">
           <Table>
             <TableHeader className="bg-neutral-50/80 text-xs text-neutral-500 uppercase tracking-wider">
               <TableRow>
                 <TableHead className="py-3 px-6">Item / SKU</TableHead>
+                <TableHead className="py-3">Category</TableHead>
                 <TableHead className="py-3">Unit</TableHead>
                 <TableHead className="py-3">Making Cost</TableHead>
-                <TableHead className="py-3">Suggested</TableHead>
-                <TableHead className="py-3">Override Price</TableHead>
                 <TableHead className="py-3">Effective Price</TableHead>
                 <TableHead className="py-3">Stock</TableHead>
                 <TableHead className="py-3">Status</TableHead>
@@ -278,21 +398,20 @@ function HQSaleItemsContent() {
                         </div>
                       </div>
                     </TableCell>
+                    <TableCell className="py-4">
+                      {item.category ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-neutral-100 text-neutral-700 border border-neutral-200">
+                          <Tag className="h-3 w-3" />{item.category}
+                        </span>
+                      ) : (
+                        <span className="text-neutral-300 text-xs">—</span>
+                      )}
+                    </TableCell>
                     <TableCell className="py-4 text-sm text-neutral-700">{item.baseUnit}</TableCell>
                     <TableCell className="py-4 text-sm text-neutral-600">
                       {item.makingCost > 0
                         ? <><span className="font-medium text-neutral-800">${item.makingCost.toFixed(2)}</span><span className="text-neutral-400">/{item.baseUnit}</span></>
                         : <span className="text-neutral-300">—</span>}
-                    </TableCell>
-                    <TableCell className="py-4 text-sm">
-                      <span className="font-medium text-neutral-700">
-                        {item.suggestedPrice > 0 ? `$${item.suggestedPrice.toFixed(2)}` : "—"}
-                      </span>
-                    </TableCell>
-                    <TableCell className="py-4 text-sm">
-                      {item.manualPrice != null
-                        ? <span className="font-semibold text-brand-700">${item.manualPrice.toFixed(2)}</span>
-                        : <span className="text-neutral-300 text-xs italic">auto</span>}
                     </TableCell>
                     <TableCell className="py-4">
                       <span className="font-bold text-success-700 text-sm">
@@ -335,9 +454,9 @@ function HQSaleItemsContent() {
                 );
               }) : (
                 <TableRow>
-                  <TableCell colSpan={9} className="text-center py-12 text-neutral-400 text-sm">
-                    {search
-                      ? "No finished goods match your search."
+                  <TableCell colSpan={8} className="text-center py-12 text-neutral-400 text-sm">
+                    {search || filterCategory !== "All"
+                      ? "No finished goods match your filters."
                       : "No finished goods yet. Create your first one to make it available for franchise locations to requisition."}
                   </TableCell>
                 </TableRow>
@@ -421,6 +540,31 @@ function HQSaleItemsContent() {
               placeholder="e.g. Agni Sauce 500ml"
               className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-brand-500 bg-neutral-50"
             />
+          </div>
+
+          {/* Category */}
+          <div>
+            <label className="block text-xs font-semibold text-neutral-600 uppercase tracking-wider mb-1.5">
+              Category <span className="text-neutral-400 font-normal">(optional)</span>
+            </label>
+            <div className="flex gap-2">
+              <select
+                value={formCategory}
+                onChange={e => setFormCategory(e.target.value)}
+                className="flex-1 px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
+              >
+                <option value="">— Uncategorized —</option>
+                {CATEGORY_OPTIONS.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+              {/* Also allow free-text override */}
+              <input
+                type="text"
+                value={formCategory}
+                onChange={e => setFormCategory(e.target.value)}
+                placeholder="or type custom…"
+                className="w-36 px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
+              />
+            </div>
           </div>
 
           {/* Description */}
@@ -550,6 +694,138 @@ function HQSaleItemsContent() {
                 <p className="text-xs text-neutral-400">
                   Cost last updated: {new Date(editing.makingCostUpdatedAt).toLocaleDateString()}
                 </p>
+              )}
+            </div>
+          )}
+
+          {/* ── Location Pricing Section ───────────────────────────────────────── */}
+          {editing && (
+            <div className="border-t border-neutral-200 pt-5">
+              <div className="flex items-center gap-2 mb-4">
+                <MapPin className="h-4 w-4 text-brand-500" />
+                <h4 className="text-sm font-bold text-neutral-800 uppercase tracking-wider">Location Sales Prices</h4>
+                <span className="text-xs text-neutral-400">(food cost % = making cost ÷ sales price)</span>
+              </div>
+
+              {isPricingLoading ? (
+                <div className="flex items-center gap-2 text-neutral-400 text-sm py-4">
+                  <Loader2 className="h-4 w-4 animate-spin" /> Loading location prices…
+                </div>
+              ) : (
+                <>
+                  {/* Existing pricing rows */}
+                  {locationPricing.length > 0 ? (
+                    <div className="rounded-lg border border-neutral-200 overflow-hidden mb-4">
+                      <table className="w-full text-sm">
+                        <thead className="bg-neutral-50 text-xs text-neutral-500 uppercase tracking-wider">
+                          <tr>
+                            <th className="px-3 py-2 text-left">Location</th>
+                            <th className="px-3 py-2 text-right">Sales Price</th>
+                            <th className="px-3 py-2 text-right">Making Cost</th>
+                            <th className="px-3 py-2 text-right">Food Cost %</th>
+                            <th className="px-3 py-2" />
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-neutral-100">
+                          {locationPricing.map(row => {
+                            const pct = foodCostPct(editing.makingCost, row.salesPrice);
+                            return (
+                              <tr key={row.id} className="hover:bg-neutral-50/50">
+                                <td className="px-3 py-2.5 font-medium text-neutral-800">
+                                  {row.locationName || row.locationId}
+                                </td>
+                                <td className="px-3 py-2.5 text-right font-semibold text-success-700">
+                                  ${row.salesPrice.toFixed(2)}
+                                </td>
+                                <td className="px-3 py-2.5 text-right text-neutral-500">
+                                  ${editing.makingCost.toFixed(2)}
+                                </td>
+                                <td className="px-3 py-2.5 text-right">
+                                  <FoodCostBadge pct={pct} />
+                                </td>
+                                <td className="px-3 py-2.5 text-right">
+                                  <button
+                                    onClick={() => handleDeletePricing(row)}
+                                    className="p-1 rounded text-neutral-300 hover:text-danger-600 hover:bg-danger-50 transition-colors"
+                                    title="Remove"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="text-center py-6 bg-neutral-50 border border-neutral-200 border-dashed rounded-lg mb-4">
+                      <MapPin className="h-6 w-6 text-neutral-300 mx-auto mb-2" />
+                      <p className="text-xs text-neutral-400">No location prices set yet.</p>
+                    </div>
+                  )}
+
+                  {/* Add pricing row form */}
+                  <div className="bg-neutral-50 border border-neutral-200 rounded-lg p-3 space-y-3">
+                    <p className="text-xs font-semibold text-neutral-600 uppercase tracking-wider">Add / Update Location Price</p>
+                    {pricingError && (
+                      <div className="flex items-center gap-2 bg-danger-50 border border-danger-200 rounded px-2 py-1 text-xs text-danger-700">
+                        <AlertCircle className="h-3.5 w-3.5 shrink-0" />{pricingError}
+                      </div>
+                    )}
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-[10px] font-semibold text-neutral-500 uppercase tracking-wider">Location</label>
+                        <select
+                          value={newPricingLocId}
+                          onChange={e => setNewPricingLocId(e.target.value)}
+                          className="w-full mt-1 px-2 py-1.5 text-sm border border-neutral-200 rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-brand-500"
+                        >
+                          <option value="">— Select —</option>
+                          {locations.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-semibold text-neutral-500 uppercase tracking-wider">Sales Price</label>
+                        <div className="relative mt-1">
+                          <span className="absolute left-2 top-1/2 -translate-y-1/2 text-neutral-400 text-xs">$</span>
+                          <input
+                            type="number"
+                            min={0}
+                            step={0.01}
+                            value={newPricingPrice}
+                            onChange={e => setNewPricingPrice(e.target.value)}
+                            placeholder="0.00"
+                            className="w-full pl-5 pr-2 py-1.5 text-sm border border-neutral-200 rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-brand-500"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                    {/* Live food cost preview */}
+                    {newPricingPrice && !isNaN(parseFloat(newPricingPrice)) && parseFloat(newPricingPrice) > 0 && (
+                      <div className="flex items-center gap-2 text-xs text-neutral-600 bg-white border border-neutral-200 rounded px-2 py-1.5">
+                        <TrendingUp className="h-3.5 w-3.5 text-brand-500" />
+                        Food cost at this price: <strong className="ml-1">{foodCostPct(editing.makingCost, parseFloat(newPricingPrice))}</strong>
+                        <span className="text-neutral-400 ml-1">(${editing.makingCost.toFixed(2)} ÷ ${parseFloat(newPricingPrice).toFixed(2)} × 100)</span>
+                      </div>
+                    )}
+                    <input
+                      type="text"
+                      value={newPricingNotes}
+                      onChange={e => setNewPricingNotes(e.target.value)}
+                      placeholder="Notes (optional)"
+                      className="w-full px-2 py-1.5 text-sm border border-neutral-200 rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-brand-500"
+                    />
+                    <button
+                      onClick={handleAddPricing}
+                      disabled={isPricingSaving}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-semibold bg-brand-600 text-white rounded-md hover:bg-brand-700 transition-colors disabled:opacity-50"
+                    >
+                      {isPricingSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PlusCircle className="h-3.5 w-3.5" />}
+                      {isPricingSaving ? "Saving…" : "Save Location Price"}
+                    </button>
+                  </div>
+                </>
               )}
             </div>
           )}
