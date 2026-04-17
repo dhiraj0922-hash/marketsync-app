@@ -23,7 +23,8 @@ import {
   loadRequisitions,
   saveRequisitions,
   loadProductionHistory,
-  saveProductionHistory
+  saveProductionHistory,
+  logMovement
 } from "@/lib/storage";
 import { normalizeUnit } from "@/lib/units";
 
@@ -301,7 +302,54 @@ export default function FinishedGoods() {
         return;
      }
      setInventoryData(_inv);
-     
+
+     // ── Log movements (fire-and-forget, non-fatal) ─────────────────────────────
+     // Runs after saveInventory so failures never block primary operation.
+     (async () => {
+       // a) cogs_out: one row per ingredient consumed
+       //    item_id  = inventory_items.id (row PK, TEXT)
+       //    locationId = the inventory row's locationId (HQ where production runs)
+       for (const ing of recipe.ingredients) {
+         const rawItem = inventoryData.find((i: any) => i.id.toString() === ing.inventoryId.toString());
+         if (!rawItem) continue;
+
+         let normalizedQty = 0;
+         try {
+           normalizedQty = normalizeUnit(ing.qty, ing.unit, rawItem.unit) * targetBatches;
+         } catch {
+           normalizedQty = ing.qty * targetBatches;
+         }
+         if (normalizedQty <= 0) continue;
+
+         await logMovement({
+           locationId:    rawItem.locationId ?? 'LOC-HQ',
+           itemId:        String(rawItem.id),
+           movementType:  'cogs_out',
+           quantity:      normalizedQty,
+           unitCost:      rawItem.cost ?? null,
+           referenceType: 'production',
+           referenceId:   newLog.id,
+           notes:         `Production run: ${targetBatches}x ${fg.name} — consumed ${normalizedQty} ${rawItem.unit} ${rawItem.name}`,
+         });
+       }
+
+       // b) production_in: one row for finished good yield
+       //    Tracks what was gained so movement ledger stays balanced.
+       const fgItem = inventoryData.find((f: any) => f.id.toString() === fg.id.toString());
+       if (fgItem && yieldAmount > 0) {
+         await logMovement({
+           locationId:    fgItem.locationId ?? 'LOC-HQ',
+           itemId:        String(fgItem.id),
+           movementType:  'production_in',
+           quantity:      yieldAmount,
+           unitCost:      fgItem.cost ?? null,
+           referenceType: 'production',
+           referenceId:   newLog.id,
+           notes:         `Production output: ${targetBatches} batches of ${fg.name}`,
+         });
+       }
+     })();
+     // ─────────────────────────────────────────────────────────────
      
      setSelectedFG(null);
      setProduceBatches(1);
