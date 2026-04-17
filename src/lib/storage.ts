@@ -1486,6 +1486,57 @@ export async function setUserPassword(
   return { success: true };
 }
 
+/**
+ * Unified user provisioning — creates or reconciles BOTH the Supabase auth
+ * account AND the user_profiles row in one call.
+ *
+ * Safe to call on existing users (idempotent). Handles all 4 cases:
+ *   - auth missing  + profile missing  → full create
+ *   - auth exists   + profile missing  → insert profile
+ *   - auth missing  + profile exists   → create auth + link
+ *   - auth exists   + profile exists   → update profile
+ *
+ * Returns generatedPassword only when a new auth user is created without an
+ * explicit password — HQ should copy and share it with the user.
+ */
+export async function provisionUser(payload: {
+  email: string;
+  fullName?: string;
+  role: string;
+  locationId?: string | null;
+  phone?: string | null;
+  password?: string;
+}): Promise<{
+  success: boolean;
+  action?: "created" | "updated" | "reconciled";
+  userId?: string;
+  profileId?: string;
+  generatedPassword?: string;
+  error?: string;
+}> {
+  const res = await fetch('/api/users/provision', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email:       payload.email,
+      full_name:   payload.fullName   ?? null,
+      role:        payload.role,
+      location_id: payload.locationId ?? null,
+      phone:       payload.phone      ?? null,
+      password:    payload.password   ?? undefined,
+    }),
+  });
+  const json = await res.json();
+  if (!res.ok) return { success: false, error: json.error ?? 'Provisioning failed.' };
+  return {
+    success:           true,
+    action:            json.action,
+    userId:            json.userId,
+    profileId:         json.profileId,
+    generatedPassword: json.generatedPassword,
+  };
+}
+
 
 /**
  * Fallback: create a user directly without sending an invite email.
