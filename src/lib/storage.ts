@@ -2189,55 +2189,39 @@ export async function updateRequisitionItemFulfilled(
     }
 
     // ── 7b. Write inventory_movements ledger (fire-and-forget) ────────────────
-    // Use avg_cost → cost → 0 as the transfer unit cost.
-    // Failures are logged as warnings only — never block a confirmed stock transfer.
-    const unitCost   = Number(hqRow.avg_cost ?? hqRow.cost ?? 0);
-    const totalCost  = unitCost * delta;
-    const movUnit    = hqRow.unit || hqRow.baseunit || '';
-    const movId      = crypto.randomUUID();
+    // Uses real schema: bigint id (identity), location_id TEXT, item_id TEXT.
+    // Two rows: transfer_out on HQ, transfer_in on destination.
+    // Failures are non-fatal — stock transfer is already committed.
+    const unitCost = Number(hqRow.cost ?? 0);
 
-    const { error: ledgerError } = await supabase
-      .from("inventory_movements")
-      .insert([
-        {
-          id:               movId + '-out',
-          item_id:          sharedItemId,
-          item_identity:    hqRow.name ?? null,
-          movement_type:    'requisition_out',
-          reference_type:   'requisition',
-          reference_id:     requisitionId,
-          from_location_id: HQ_LOCATION_ID,
-          to_location_id:   destLocationId,
-          quantity:         delta,
-          unit:             movUnit,
-          unit_cost:        unitCost,
-          total_cost:       totalCost,
-          notes:            `Requisition fulfillment: ${delta} ${movUnit} → ${destLocationId}`,
-        },
-        {
-          id:               movId + '-in',
-          item_id:          sharedItemId,
-          item_identity:    hqRow.name ?? null,
-          movement_type:    'requisition_in',
-          reference_type:   'requisition',
-          reference_id:     requisitionId,
-          from_location_id: HQ_LOCATION_ID,
-          to_location_id:   destLocationId,
-          quantity:         delta,
-          unit:             movUnit,
-          unit_cost:        unitCost,
-          total_cost:       totalCost,
-          notes:            `Received from HQ: ${delta} ${movUnit}`,
-        },
-      ]);
+    const [outErr, inErr] = await Promise.all([
+      logMovement({
+        locationId:    HQ_LOCATION_ID,
+        itemId:        sharedItemId,
+        movementType:  'transfer_out',
+        quantity:      delta,
+        unitCost,
+        referenceType: 'requisition',
+        referenceId:   requisitionId,
+        notes:         `Requisition fulfillment → ${destLocationId}`,
+      }),
+      logMovement({
+        locationId:    destLocationId,
+        itemId:        sharedItemId,
+        movementType:  'transfer_in',
+        quantity:      delta,
+        unitCost,
+        referenceType: 'requisition',
+        referenceId:   requisitionId,
+        notes:         `Received from HQ`,
+      }),
+    ]);
 
-    if (ledgerError) {
-      // Non-fatal: stock transfer already committed. Log and continue.
-      console.warn('[Fulfillment] ⚠ Step 7b: movement ledger insert failed (non-fatal)', {
-        message: ledgerError.message, code: ledgerError.code,
-      });
+    if (outErr || inErr) {
+      console.warn('[Fulfillment] ⚠ Step 7b: movement ledger insert failed (non-fatal)',
+        outErr?.message ?? inErr?.message);
     } else {
-      console.log(`[Fulfillment] Step 7b OK: 2 movement rows written (unit_cost=${unitCost} total=${totalCost})`);
+      console.log(`[Fulfillment] Step 7b OK: 2 movement rows written (unit_cost=${unitCost})`);
     }
   }
 
@@ -2296,4 +2280,64 @@ async function writeFulfilledAndRecalc(
   }
 
   return { success: true, newStatus };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MOVEMENT LEDGER HELPER
+// Central writer for public.inventory_movements (real schema):
+//   id BIGINT GENERATED ALWAYS AS IDENTITY  ← auto, do NOT supply
+//   created_at TIMESTAMPTZ DEFAULT NOW()    ← auto
+//   location_id TEXT NOT NULL
+//   item_id TEXT NOT NULL
+//   movement_type TEXT NOT NULL
+//   quantity NUMERIC NOT NULL
+//   unit_cost NUMERIC nullable   (view falls back to inventory_items.cost)
+//   total_cost NUMERIC nullable  (view computes qty*unit_cost when null)
+//   reference_type TEXT nullable
+//   reference_id TEXT nullable
+//   notes TEXT nullable
+//
+// Returns the Supabase error object on failure, or null on success.
+// All callers treat movement failures as non-fatal (stock is already committed).
+// ─────────────────────────────────────────────────────────────────────────────
+export async function logMovement(params: {
+  locationId:     string;
+  itemId:         string;
+  movementType:   string;        // 'transfer_out'|'transfer_in'|'purchase_in'|'adjustment_in'|'adjustment_out'
+  quantity:       number;        // always positive
+  unitCost?:      number | null; // null → view falls back to inventory_items.cost
+  referenceType?: string | null;
+  referenceId?:   string | null;
+  notes?:         string | null;
+}): Promise<any | null> {
+  const unitCost  = params.unitCost != null ? Number(params.unitCost) : null;
+  const totalCost = unitCost !== null && params.quantity > 0
+    ? params.quantity * unitCost
+    : null;
+
+  const { error } = await supabase
+    .from('inventory_movements')
+    .insert({
+      location_id:    params.locationId,
+      item_id:        params.itemId,
+      movement_type:  params.movementType,
+      quantity:       params.quantity,
+      unit_cost:      unitCost,
+      total_cost:     totalCost,
+      reference_type: params.referenceType ?? null,
+      reference_id:   params.referenceId   ?? null,
+      notes:          params.notes         ?? null,
+    });
+
+  if (error) {
+    console.error('[logMovement] insert failed:', {
+      movement_type: params.movementType,
+      location_id:   params.locationId,
+      item_id:       params.itemId,
+      msg:           error.message,
+      code:          error.code,
+    });
+    return error;
+  }
+  return null;
 }

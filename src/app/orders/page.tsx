@@ -30,7 +30,7 @@ import {
   Trash,
   X
 } from "lucide-react";
-import { loadOrders, saveOrders, insertOrder, updateOrder, deleteOrder, generateOrderId, loadInventory, saveInventory, loadSuppliers, resolveSupplier, loadLocations } from "@/lib/storage";
+import { loadOrders, saveOrders, insertOrder, updateOrder, deleteOrder, generateOrderId, loadInventory, saveInventory, loadSuppliers, resolveSupplier, loadLocations, logMovement } from "@/lib/storage";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/components/AuthProvider";
 import { isHqAdmin, resolveLocationId } from "@/lib/roles";
@@ -561,7 +561,20 @@ export default function Orders() {
             .eq("id", hqRow.id);
 
           if (updErr) stockErrors.push(`${recItem.name}: update failed (${updErr.message})`);
-          else console.log(`[PO Receive] ${recItem.name}: instock ${hqRow.instock} → ${newStock}`);
+          else {
+            console.log(`[PO Receive] ${recItem.name}: instock ${hqRow.instock} → ${newStock}`);
+            // Log purchase_in movement (fire-and-forget)
+            logMovement({
+              locationId:    HQ_LOCATION_ID,
+              itemId:        sharedItemId,
+              movementType:  'purchase_in',
+              quantity:      recItem.receivedQty,
+              unitCost:      recItem.actualPrice ?? null,
+              referenceType: 'purchase_order',
+              referenceId:   receivingOrder.id,
+              notes:         `PO receive: ${recItem.name}`,
+            });
+          }
         } else {
           stockErrors.push(`${recItem.name}: no HQ row found for item_id=${sharedItemId}. Add this product to HQ inventory first.`);
         }
@@ -585,7 +598,20 @@ export default function Orders() {
           .eq("id", invRow.id);
 
         if (updErr) stockErrors.push(`${recItem.name}: update failed (${updErr.message})`);
-        else console.log(`[PO Receive] fallback id=${recItem.id}: instock → ${newStock}`);
+        else {
+          console.log(`[PO Receive] fallback id=${recItem.id}: instock → ${newStock}`);
+          // Log purchase_in movement using row id as item_id (no shared identity available)
+          logMovement({
+            locationId:    invRow.location_id ?? HQ_LOCATION_ID,
+            itemId:        String(recItem.id),
+            movementType:  'purchase_in',
+            quantity:      recItem.receivedQty,
+            unitCost:      recItem.actualPrice ?? null,
+            referenceType: 'purchase_order',
+            referenceId:   receivingOrder.id,
+            notes:         `PO receive (fallback): ${recItem.name}`,
+          });
+        }
       }
     }
 

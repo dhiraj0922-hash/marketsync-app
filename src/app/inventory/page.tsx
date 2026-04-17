@@ -9,7 +9,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
 import { Search, Plus, Upload, MoreHorizontal, ShoppingCart, History, Save, Trash2, ArrowDown, ArrowUp, AlertTriangle, X, Download, Loader2 } from "lucide-react";
-import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId } from "@/lib/storage";
+import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId, logMovement } from "@/lib/storage";
 
 export default function Inventory() {
   const router = useRouter();
@@ -425,7 +425,25 @@ export default function Inventory() {
     setInventoryData(newInventory);
     setActivityData(newActivityData);
     await saveInventoryActivity(newActivityData);
-    setSelectedItem(updatedItem); 
+    setSelectedItem(updatedItem);
+
+    // ── Log movement (fire-and-forget, non-fatal) ──────────────────────────────
+    // Use the canonical item_id (shared identity) if set, else fall back to row id.
+    const movItemId  = selectedItem.itemId ?? selectedItem.id;
+    const movLocId   = selectedItem.locationId ?? resolveLocationId(user);
+    const movType    = (adjType === 'Add') ? 'adjustment_in' : 'adjustment_out';
+    const absQty     = Math.abs(normalizedInput);
+    logMovement({
+      locationId:    movLocId,
+      itemId:        String(movItemId),
+      movementType:  movType,
+      quantity:      absQty,
+      unitCost:      selectedItem.cost ?? null,
+      referenceType: 'manual',
+      notes:         adjNotes ? `${adjType}: ${adjNotes}` : adjType,
+    });
+    // ─────────────────────────────────────────────────────────────────────────
+
     setAdjQty("");
     setAdjNotes("");
   };
