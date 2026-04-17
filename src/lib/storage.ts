@@ -1466,6 +1466,28 @@ export async function inviteUser(payload: {
 }
 
 /**
+ * Set (or reset) a user's password directly without sending any email.
+ * HQ admin provides the new password manually.
+ * The target user is identified by their email address.
+ *
+ * Calls POST /api/users/set-password which uses the Supabase service role key.
+ */
+export async function setUserPassword(
+  email: string,
+  newPassword: string
+): Promise<{ success: boolean; error?: string }> {
+  const res = await fetch('/api/users/set-password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password: newPassword }),
+  });
+  const json = await res.json();
+  if (!res.ok) return { success: false, error: json.error ?? 'Failed to set password.' };
+  return { success: true };
+}
+
+
+/**
  * Fallback: create a user directly without sending an invite email.
  * HQ provides a temporary password the user changes on first login.
  * Use when Supabase invite emails are rate-limited.

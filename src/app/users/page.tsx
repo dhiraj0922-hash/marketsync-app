@@ -5,8 +5,8 @@ import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
-import { Plus, Search, UserCog, Mail, Edit, ShieldBan, MapPin, CheckCircle2, Loader2 } from "lucide-react";
-import { loadUsers, saveUsers, loadLocations, saveLocations, insertLocation } from "@/lib/storage";
+import { Plus, Search, UserCog, Mail, Edit, ShieldBan, MapPin, CheckCircle2, Loader2, KeyRound, Copy, RefreshCw, Eye, EyeOff } from "lucide-react";
+import { loadUsers, saveUsers, loadLocations, saveLocations, insertLocation, setUserPassword } from "@/lib/storage";
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
 
 export default function Users() {
@@ -47,6 +47,15 @@ function UsersPageContent() {
   const ROLES_LIST = ["HQ Admin", "HQ Manager", "Location Manager", "Kitchen Staff", "Finance / Purchasing"];
 
   const [isLoading, setIsLoading] = useState(true);
+
+  // ── Set Password modal state ──────────────────────────────────────────────
+  const [pwdModal, setPwdModal]         = useState<{ id: string; name: string; email: string } | null>(null);
+  const [pwdValue, setPwdValue]         = useState("");
+  const [pwdShow, setPwdShow]           = useState(false);
+  const [pwdSaving, setPwdSaving]       = useState(false);
+  const [pwdError, setPwdError]         = useState<string | null>(null);
+  const [pwdSuccess, setPwdSuccess]     = useState(false);
+  const [pwdCopied, setPwdCopied]       = useState(false);
 
   useEffect(() => {
     async function fetchData() {
@@ -171,6 +180,54 @@ function UsersPageContent() {
   const resetInvite = (email: string, e: any) => {
      e.stopPropagation();
      alert(`Password initialization protocol sequence dispatched securely back to ${email}.`);
+  };
+
+  // ── Set Password helpers ──────────────────────────────────────────────────
+  const generateTempPassword = () => {
+    const chars = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%";
+    return Array.from({ length: 12 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+  };
+
+  const openPwdModal = (user: any, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setPwdModal({ id: user.id, name: user.name, email: user.email });
+    setPwdValue("");
+    setPwdShow(false);
+    setPwdError(null);
+    setPwdSuccess(false);
+    setPwdCopied(false);
+  };
+
+  const closePwdModal = () => {
+    setPwdModal(null);
+    setPwdValue("");
+    setPwdError(null);
+    setPwdSuccess(false);
+  };
+
+  const copyPassword = async () => {
+    if (!pwdValue) return;
+    try {
+      await navigator.clipboard.writeText(pwdValue);
+      setPwdCopied(true);
+      setTimeout(() => setPwdCopied(false), 2000);
+    } catch { /* clipboard unavailable */ }
+  };
+
+  const handleSetPassword = async () => {
+    if (!pwdModal) return;
+    if (!pwdValue.trim()) { setPwdError("Password cannot be empty."); return; }
+    if (pwdValue.length < 6) { setPwdError("Password must be at least 6 characters."); return; }
+    setPwdSaving(true);
+    setPwdError(null);
+    const res = await setUserPassword(pwdModal.email, pwdValue);
+    setPwdSaving(false);
+    if (!res.success) {
+      setPwdError(res.error ?? "Failed to set password.");
+    } else {
+      setPwdSuccess(true);
+      setTimeout(closePwdModal, 1800);
+    }
   };
 
   const resetLocForm = () => {
@@ -333,6 +390,13 @@ function UsersPageContent() {
                               <CheckCircle2 className="h-4 w-4" />
                            </button>
                         )}
+                        <button
+                          onClick={(e) => openPwdModal(user, e)}
+                          className="p-1.5 bg-white border border-neutral-200 text-neutral-500 hover:text-brand-600 hover:border-brand-200 rounded shadow-sm transition-colors"
+                          title="Set Password"
+                        >
+                          <KeyRound className="h-4 w-4" />
+                        </button>
                         <button onClick={() => openEditUser(user)} className="p-1.5 bg-white border border-neutral-200 text-neutral-500 hover:text-brand-600 hover:border-brand-200 rounded shadow-sm transition-colors" title="Structural Modifications">
                            <Edit className="h-4 w-4" />
                         </button>
@@ -570,6 +634,133 @@ function UsersPageContent() {
           
         </div>
       </Drawer>
+
+      {/* ── SET PASSWORD MODAL ────────────────────────────────────────────── */}
+      {pwdModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          {/* Backdrop */}
+          <div
+            className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+            onClick={closePwdModal}
+          />
+          {/* Panel */}
+          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden">
+            {/* Header */}
+            <div className="bg-gradient-to-r from-brand-600 to-brand-700 px-6 py-4">
+              <div className="flex items-center gap-3">
+                <div className="h-9 w-9 rounded-full bg-white/20 flex items-center justify-center">
+                  <KeyRound className="h-5 w-5 text-white" />
+                </div>
+                <div>
+                  <h3 className="text-white font-bold text-base">Set Password</h3>
+                  <p className="text-brand-100 text-xs">{pwdModal.name} · {pwdModal.email}</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Body */}
+            <div className="px-6 py-5 space-y-4">
+              {pwdSuccess ? (
+                <div className="flex flex-col items-center gap-3 py-4">
+                  <div className="h-12 w-12 rounded-full bg-success-100 flex items-center justify-center">
+                    <CheckCircle2 className="h-6 w-6 text-success-600" />
+                  </div>
+                  <p className="text-success-700 font-semibold text-sm">Password updated successfully!</p>
+                  <p className="text-neutral-500 text-xs text-center">
+                    {pwdModal.name} can now log in with the new password.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <p className="text-neutral-500 text-sm">
+                    Set a new password directly. No email will be sent — share it securely with the user.
+                  </p>
+
+                  {/* Password input */}
+                  <div>
+                    <label className="block text-xs font-semibold text-neutral-600 uppercase tracking-wider mb-1.5">
+                      New Password
+                    </label>
+                    <div className="relative">
+                      <input
+                        type={pwdShow ? "text" : "password"}
+                        value={pwdValue}
+                        onChange={e => { setPwdValue(e.target.value); setPwdError(null); }}
+                        onKeyDown={e => e.key === "Enter" && handleSetPassword()}
+                        placeholder="Minimum 6 characters"
+                        autoFocus
+                        className="w-full pr-10 pl-3 py-2.5 text-sm border border-neutral-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400 bg-neutral-50 font-mono tracking-widest"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setPwdShow(v => !v)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-700"
+                        tabIndex={-1}
+                      >
+                        {pwdShow ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    </div>
+                    {pwdError && (
+                      <p className="mt-1.5 text-xs text-danger-600 font-medium">{pwdError}</p>
+                    )}
+                  </div>
+
+                  {/* Helper buttons */}
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => { setPwdValue(generateTempPassword()); setPwdError(null); }}
+                      className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-semibold border border-neutral-300 rounded-lg bg-neutral-50 hover:bg-neutral-100 transition-colors text-neutral-700"
+                    >
+                      <RefreshCw className="h-3.5 w-3.5" />
+                      Generate Temp Password
+                    </button>
+                    <button
+                      type="button"
+                      onClick={copyPassword}
+                      disabled={!pwdValue}
+                      className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-semibold border border-neutral-300 rounded-lg bg-neutral-50 hover:bg-neutral-100 transition-colors text-neutral-700 disabled:opacity-40"
+                    >
+                      {pwdCopied
+                        ? <><CheckCircle2 className="h-3.5 w-3.5 text-success-600" /> Copied!</>
+                        : <><Copy className="h-3.5 w-3.5" /> Copy</>}
+                    </button>
+                  </div>
+
+                  {/* Preview if shown */}
+                  {pwdValue && pwdShow && (
+                    <div className="bg-neutral-900 text-green-400 font-mono text-sm px-3 py-2 rounded-lg tracking-widest break-all">
+                      {pwdValue}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+
+            {/* Footer */}
+            {!pwdSuccess && (
+              <div className="px-6 pb-5 flex justify-end gap-3">
+                <button
+                  onClick={closePwdModal}
+                  disabled={pwdSaving}
+                  className="px-4 py-2 text-sm font-medium border border-neutral-300 rounded-lg bg-white hover:bg-neutral-50 text-neutral-700 transition-colors disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSetPassword}
+                  disabled={pwdSaving || !pwdValue.trim()}
+                  className="px-4 py-2 text-sm font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  {pwdSaving
+                    ? <><Loader2 className="h-4 w-4 animate-spin" /> Saving…</>
+                    : <><KeyRound className="h-4 w-4" /> Set Password</>}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
