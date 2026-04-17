@@ -19,8 +19,7 @@ export const useAuth = () => useContext(AuthContext);
 /** Hard limit for the entire initial bootstrap (getSession + loadProfile) */
 const BOOTSTRAP_TIMEOUT_MS = 12_000;
 /** Per-fetch limit for the user_profiles query.
- *  Raised to 15s — Supabase free tier can be slow on cold starts.
- *  The banner only shows on bootstrap failure, not token-refresh timeouts. */
+ *  15s — Supabase free tier can be slow on cold starts. */
 const PROFILE_TIMEOUT_MS   = 15_000;
 
 function withTimeout<T>(promise: PromiseLike<T>, ms: number, label: string): Promise<T> {
@@ -51,8 +50,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // re-fetch failure doesn't wipe out a known-good role.
   const lastGoodUser  = useRef<AppUser | null>(null);
 
-  const markLoadingFalse = (label: string) => {
-    console.log(`[AuthProvider] setLoading(false) via: ${label}`);
+  const markLoadingFalse = () => {
     loadingRef.current = false;
     setLoading(false);
   };
@@ -67,13 +65,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
    *   - If no prior user (bootstrap path): sets user with role=null and profileError=true
    *     so the UI can show a retry instead of a wrong access-denied screen.
    */
-  const loadProfile = async (authUser: { id: string; email?: string }, isBootstrap = false, trigger = 'unknown') => {
-    console.log(
-      `[AUTH] profile query start  uid=${authUser.id}  email=${authUser.email}  isBootstrap=${isBootstrap}  trigger=${trigger}`
-    );
-
+  const loadProfile = async (authUser: { id: string; email?: string }, isBootstrap = false) => {
     try {
-      const queryStart = Date.now();
       const { data: profile, error } = await withTimeout(
         supabase
           .from("user_profiles")
@@ -83,58 +76,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         PROFILE_TIMEOUT_MS,
         "user_profiles fetch"
       );
-      const elapsed = Date.now() - queryStart;
-
-      // ── Log raw query result ──────────────────────────────────────────────
-      if (error) {
-        console.error("[AUTH] profile query error", {
-          trigger,
-          elapsed_ms:  elapsed,
-          code:        error.code,
-          message:     error.message,
-          details:     (error as any).details   ?? null,
-          hint:        (error as any).hint      ?? null,
-          status:      (error as any).status    ?? null,
-          // PGRST116 = row not found; 42501 / 403 = RLS denied
-          interpretation:
-            error.code === 'PGRST116' ? 'NO_PROFILE_ROW'
-            : (error as any).status === 403  ? 'RLS_DENIED'
-            : error.message?.startsWith('[AuthProvider] timeout') ? 'TIMEOUT'
-            : 'DB_OR_NETWORK_ERROR',
-        });
-        console.warn(
-          `[AUTH] using cached credentials — reason: profile query error  code=${error.code}  trigger=${trigger}  hasLastGoodUser=${!!lastGoodUser.current}`
-        );
-      } else {
-        console.log("[AUTH] profile query success", {
-          trigger,
-          elapsed_ms:  elapsed,
-          found:       !!profile,
-          role:        profile?.role        ?? null,
-          location_id: profile?.location_id ?? null,
-          is_active:   profile?.is_active   ?? null,
-        });
-      }
 
       if (error || !profile) {
+        // Log DB errors (not timeouts — those are caught below)
+        if (error) {
+          console.error("[AuthProvider] profile query failed", {
+            code:    error.code,
+            message: error.message,
+            status:  (error as any).status ?? null,
+          });
+        }
+
         if (lastGoodUser.current) {
-          console.warn(
-            `[AUTH] using cached credentials — restoring lastGoodUser  role=${lastGoodUser.current.role}  locationId=${lastGoodUser.current.locationId}  trigger=${trigger}`
-          );
           setUser({ ...lastGoodUser.current, profileError: true });
         } else {
-          console.warn(
-            `[AUTH] using cached credentials — bootstrap path, no lastGoodUser, setting minimal user  trigger=${trigger}`
-          );
-          const minimal: AppUser = {
+          setUser({
             id:           authUser.id,
             email:        authUser.email ?? "",
             name:         authUser.email?.split("@")[0] ?? "Unknown",
             role:         null,
             locationId:   null,
             profileError: true,
-          };
-          setUser(minimal);
+          });
           if (isBootstrap) setBootstrapError("profile_fetch_failed");
         }
         return;
@@ -151,34 +114,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         profileLoaded: true,
         profileError:  false,
       };
-      console.log("[AUTH] final resolved user", {
-        trigger,
-        id:         resolved.id,
-        email:      resolved.email,
-        role:       resolved.role,
-        locationId: resolved.locationId,
-        isActive:   resolved.isActive,
-      });
       lastGoodUser.current = resolved;
       setUser(resolved);
       setBootstrapError(null);
 
     } catch (err: any) {
-      const isTimeout = err?.message?.includes('[AuthProvider] timeout');
-      console.error("[AUTH] profile query error", {
-        trigger,
-        type:         isTimeout ? 'TIMEOUT' : 'EXCEPTION',
-        message:      err?.message ?? String(err),
-        hasLastGoodUser: !!lastGoodUser.current,
-      });
-      console.warn(
-        `[AUTH] using cached credentials — reason: ${isTimeout ? 'timeout' : 'exception'}  trigger=${trigger}  hasLastGoodUser=${!!lastGoodUser.current}`
-      );
+      const isTimeout = err?.message?.includes("[AuthProvider] timeout");
+      if (!isTimeout) {
+        // Real exceptions are always logged; timeouts are expected on cold-start
+        console.error("[AuthProvider] profile load exception:", err?.message ?? err);
+      }
 
       if (lastGoodUser.current) {
-        console.warn(
-          `[AUTH] using cached credentials — restoring lastGoodUser after ${isTimeout ? 'timeout' : 'error'}  role=${lastGoodUser.current.role}`
-        );
         setUser({ ...lastGoodUser.current, profileError: true });
       } else {
         setUser({
@@ -198,54 +145,42 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let isMounted = true;
 
-    console.log("[AuthProvider] bootstrap START  supabaseConfigured=", supabaseConfigured);
-
     const failsafe = setTimeout(() => {
       if (isMounted && loadingRef.current) {
-        console.warn(`[AuthProvider] FAILSAFE after ${BOOTSTRAP_TIMEOUT_MS}ms — forcing loading=false`);
         bootstrapDone.current = true;
         setBootstrapError("timeout");
-        // Don't wipe user — just unblock the UI
-        markLoadingFalse("failsafe-timeout");
+        markLoadingFalse();
       }
     }, BOOTSTRAP_TIMEOUT_MS);
 
     async function bootstrap() {
       try {
         if (!supabaseConfigured) {
-          console.error("[AuthProvider] Supabase env vars missing.");
+          console.error("[AuthProvider] Supabase env vars missing — check NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY.");
           setUser(null);
           return;
         }
 
-        console.log("[AuthProvider] getSession START");
         const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-        console.log("[AUTH] getSession", {
-          sessionPresent:   !!session,
-          userId:           session?.user?.id            ?? null,
-          email:            session?.user?.email         ?? null,
-          tokenExpiresAt:   session?.expires_at          ?? null,
-          providerToken:    session?.provider_token       ? 'present' : 'absent',
-          errorMsg:         sessionError?.message        ?? null,
-          errorStatus:      (sessionError as any)?.status ?? null,
-        });
+
+        if (sessionError) {
+          console.error("[AuthProvider] getSession error:", sessionError.message);
+        }
 
         if (!isMounted) return;
 
         if (session?.user) {
-          console.log("[AUTH] session found → loading profile  uid=", session.user.id, "  trigger=bootstrap");
-          await loadProfile(session.user, /* isBootstrap */ true, 'bootstrap');
+          await loadProfile(session.user, /* isBootstrap */ true);
         } else {
-          console.log("[AuthProvider] no session → setUser(null)");
           setUser(null);
         }
       } catch (err: any) {
-        console.error("[AuthProvider] bootstrap THREW:", err?.message ?? err);
+        console.error("[AuthProvider] bootstrap error:", err?.message ?? err);
         if (isMounted) setUser(null);
       } finally {
         clearTimeout(failsafe);
         bootstrapDone.current = true;
-        markLoadingFalse("bootstrap-finally");
+        markLoadingFalse();
       }
     }
 
@@ -253,13 +188,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     // ── Auth state listener ───────────────────────────────────────────────
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      console.log("[AUTH] onAuthStateChange", {
-        event,
-        bootstrapDone:  bootstrapDone.current,
-        userId:         session?.user?.id    ?? null,
-        tokenExpiresAt: session?.expires_at  ?? null,
-      });
-
       // INITIAL_SESSION is handled by bootstrap() — skip to avoid the race
       if (event === "INITIAL_SESSION") return;
 
@@ -267,10 +195,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       if (event === "TOKEN_REFRESHED") {
         // Token refreshed silently — the JWT is renewed but the profile row
-        // has NOT changed. Skip the profile re-fetch entirely: there is nothing
-        // new to load, and the re-fetch was the source of repeated timeouts and
-        // the repeated banner. lastGoodUser already holds the correct role.
-        console.log("[AUTH] TOKEN_REFRESHED — skipping profile re-fetch (profile unchanged)");
+        // has NOT changed. Skip the profile re-fetch entirely.
+        // lastGoodUser already holds the correct role.
         return;
       }
 
@@ -279,18 +205,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // If we already have a good user (bootstrap loaded it), skip the
         // redundant re-fetch — it was causing repeated timeouts.
         if (lastGoodUser.current) {
-          console.log(
-            "[AUTH] SIGNED_IN — user already loaded, skipping duplicate profile fetch  uid=",
-            session.user.id
-          );
-          if (bootstrapDone.current) markLoadingFalse("onAuthStateChange-signed-in-skip");
+          if (bootstrapDone.current) markLoadingFalse();
           return;
         }
         // Fresh login path (no prior user) — load profile and unblock UI
         if (bootstrapDone.current) {
-          console.log("[AUTH] SIGNED_IN — fresh login, loading profile  uid=", session.user.id);
-          await loadProfile(session.user, /* isBootstrap */ false, 'SIGNED_IN');
-          markLoadingFalse("onAuthStateChange-signed-in");
+          await loadProfile(session.user, /* isBootstrap */ false);
+          markLoadingFalse();
         }
         return;
       }
@@ -298,7 +219,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (event === "SIGNED_OUT") {
         lastGoodUser.current = null;
         setUser(null);
-        if (bootstrapDone.current) markLoadingFalse("onAuthStateChange-signed-out");
+        if (bootstrapDone.current) markLoadingFalse();
         return;
       }
     });
@@ -315,10 +236,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (loading) return;
     if (!user && pathname !== "/login") {
-      console.log("[AuthProvider] redirect → /login  pathname=", pathname);
       router.push("/login");
     } else if (user && pathname === "/login") {
-      console.log("[AuthProvider] redirect → /  (authenticated user on /login)");
       router.push("/");
     }
   }, [user, loading, pathname, router]);

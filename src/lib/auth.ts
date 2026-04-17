@@ -52,75 +52,44 @@ export function clearProfileCache(): void {
  * Results are cached in memory for the browser session.
  */
 export async function getCurrentUserProfile(): Promise<UserProfile | null> {
-  // Return cached value if already resolved
-  if (_profileCache !== undefined) {
-    console.log('[AUTH] getCurrentUserProfile — cache hit  role=', _profileCache?.role ?? null);
-    return _profileCache;
-  }
-  console.log('[AUTH] getCurrentUserProfile — cache miss, fetching…');
+  if (_profileCache !== undefined) return _profileCache;
 
-  // Get the Supabase auth session
   const {
     data: { user },
     error: authError,
   } = await supabase.auth.getUser();
 
-  console.log('[AUTH] getSession (auth.ts)', {
-    userId:       user?.id    ?? null,
-    email:        user?.email ?? null,
-    authErrorMsg: authError?.message ?? null,
-    authErrorStatus: (authError as any)?.status ?? null,
-  });
-
   if (authError || !user) {
-    console.warn('[AUTH] getCurrentUserProfile — no auth user, returning null');
     _profileCache = null;
     return null;
   }
 
-  // Query user_profiles for this auth user
-  console.log('[AUTH] profile query start (auth.ts)  uid=', user.id);
-  const queryStart = Date.now();
   const { data, error } = await supabase
     .from("user_profiles")
     .select("id, user_id, full_name, role, location_id, is_active")
     .eq("user_id", user.id)
     .single();
-  const elapsed = Date.now() - queryStart;
 
   if (error || !data) {
-    console.error('[AUTH] profile query error (auth.ts)', {
-      elapsed_ms:  elapsed,
-      code:        error?.code,
-      message:     error?.message,
-      details:     (error as any)?.details   ?? null,
-      hint:        (error as any)?.hint      ?? null,
-      status:      (error as any)?.status    ?? null,
-      interpretation:
-        error?.code === 'PGRST116' ? 'NO_PROFILE_ROW'
-        : (error as any)?.status === 403 ? 'RLS_DENIED'
-        : 'DB_OR_NETWORK_ERROR',
-    });
-    console.warn('[AUTH] using cached credentials (auth.ts) — returning null, no profile');
+    if (error) {
+      console.error("[auth] user_profiles query failed", {
+        code:    error.code,
+        message: error.message,
+        status:  (error as any).status ?? null,
+      });
+    }
     _profileCache = null;
     return null;
   }
 
   const profile: UserProfile = {
-    id: data.id,
-    userId: data.user_id,
-    fullName: data.full_name,
-    role: data.role as UserRole,
+    id:         data.id,
+    userId:     data.user_id,
+    fullName:   data.full_name,
+    role:       data.role as UserRole,
     locationId: data.location_id,
-    isActive: data.is_active,
+    isActive:   data.is_active,
   };
-
-  console.log('[AUTH] profile query success (auth.ts)', {
-    elapsed_ms: elapsed,
-    role:       profile.role,
-    locationId: profile.locationId,
-    isActive:   profile.isActive,
-  });
 
   _profileCache = profile;
   return profile;
