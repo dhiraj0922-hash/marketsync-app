@@ -14,7 +14,8 @@ import {
   CheckCircle2,
   PackageCheck,
   TrendingUp,
-  RefreshCw
+  RefreshCw,
+  Upload
 } from "lucide-react";
 import { 
   loadRecipes,
@@ -27,6 +28,8 @@ import {
   logMovement
 } from "@/lib/storage";
 import { normalizeUnit } from "@/lib/units";
+import { FgImportModal } from "@/components/FgImportModal";
+
 
 export default function FinishedGoods() {
   const [recipes, setRecipes] = useState<any[]>([]);
@@ -39,6 +42,7 @@ export default function FinishedGoods() {
   const [selectedFG, setSelectedFG] = useState<any>(null);
   const [produceBatches, setProduceBatches] = useState<number>(1);
   const [isAutoFulfillMode, setIsAutoFulfillMode] = useState<boolean>(false);
+  const [isImportOpen, setIsImportOpen] = useState(false);
 
   const [isLoading, setIsLoading] = useState(true);
 
@@ -383,6 +387,14 @@ export default function FinishedGoods() {
           <h2 className="text-2xl font-bold tracking-tight">HQ Finished Goods</h2>
           <p className="text-neutral-500">Track central kitchen outputs, batch processes, and execute auto-fulfillment mappings.</p>
         </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setIsImportOpen(true)}
+            className="flex items-center gap-1.5 px-4 py-2 text-sm font-semibold bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 shadow-sm transition-colors"
+          >
+            <Upload className="h-4 w-4" /> Import CSV
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
@@ -628,6 +640,14 @@ export default function FinishedGoods() {
            </div>
         </div>
       </Drawer>
+
+      {/* ── CSV Import Modal ─────────────────────────────────────────────── */}
+      <FgImportModal
+        isOpen={isImportOpen}
+        onClose={() => setIsImportOpen(false)}
+        existingNames={finishedGoods.map((fg: any) => fg.name)}
+        onSuccess={() => window.location.reload()}
+      />
 
     </div>
   );
