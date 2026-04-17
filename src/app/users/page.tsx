@@ -777,7 +777,14 @@ function ProvisionSuccess({
 function AddLocationForm({
   name, setName, code, setCode, type, setType, status, setStatus,
   error, success, saving, onSave, onCancel,
-}: any) {
+}: {
+  name: string; setName: (v: string) => void;
+  code: string; setCode: (v: string) => void;
+  type: string; setType: (v: string) => void;
+  status: string; setStatus: (v: string) => void;
+  error: string; success: string; saving: boolean;
+  onSave: () => void; onCancel: () => void;
+}) {
   return (
     <div className="mt-3 bg-neutral-50 border border-neutral-200 rounded-lg p-3 space-y-3">
       <h4 className="text-xs font-bold text-neutral-800 uppercase tracking-wider">New Location</h4>
