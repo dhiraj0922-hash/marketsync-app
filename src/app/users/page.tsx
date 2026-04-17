@@ -784,12 +784,12 @@ function AddLocationForm({
       <div className="grid grid-cols-2 gap-3">
         <div>
           <label className="text-[10px] font-semibold text-neutral-500 uppercase tracking-wider mb-1 block">Name *</label>
-          <input type="text" placeholder="e.g. Downtown" value={name} onChange={e => setName(e.target.value)}
+          <input type="text" placeholder="e.g. Downtown" value={name} onChange={e => setName(e.target.value as string)}
             className="w-full p-1.5 text-xs border border-neutral-300 rounded focus:outline-none focus:ring-1 focus:ring-brand-500" />
         </div>
         <div>
           <label className="text-[10px] font-semibold text-neutral-500 uppercase tracking-wider mb-1 block">Code</label>
-          <input type="text" placeholder="e.g. DT1" value={code} onChange={e => setCode(e.target.value)}
+          <input type="text" placeholder="e.g. DT1" value={code} onChange={e => setCode(e.target.value as string)}
             className="w-full p-1.5 text-xs border border-neutral-300 rounded focus:outline-none focus:ring-1 focus:ring-brand-500" />
         </div>
       </div>
