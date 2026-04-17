@@ -41,14 +41,20 @@ export function HQOnlyGuard({ children }: HQOnlyGuardProps) {
   }
 
   // ── Profile fetch failed (DB cold-start / network error) ──────────────────
-  // If we have a previous good user that was hq_admin, show a non-blocking
-  // banner and let them through — don't lock out an HQ admin on a slow DB.
-  if ((user as any)?.profileError && isHqAdmin(user)) {
+  // Show the banner ONLY when the profile query failed on the initial bootstrap
+  // and has never successfully loaded (profileLoaded is falsy).
+  // If profileLoaded=true was previously set (lastGoodUser restore path), the
+  // role is still valid — suppress the banner, the user doesn't need to see it.
+  const profileError   = (user as any)?.profileError  === true;
+  const profileLoaded  = (user as any)?.profileLoaded === true;
+  const neverLoaded    = profileError && !profileLoaded;
+
+  if (neverLoaded && isHqAdmin(user)) {
     return (
       <>
         <div className="w-full bg-warning-50 border-b border-warning-200 px-6 py-2 flex items-center gap-2 text-warning-700 text-xs font-medium">
           <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-          Profile refresh failed — using cached credentials. Some data may be stale.&nbsp;
+          Profile failed to load on startup — using cached session.&nbsp;
           <button
             onClick={() => window.location.reload()}
             className="underline font-semibold hover:text-warning-800"

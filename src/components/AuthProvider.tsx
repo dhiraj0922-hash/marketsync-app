@@ -18,8 +18,10 @@ export const useAuth = () => useContext(AuthContext);
 // ── Timeouts ─────────────────────────────────────────────────────────────────
 /** Hard limit for the entire initial bootstrap (getSession + loadProfile) */
 const BOOTSTRAP_TIMEOUT_MS = 12_000;
-/** Per-fetch limit for the user_profiles query */
-const PROFILE_TIMEOUT_MS   =  7_000;
+/** Per-fetch limit for the user_profiles query.
+ *  Raised to 15s — Supabase free tier can be slow on cold starts.
+ *  The banner only shows on bootstrap failure, not token-refresh timeouts. */
+const PROFILE_TIMEOUT_MS   = 15_000;
 
 function withTimeout<T>(promise: PromiseLike<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -264,20 +266,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (!isMounted) return;
 
       if (event === "TOKEN_REFRESHED") {
-        // Token refreshed silently. Re-validate the profile in the background
-        // but DO NOT show loading spinner (would flash the screen on every refresh).
-        // Also: if the refetch fails, lastGoodUser ensures we keep the good role.
-        if (session?.user) {
-          console.log("[AUTH] token refresh event — silent profile revalidation  uid=", session.user.id);
-          loadProfile(session.user, /* isBootstrap */ false, 'TOKEN_REFRESHED');
-        }
+        // Token refreshed silently — the JWT is renewed but the profile row
+        // has NOT changed. Skip the profile re-fetch entirely: there is nothing
+        // new to load, and the re-fetch was the source of repeated timeouts and
+        // the repeated banner. lastGoodUser already holds the correct role.
+        console.log("[AUTH] TOKEN_REFRESHED — skipping profile re-fetch (profile unchanged)");
         return;
       }
 
       if (event === "SIGNED_IN" && session?.user) {
-        // New login — set loading so the redirect effect fires cleanly
+        // Supabase fires SIGNED_IN after bootstrap INITIAL_SESSION too.
+        // If we already have a good user (bootstrap loaded it), skip the
+        // redundant re-fetch — it was causing repeated timeouts.
+        if (lastGoodUser.current) {
+          console.log(
+            "[AUTH] SIGNED_IN — user already loaded, skipping duplicate profile fetch  uid=",
+            session.user.id
+          );
+          if (bootstrapDone.current) markLoadingFalse("onAuthStateChange-signed-in-skip");
+          return;
+        }
+        // Fresh login path (no prior user) — load profile and unblock UI
         if (bootstrapDone.current) {
-          console.log("[AUTH] onAuthStateChange SIGNED_IN → loading profile  uid=", session.user.id, "  trigger=SIGNED_IN");
+          console.log("[AUTH] SIGNED_IN — fresh login, loading profile  uid=", session.user.id);
           await loadProfile(session.user, /* isBootstrap */ false, 'SIGNED_IN');
           markLoadingFalse("onAuthStateChange-signed-in");
         }
