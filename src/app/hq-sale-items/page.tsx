@@ -7,7 +7,7 @@ import { Drawer } from "@/components/ui/drawer";
 import {
   PackageCheck, Search, Plus, Edit2, ToggleLeft, ToggleRight,
   TrendingUp, AlertCircle, Loader2, ChevronRight, DollarSign, Factory,
-  CheckCircle2, XCircle, Layers, MapPin, Trash2, PlusCircle, Tag
+  CheckCircle2, XCircle, Layers, MapPin, Trash2, PlusCircle, Tag, Upload
 } from "lucide-react";
 import {
   loadSaleItems, upsertSaleItem, loadRecipes, loadLocations,
@@ -16,6 +16,8 @@ import {
   type SaleItem, type FgLocationPricing
 } from "@/lib/storage";
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
+import { FgImportModal } from "@/components/FgImportModal";
+
 
 // ─── FG category presets ───────────────────────────────────────────────────────
 const CATEGORY_OPTIONS = [
@@ -116,6 +118,9 @@ function HQSaleItemsContent() {
   const [addCatInput, setAddCatInput]   = useState("");
   const [isAddingCat, setIsAddingCat]   = useState(false);
   const [addCatError, setAddCatError]   = useState<string | null>(null);
+
+  // Import modal state
+  const [isImportOpen, setIsImportOpen] = useState(false);
 
   // Drawer state
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
@@ -369,13 +374,22 @@ function HQSaleItemsContent() {
             Manage the catalog that franchise locations requisition from.
           </p>
         </div>
-        <button
-          id="btn-create-sale-item"
-          onClick={openCreate}
-          className="flex items-center gap-2 px-5 py-2.5 text-sm font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 shadow-sm transition-colors"
-        >
-          <Plus className="h-4 w-4" /> New Finished Good
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            id="btn-import-sale-items"
+            onClick={() => setIsImportOpen(true)}
+            className="flex items-center gap-2 px-4 py-2.5 text-sm font-semibold bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 shadow-sm transition-colors"
+          >
+            <Upload className="h-4 w-4" /> Import CSV
+          </button>
+          <button
+            id="btn-create-sale-item"
+            onClick={openCreate}
+            className="flex items-center gap-2 px-5 py-2.5 text-sm font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 shadow-sm transition-colors"
+          >
+            <Plus className="h-4 w-4" /> New Finished Good
+          </button>
+        </div>
       </div>
 
       {/* ── Metrics ────────────────────────────────────────────────────── */}
@@ -966,6 +980,14 @@ function HQSaleItemsContent() {
           )}
         </div>
       </Drawer>
+
+      {/* ── CSV Import Modal ────────────────────────────────────────── */}
+      <FgImportModal
+        isOpen={isImportOpen}
+        onClose={() => setIsImportOpen(false)}
+        existingNames={items.map(i => i.name)}
+        onSuccess={fetchData}
+      />
     </div>
   );
 }
