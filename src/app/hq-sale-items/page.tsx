@@ -17,6 +17,7 @@ import {
 } from "@/lib/storage";
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
 import { FgImportModal } from "@/components/FgImportModal";
+import { FgCostAuditPanel } from "@/components/FgCostAuditPanel";
 
 
 // ─── FG category presets ───────────────────────────────────────────────────────
@@ -411,6 +412,15 @@ function HQSaleItemsContent() {
           </Card>
         ))}
       </div>
+
+      {/* ── Cost Audit ──────────────────────────────────────────────────── */}
+      {items.some(i => !i.makingCost || i.makingCost <= 0) && (
+        <FgCostAuditPanel
+          items={items}
+          recipes={recipes}
+          onCostApplied={fetchData}
+        />
+      )}
 
       {/* ── Stock value banner ───────────────────────────────────────────── */}
       <div className="flex items-center gap-3 bg-gradient-to-r from-brand-600 to-brand-800 text-white rounded-xl px-5 py-4 shadow-sm">
