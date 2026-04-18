@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
@@ -16,6 +16,7 @@ import {
   Upload,
   ChefHat,
   Layers,
+  ShoppingBag,
 } from "lucide-react";
 import {
   loadRecipes,
@@ -26,6 +27,8 @@ import {
   loadProductionHistory,
   saveProductionHistory,
   logMovement,
+  loadSaleItems,
+  updateSaleItemStock,
 } from "@/lib/storage";
 import { normalizeUnit } from "@/lib/units";
 import { FgImportModal } from "@/components/FgImportModal";
@@ -126,32 +129,35 @@ function RecipeBadge({ linked }: { linked: boolean }) {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function FinishedGoods() {
-  const [recipes, setRecipes] = useState<any[]>([]);
-  const [inventoryData, setInventoryData] = useState<any[]>([]);
-  const [requisitions, setRequisitions] = useState<any[]>([]);
+  const [recipes, setRecipes]               = useState<any[]>([]);
+  const [inventoryData, setInventoryData]   = useState<any[]>([]);
+  const [saleItems, setSaleItems]           = useState<any[]>([]); // hq_sale_items
+  const [requisitions, setRequisitions]     = useState<any[]>([]);
   const [productionHistory, setProductionHistory] = useState<any[]>([]);
 
-  const [searchQuery, setSearchQuery] = useState("");
-  const [filterMode, setFilterMode] = useState<FilterMode>("final"); // default: Final Items
+  const [searchQuery, setSearchQuery]   = useState("");
+  const [filterMode, setFilterMode]     = useState<FilterMode>("final");
 
-  const [selectedFG, setSelectedFG] = useState<any>(null);
-  const [produceBatches, setProduceBatches] = useState<number>(1);
+  const [selectedFG, setSelectedFG]             = useState<any>(null);
+  const [produceBatches, setProduceBatches]     = useState<number>(1);
   const [isAutoFulfillMode, setIsAutoFulfillMode] = useState<boolean>(false);
-  const [isImportOpen, setIsImportOpen] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isImportOpen, setIsImportOpen]         = useState(false);
+  const [isLoading, setIsLoading]               = useState(true);
 
   useEffect(() => {
     async function fetchData() {
       setIsLoading(true);
       try {
-        const [rec, inv, req, hist] = await Promise.all([
+        const [rec, inv, si, req, hist] = await Promise.all([
           loadRecipes(),
           loadInventory(),
+          loadSaleItems(),          // hq_sale_items — the bridge
           loadRequisitions(),
           loadProductionHistory(),
         ]);
         setRecipes(Array.isArray(rec) ? rec : []);
         setInventoryData(Array.isArray(inv) ? inv : []);
+        setSaleItems(Array.isArray(si) ? si : []);
         setRequisitions(Array.isArray(req) ? req : []);
         setProductionHistory(Array.isArray(hist) ? hist : []);
       } catch (err) {
@@ -171,17 +177,45 @@ export default function FinishedGoods() {
     );
   }
 
-  // ── All FG / Prep items from inventory_items ─────────────────────────────
-  const finishedGoods = inventoryData.filter(
+  // ── inventory_items FG/Prep base ─────────────────────────────────────────
+  const invFinishedGoods = inventoryData.filter(
     (i) => i.itemType === "Finished Good" || i.itemType === "Preparation"
   );
 
+  // ── Build set of IDs already covered by inventory_items ─────────────────
+  // Used for deduplication: if hq_sale_items.id already exists in
+  // inventory_items, we do NOT add a second virtual item.
+  const invFgIds = new Set(invFinishedGoods.map((i: any) => String(i.id)));
+
+  // ── Adapt hq_sale_items → virtual production items ───────────────────────
+  // _source flag routes stock writes to the correct table in executeProduction.
+  // These items are never written into inventory_items.
+  const saleItemVirtuals = saleItems
+    .filter((si: any) => !invFgIds.has(String(si.id))) // deduplicate by ID
+    .map((si: any) => ({
+      id:       si.id,
+      name:     si.name,
+      inStock:  si.instock ?? si.inStock ?? 0,
+      unit:     si.baseUnit ?? "ea",
+      category: si.category ?? "",
+      itemType: "Finished Good",
+      cost:     si.makingCost ?? 0,
+      locationId: "LOC-HQ",
+      _source:  "hq_sale_items" as const, // ← routing flag, isolated to this page
+    }));
+
+  // ── Merged display list ──────────────────────────────────────────────────
+  // inventory_items items first (existing behaviour), then hq_sale_items adapters.
+  const finishedGoods = [...invFinishedGoods, ...saleItemVirtuals];
+
   // ── Classify each item ───────────────────────────────────────────────────
-  // useMemo equivalent: computed inline from already-loaded data — fast, no re-fetch.
+  // hq_sale_items adapters are always classified "final" (they are sellable output).
   const classMap = classifyItems(finishedGoods, recipes);
+  // Guarantee every hq_sale_items virtual is "final" regardless of recipe graph
+  saleItemVirtuals.forEach((v) => classMap.set(String(v.id), "final"));
 
   // ── Backorder / popularity maps ──────────────────────────────────────────
-  const reqBackorders = new Map<string, number>();
+  const reqBackorders   = new Map<string, number>();
   const requestedCounts = new Map<string, number>();
 
   requisitions.forEach((req) => {
@@ -200,27 +234,20 @@ export default function FinishedGoods() {
     });
   });
 
-  // ── Stats ──────────────────────────────────────────────────────────────
-  let topRequestedId = "N/A";
-  let maxReqs = 0;
-  requestedCounts.forEach((val, id) => {
-    if (val > maxReqs) { maxReqs = val; topRequestedId = id; }
-  });
-  const topRequestedName =
-    finishedGoods.find((fg) => fg.id === topRequestedId)?.name || "N/A";
-
+  // ── Stats ────────────────────────────────────────────────────────────────
   let maxBackorderId = "N/A";
-  let maxBackCount = 0;
+  let maxBackCount   = 0;
   reqBackorders.forEach((val, id) => {
     if (val > maxBackCount) { maxBackCount = val; maxBackorderId = id; }
   });
   const topBackorderName =
     finishedGoods.find((fg) => fg.id === maxBackorderId)?.name || "None";
 
-  const totalSKUs        = finishedGoods.length;
-  const finalCount       = [...classMap.values()].filter((v) => v === "final").length;
-  const prepCount        = [...classMap.values()].filter((v) => v === "prep").length;
-  const totalBackorders  = Array.from(reqBackorders.values()).reduce(
+  const totalSKUs       = finishedGoods.length;
+  const finalCount      = [...classMap.values()].filter((v) => v === "final").length;
+  const prepCount       = [...classMap.values()].filter((v) => v === "prep").length;
+  const hqLinkedCount   = saleItemVirtuals.length;
+  const totalBackorders = Array.from(reqBackorders.values()).reduce(
     (a: number, b: number) => a + b, 0
   );
 
@@ -234,32 +261,38 @@ export default function FinishedGoods() {
   }).length;
 
   // ── Filtering pipeline ───────────────────────────────────────────────────
-  // 1. Classification filter
-  // 2. Search (client-side, name + id, substring case-insensitive)
   const filteredFGs = finishedGoods.filter((fg) => {
     const cls = classMap.get(String(fg.id)) ?? "final";
-
-    // Classification gate
     if (filterMode === "final" && cls !== "final") return false;
     if (filterMode === "prep"  && cls !== "prep")  return false;
-
-    // Search gate
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
-      const matchName = fg.name?.toLowerCase().includes(q);
-      const matchId   = fg.id?.toLowerCase().includes(q);
-      if (!matchName && !matchId) return false;
+      if (!fg.name?.toLowerCase().includes(q) && !fg.id?.toLowerCase().includes(q)) return false;
     }
-
     return true;
   });
+
+  // ── Recipe lookup ───────────────────────────────────────────────────────────
+  // For inventory_items items: exact match on outputItemId.
+  // For hq_sale_items items (no outputItemId link): fall back to name-match.
+  // Defined here (before getProductionConstraints) so both callers can use it.
+  const findRecipeForFg = (fg: any) => {
+    const byId = recipes.find(
+      (r) => r.outputItemId?.toString() === fg.id.toString()
+    );
+    if (byId) return byId;
+    // Name-match fallback only for hq_sale_items items (exact, case-insensitive, trim)
+    if (fg._source === "hq_sale_items") {
+      const norm = fg.name.trim().toLowerCase();
+      return recipes.find((r) => r.name?.trim().toLowerCase() === norm) ?? null;
+    }
+    return null;
+  };
 
   // ── Production constraints ───────────────────────────────────────────────
   // Unchanged from original — no production logic modified.
   const getProductionConstraints = (fg: any, batches: number) => {
-    const recipe = recipes.find(
-      (r) => r.outputItemId?.toString() === fg.id.toString()
-    );
+    const recipe = findRecipeForFg(fg);
     if (!recipe || !recipe.ingredients)
       return { valid: true, shortages: [], maxBatches: -1, yield: 0, ingredientsCheck: [] };
 
@@ -329,18 +362,22 @@ export default function FinishedGoods() {
     ? getProductionConstraints(selectedFG, produceBatches)
     : null;
 
-  // ── Execute Production — unchanged from original ─────────────────────────
+  // (findRecipeForFg and executeProduction are defined below)
+  // Branched on fg._source for stock write:
+  //   'hq_sale_items' → updateSaleItemStock() (writes hq_sale_items.instock)
+  //   undefined/other → saveInventory()       (writes inventory_items, unchanged)
   const executeProduction = async (
     fg: any,
     targetBatches: number,
     autoFulfill: boolean
   ) => {
-    const rule = getProductionConstraints(fg, targetBatches);
-    const recipe = recipes.find(
-      (r) => r.outputItemId?.toString() === fg.id.toString()
-    );
+    const rule   = getProductionConstraints(fg, targetBatches);
+    const recipe = findRecipeForFg(fg);
     if (!recipe || !rule) return;
 
+    const isHqItem = fg._source === "hq_sale_items";
+
+    // ── Deduct raw ingredients from inventory_items (unchanged for both paths)
     const _inv = [...inventoryData];
     recipe.ingredients.forEach((ing: any) => {
       const matchIndex = _inv.findIndex(
@@ -362,11 +399,13 @@ export default function FinishedGoods() {
     });
 
     const yieldAmount = recipe.yieldQty * targetBatches;
+
+    // ── Stock increment — branched on source ─────────────────────────────
+    // inventory_items path: update inStock in _inv[] for saveInventory() below
     const fgIndex = _inv.findIndex(
       (f: any) => f.id.toString() === fg.id.toString()
     );
-
-    if (fgIndex !== -1) {
+    if (!isHqItem && fgIndex !== -1) {
       _inv[fgIndex].inStock += yieldAmount;
       _inv[fgIndex].lastProduced = new Date().toLocaleDateString("en-US", {
         month: "short",
@@ -375,18 +414,19 @@ export default function FinishedGoods() {
       });
     }
 
+    // ── Log production history ───────────────────────────────────────────
     const newLog = {
-      id: `PRD-${1000 + productionHistory.length}`,
-      fgId: fg.id,
-      fgName: fg.name,
-      date: new Date().toLocaleDateString("en-US", {
+      id:      `PRD-${1000 + productionHistory.length}`,
+      fgId:    fg.id,
+      fgName:  fg.name,
+      date:    new Date().toLocaleDateString("en-US", {
         month: "short",
         day: "numeric",
         year: "numeric",
       }),
       batches: targetBatches,
-      yield: yieldAmount,
-      status: "Completed",
+      yield:   yieldAmount,
+      status:  "Completed",
     };
 
     const _hist = [newLog, ...productionHistory];
@@ -399,7 +439,8 @@ export default function FinishedGoods() {
 
     let alertMsg = `Successfully produced ${targetBatches} batches of ${fg.name} yielding ${yieldAmount} ${recipe.yieldUnit}!`;
 
-    if (autoFulfill && fgIndex !== -1) {
+    // ── Auto-fulfill (inventory_items path only — requisitions reference inv IDs)
+    if (autoFulfill && !isHqItem && fgIndex !== -1) {
       const _reqs = [...requisitions];
       let fulfilledTotal = 0;
 
@@ -424,16 +465,11 @@ export default function FinishedGoods() {
                   _inv[fgIndex].inStock = 0;
                   fulfilledTotal += hqStock;
                   allLineItemsDone = false;
-                  return {
-                    ...li,
-                    fulfilledQty: (li.fulfilledQty || 0) + hqStock,
-                  };
+                  return { ...li, fulfilledQty: (li.fulfilledQty || 0) + hqStock };
                 }
               }
             }
-            if ((li.requestedQty - (li.fulfilledQty || 0)) > 0) {
-              allLineItemsDone = false;
-            }
+            if ((li.requestedQty - (li.fulfilledQty || 0)) > 0) allLineItemsDone = false;
             return li;
           });
 
@@ -448,17 +484,36 @@ export default function FinishedGoods() {
         return;
       }
       setRequisitions(_reqs);
-      alertMsg += ` Auto-fulfilled ${fulfilledTotal} ${recipe.yieldUnit} directly to lingering Requisitions.`;
+      alertMsg += ` Auto-fulfilled ${fulfilledTotal} ${recipe.yieldUnit} to open Requisitions.`;
     }
 
-    const invRes = await saveInventory(_inv);
-    if (!invRes?.success) {
-      alert(`Database Error (Save Inventory): ${invRes?.error?.message}`);
-      return;
+    // ── Persist inventory and/or hq_sale_items stock ─────────────────────
+    if (isHqItem) {
+      // hq_sale_items path: increment instock via dedicated fn — no saveInventory() call
+      const stockRes = await updateSaleItemStock(fg.id, yieldAmount);
+      if (!stockRes?.success) {
+        alert(`Database Error (Update HQ Sale Item stock): ${stockRes?.error?.message}`);
+        return;
+      }
+      // Optimistic local update so the UI reflects the new stock without reload
+      setSaleItems((prev: any[]) =>
+        prev.map((si: any) =>
+          si.id === fg.id
+            ? { ...si, instock: (si.instock ?? si.inStock ?? 0) + yieldAmount }
+            : si
+        )
+      );
+    } else {
+      // inventory_items path — unchanged
+      const invRes = await saveInventory(_inv);
+      if (!invRes?.success) {
+        alert(`Database Error (Save Inventory): ${invRes?.error?.message}`);
+        return;
+      }
+      setInventoryData(_inv);
     }
-    setInventoryData(_inv);
 
-    // Fire-and-forget movement logging — unchanged
+    // ── Movement logging (fire-and-forget) ──────────────────────────────
     (async () => {
       for (const ing of recipe.ingredients) {
         const rawItem = inventoryData.find(
@@ -468,40 +523,35 @@ export default function FinishedGoods() {
 
         let normalizedQty = 0;
         try {
-          normalizedQty =
-            normalizeUnit(ing.qty, ing.unit, rawItem.unit) * targetBatches;
+          normalizedQty = normalizeUnit(ing.qty, ing.unit, rawItem.unit) * targetBatches;
         } catch {
           normalizedQty = ing.qty * targetBatches;
         }
         if (normalizedQty <= 0) continue;
 
         await logMovement({
-          locationId: rawItem.locationId ?? "LOC-HQ",
-          itemId: String(rawItem.id),
+          locationId:   rawItem.locationId ?? "LOC-HQ",
+          itemId:       String(rawItem.id),
           movementType: "cogs_out",
-          quantity: normalizedQty,
-          unitCost: rawItem.cost ?? null,
+          quantity:     normalizedQty,
+          unitCost:     rawItem.cost ?? null,
           referenceType: "production",
-          referenceId: newLog.id,
+          referenceId:  newLog.id,
           notes: `Production run: ${targetBatches}x ${fg.name} — consumed ${normalizedQty} ${rawItem.unit} ${rawItem.name}`,
         });
       }
 
-      const fgItem = inventoryData.find(
-        (f: any) => f.id.toString() === fg.id.toString()
-      );
-      if (fgItem && yieldAmount > 0) {
-        await logMovement({
-          locationId: fgItem.locationId ?? "LOC-HQ",
-          itemId: String(fgItem.id),
-          movementType: "production_in",
-          quantity: yieldAmount,
-          unitCost: fgItem.cost ?? null,
-          referenceType: "production",
-          referenceId: newLog.id,
-          notes: `Production output: ${targetBatches} batches of ${fg.name}`,
-        });
-      }
+      // production_in log — works for both sources (item_id is TEXT, no FK)
+      await logMovement({
+        locationId:   fg.locationId ?? "LOC-HQ",
+        itemId:       String(fg.id),
+        movementType: "production_in",
+        quantity:     yieldAmount,
+        unitCost:     fg.cost ?? null,
+        referenceType: "production",
+        referenceId:  newLog.id,
+        notes: `Production output: ${targetBatches} batches of ${fg.name}${isHqItem ? " [hq_sale_items]" : ""}`,
+      });
     })();
 
     setSelectedFG(null);
@@ -513,9 +563,7 @@ export default function FinishedGoods() {
   const openAutoFulfillModule = (e: any, fg: any) => {
     e.stopPropagation();
     const demand = reqBackorders.get(fg.id) || 0;
-    const recipe = recipes.find(
-      (r) => r.outputItemId?.toString() === fg.id.toString()
-    );
+    const recipe = findRecipeForFg(fg);
 
     if (demand <= 0 || !recipe) {
       alert("No open backorders found for this item, or Recipe is missing.");
@@ -553,9 +601,9 @@ export default function FinishedGoods() {
       {/* ── Metrics ──────────────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          { label: "Total SKUs",             value: totalSKUs.toString(),      color: "text-neutral-900" },
-          { label: "Final Items",            value: finalCount.toString(),     color: "text-brand-600" },
-          { label: "Highest Backorder Item", value: topBackorderName,          color: "text-amber-600" },
+          { label: "Total SKUs",             value: totalSKUs.toString(),       color: "text-neutral-900" },
+          { label: "Final Items",            value: finalCount.toString(),      color: "text-brand-600" },
+          { label: "HQ Catalog Items",       value: hqLinkedCount.toString(),   color: "text-violet-600" },
           { label: "Total Backorder Volume", value: totalBackorders.toString(), color: "text-red-600" },
         ].map((stat, i) => (
           <Card key={i} className="shadow-sm border-neutral-200">
@@ -629,11 +677,10 @@ export default function FinishedGoods() {
             <TableBody>
               {filteredFGs.length > 0 ? (
                 filteredFGs.map((fg) => {
-                  const cls       = classMap.get(String(fg.id)) ?? "final";
-                  const recipe    = recipes.find(
-                    (r: any) => r.outputItemId?.toString() === fg.id.toString()
-                  );
-                  const hasRecipe = !!recipe;
+                  const cls        = classMap.get(String(fg.id)) ?? "final";
+                  const recipe     = findRecipeForFg(fg);
+                  const hasRecipe  = !!recipe;
+                  const isHqSource = fg._source === "hq_sale_items";
                   const backorders = reqBackorders.get(fg.id) || 0;
                   const available  = Math.max(0, fg.inStock - backorders);
 
@@ -647,9 +694,16 @@ export default function FinishedGoods() {
                         <div className="flex items-center gap-2">
                           <Factory className="h-4 w-4 text-neutral-300 shrink-0" />
                           <div>
-                            <p className="font-semibold text-neutral-900 leading-tight">
-                              {fg.name}
-                            </p>
+                            <div className="flex items-center gap-1.5">
+                              <p className="font-semibold text-neutral-900 leading-tight">
+                                {fg.name}
+                              </p>
+                              {isHqSource && (
+                                <span className="inline-flex items-center gap-0.5 text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-violet-50 text-violet-700 border border-violet-200 whitespace-nowrap">
+                                  <ShoppingBag className="h-2 w-2" /> HQ Catalog
+                                </span>
+                              )}
+                            </div>
                             <p className="text-[10px] text-neutral-400 font-mono mt-0.5">
                               {fg.id}
                             </p>
