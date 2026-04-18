@@ -28,6 +28,7 @@ import {
   LayoutDashboard,
   Package,
   ClipboardList,
+  ClipboardCheck,
   ShoppingCart,
   Truck,
   ChefHat,
@@ -60,12 +61,13 @@ const navigation: NavItem[] = [
   { name: "Requisitions",  href: "/requisitions",  icon: Inbox },
   { name: "Suppliers",     href: "/suppliers",     icon: Truck },
   // ── HQ-only ─────────────────────────────────────────────────────────────────
-  { name: "Finished Goods", href: "/hq-sale-items", icon: PackageCheck, hqOnly: true },
-  { name: "Production",    href: "/finished-goods", icon: Factory,      hqOnly: true },
-  { name: "Recipes",       href: "/recipes",        icon: ChefHat,      hqOnly: true },
-  { name: "Reports",       href: "/reports",        icon: BarChart4,    hqOnly: true },
-  { name: "Users",         href: "/users",          icon: Users,        hqOnly: true },
-  { name: "Settings",      href: "/settings",       icon: Settings,     hqOnly: true },
+  { name: "Finished Goods", href: "/hq-sale-items", icon: PackageCheck,   hqOnly: true },
+  { name: "FG Count",       href: "/fg-count",      icon: ClipboardCheck, hqOnly: true },
+  { name: "Production",    href: "/finished-goods", icon: Factory,        hqOnly: true },
+  { name: "Recipes",       href: "/recipes",        icon: ChefHat,        hqOnly: true },
+  { name: "Reports",       href: "/reports",        icon: BarChart4,      hqOnly: true },
+  { name: "Users",         href: "/users",          icon: Users,          hqOnly: true },
+  { name: "Settings",      href: "/settings",       icon: Settings,       hqOnly: true },
 ];
 
 export function Sidebar() {
