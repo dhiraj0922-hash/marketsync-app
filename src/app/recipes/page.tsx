@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
@@ -94,6 +94,20 @@ function RecipesPageContent() {
   const [ingSearch, setIngSearch]         = useState("");
   const [ingPanelOpen, setIngPanelOpen]   = useState(false);
   const [suppliersData, setSuppliersData] = useState<any[]>([]);
+  // Ref to the search input so we can measure its viewport position for the fixed dropdown
+  const ingInputRef = useRef<HTMLInputElement>(null);
+  // Anchor rect: top/left/width captured at open time, used for fixed positioning
+  const [ingAnchor, setIngAnchor] = useState<{ top: number; left: number; width: number } | null>(null);
+
+  // Close the panel when the drawer body scrolls (prevents dropdown drifting)
+  useEffect(() => {
+    if (!ingPanelOpen) return;
+    const scrollEl = ingInputRef.current?.closest('[class*="overflow-y-auto"]') as HTMLElement | null;
+    if (!scrollEl) return;
+    const close = () => setIngPanelOpen(false);
+    scrollEl.addEventListener("scroll", close, { passive: true });
+    return () => scrollEl.removeEventListener("scroll", close);
+  }, [ingPanelOpen]);
 
   // Delete confirmation state
   const [deleteTarget, setDeleteTarget] = useState<any | null>(null); // recipe pending deletion
@@ -906,16 +920,31 @@ function RecipesPageContent() {
                       )
                     : inventory;
                   const selectedItem = inventory.find((i: any) => i.id.toString() === selectedInvId);
+
+                  // Open panel: capture anchor rect so the fixed dropdown aligns to the input
+                  const openPanel = () => {
+                    if (ingInputRef.current) {
+                      const r = ingInputRef.current.getBoundingClientRect();
+                      setIngAnchor({ top: r.bottom + 4, left: r.left, width: r.width });
+                    }
+                    setIngPanelOpen(true);
+                  };
+
                   return (
                     <div className="relative mt-1">
                       <div className="flex items-center gap-2">
                         <div className="relative flex-1">
                           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-neutral-400 pointer-events-none" />
                           <input
+                            ref={ingInputRef}
                             type="text"
                             value={ingSearch}
-                            onChange={e => { setIngSearch(e.target.value); setIngPanelOpen(true); setSelectedInvId(""); }}
-                            onFocus={() => setIngPanelOpen(true)}
+                            onChange={e => {
+                              setIngSearch(e.target.value);
+                              setSelectedInvId("");
+                              openPanel();
+                            }}
+                            onFocus={openPanel}
                             onKeyDown={e => {
                               if (e.key === "Enter" && selectedInvId) { addIngredient(); setIngSearch(""); setIngPanelOpen(false); }
                               if (e.key === "Escape") setIngPanelOpen(false);
@@ -932,10 +961,27 @@ function RecipesPageContent() {
                           {selectedItem ? `+ ${selectedItem.name}` : "Append"}
                         </button>
                       </div>
-                      {ingPanelOpen && (
+
+                      {/* Fixed-position dropdown — escapes overflow-y-auto clipping */}
+                      {ingPanelOpen && ingAnchor && (
                         <>
-                          <div className="fixed inset-0 z-10" onClick={() => setIngPanelOpen(false)} />
-                          <div className="absolute left-0 right-0 top-[calc(100%+4px)] z-20 bg-white border border-neutral-200 rounded-xl shadow-2xl overflow-y-auto max-h-72">
+                          {/* Invisible backdrop: closes panel on outside click */}
+                          <div
+                            className="fixed inset-0"
+                            style={{ zIndex: 9998 }}
+                            onClick={() => setIngPanelOpen(false)}
+                          />
+                          <div
+                            className="bg-white border border-neutral-200 rounded-xl shadow-2xl overflow-y-auto"
+                            style={{
+                              position: "fixed",
+                              top:      ingAnchor.top,
+                              left:     ingAnchor.left,
+                              width:    ingAnchor.width,
+                              maxHeight: "260px",
+                              zIndex:   9999,
+                            }}
+                          >
                             {filtered.length === 0 ? (
                               <div className="px-4 py-6 text-center text-sm text-neutral-400">No items match your search.</div>
                             ) : (
