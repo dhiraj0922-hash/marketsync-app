@@ -515,6 +515,11 @@ function RecipesPageContent() {
                   </TableCell>
                   <TableCell className="py-4 text-right">
                     <p className="font-bold text-neutral-900">${(recipe.theoreticalCost || 0).toFixed(2)}</p>
+                    {(recipe.yieldQty > 0) && (
+                      <p className="text-xs text-brand-600 font-semibold mt-0.5">
+                        ${((recipe.theoreticalCost || 0) / recipe.yieldQty).toFixed(2)}&nbsp;/&nbsp;{recipe.yieldUnit || "unit"}
+                      </p>
+                    )}
                     <p className="text-[10px] uppercase text-neutral-400 font-semibold tracking-wider mt-1">{recipe.margin}% target margin</p>
                   </TableCell>
                   <TableCell className="pr-6 py-4 text-right">
