@@ -10,7 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
 import { Search, Plus, Upload, MoreHorizontal, ShoppingCart, History, Save, Trash2, ArrowDown, ArrowUp, AlertTriangle, X, Download, Loader2 } from "lucide-react";
-import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId, logMovement, deleteInventoryItem, deleteSaleItemByNameOrId } from "@/lib/storage";
+import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId, logMovement, deleteInventoryItem, deleteSaleItemByNameOrId, insertPurchaseOptions } from "@/lib/storage";
 
 export default function Inventory() {
   const router = useRouter();
@@ -75,6 +75,15 @@ export default function Inventory() {
   // History & Batch States
   const [importBatches, setImportBatches] = useState<any[]>([]);
   const [isHistoryDrawerOpen, setIsHistoryDrawerOpen] = useState(false);
+
+  // ── Supplier Import State ────────────────────────────────────────────────────
+  const supplierFileInputRef = useRef<HTMLInputElement>(null);
+  const [isSupplierImportDrawerOpen, setIsSupplierImportDrawerOpen] = useState(false);
+  const [supplierImportPreview, setSupplierImportPreview] = useState<any[]>([]);  // matched rows
+  const [supplierImportUnmatched, setSupplierImportUnmatched] = useState<any[]>([]); // unmatched rows
+  const [supplierImportErrors, setSupplierImportErrors] = useState<string[]>([]);
+  const [isCommittingSuppliers, setIsCommittingSuppliers] = useState(false);
+  const [supplierImportSummary, setSupplierImportSummary] = useState<any>(null);
 
   // Bulk Output States
   const [selectedItemIds, setSelectedItemIds] = useState<number[]>([]);
@@ -1076,6 +1085,213 @@ export default function Inventory() {
     }
   };
 
+  // ── Supplier CSV Import ────────────────────────────────────────────────────
+  //
+  // Expected CSV columns (order-independent — detected by header name):
+  //   supplier_name | supplier | vendor
+  //   supplier_product_name | product_name | product | description
+  //   item_name | item | name | inventory_name
+  //   purchase_uom | uom | unit
+  //   pack_qty | pack_quantity | qty_per_pack
+  //   pack_uom | inner_uom | inner_unit
+  //   unit_price | price | cost
+  //   is_preferred | preferred
+  //
+  // Normalization rules applied to item_name before matching:
+  //   1. toLowerCase()
+  //   2. trim()
+  //   3. collapse multiple spaces → single space
+  //   4. remove trailing qualifiers: units/sizes like "1 kg", "10kg", "55lbs"
+  //     (keeps the semantic product name only)
+  //
+  const handleSupplierCSVUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setSupplierImportSummary(null);
+
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      const text = event.target?.result as string;
+      const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+      if (lines.length < 2) {
+        setSupplierImportErrors(['Uploaded file has no data rows.']);
+        return;
+      }
+
+      // ── Parse CSV header (comma or semicolon delimited) ─────────────────────
+      const delimiter = lines[0].includes(';') ? ';' : ',';
+      const parseRow = (row: string) =>
+        row.split(delimiter).map(c => c.trim().replace(/^"|"$/g, '').trim());
+
+      const headers = parseRow(lines[0]).map(h => h.toLowerCase().replace(/\s+/g, '_'));
+
+      const colIdx = (candidates: string[]): number => {
+        for (const c of candidates) {
+          const i = headers.indexOf(c);
+          if (i !== -1) return i;
+        }
+        return -1;
+      };
+
+      const COL = {
+        supplierName:        colIdx(['supplier_name', 'supplier', 'vendor', 'supplier_company']),
+        supplierProductName: colIdx(['supplier_product_name', 'product_name', 'product', 'description', 'supplier_description']),
+        itemName:            colIdx(['item_name', 'item', 'name', 'inventory_name', 'ingredient', 'ingredient_name']),
+        purchaseUom:         colIdx(['purchase_uom', 'uom', 'unit', 'buy_unit', 'order_unit']),
+        packQty:             colIdx(['pack_qty', 'pack_quantity', 'qty_per_pack', 'pack_size', 'quantity_per_pack']),
+        packUom:             colIdx(['pack_uom', 'inner_uom', 'inner_unit', 'unit_of_inner']),
+        unitPrice:           colIdx(['unit_price', 'price', 'cost', 'purchase_price', 'supplier_price']),
+        isPreferred:         colIdx(['is_preferred', 'preferred', 'default_supplier']),
+      };
+
+      // Require at minimum: supplier_name, item_name, unit_price
+      const missing: string[] = [];
+      if (COL.supplierName  < 0) missing.push('supplier_name (or: supplier / vendor)');
+      if (COL.itemName      < 0) missing.push('item_name (or: item / name / inventory_name)');
+      if (COL.unitPrice     < 0) missing.push('unit_price (or: price / cost)');
+      if (missing.length > 0) {
+        setSupplierImportErrors([
+          `Required columns not found in CSV header.`,
+          `Missing: ${missing.join(', ')}`,
+          `Detected headers: ${headers.join(', ')}`,
+        ]);
+        setSupplierImportPreview([]);
+        setSupplierImportUnmatched([]);
+        return;
+      }
+
+      // ── Build normalized name → inventory_items.id lookup map ──────────────
+      // Load fresh from DB so we always match against actual persisted rows.
+      const allItems = await loadInventory();
+      console.log(`[SupplierImport] Loaded ${allItems.length} inventory_items for matching`);
+
+      // Normalization: lowercase → trim → collapse spaces → strip trailing size tokens
+      // (e.g. "Cloves 1 KG" → "cloves", "Beef Chuck 55LBS" → "beef chuck")
+      const normalizeItemName = (raw: string): string => {
+        let s = raw.toLowerCase().trim();
+        s = s.replace(/\s+/g, ' ');                          // collapse spaces
+        s = s.replace(/\s+\d+(\.\d+)?\s*(kg|g|lb|lbs|l|ml|oz|ea|pcs|pk|pack|bag|case|box)$/i, ''); // strip trailing size
+        s = s.replace(/\s+\d+(\.\d+)?(kg|g|lb|lbs|l|ml|oz)$/i, ''); // no-space variant: "cloves1kg"
+        return s.trim();
+      };
+
+      // Primary map: normalizedName → id
+      const nameToId = new Map<string, string>();
+      // Secondary map: normalizedName → original row (for debug)
+      const nameToRow = new Map<string, any>();
+      for (const item of allItems) {
+        const norm = normalizeItemName(item.name || '');
+        if (norm && !nameToId.has(norm)) {
+          nameToId.set(norm, String(item.id));
+          nameToRow.set(norm, item);
+        }
+      }
+      console.log(`[SupplierImport] Name lookup map: ${nameToId.size} entries`);
+
+      // ── Parse data rows ─────────────────────────────────────────────────────
+      const matched: any[]   = [];
+      const unmatched: any[] = [];
+      const parseErrors: string[] = [];
+
+      for (const [idx, line] of lines.slice(1).entries()) {
+        const cols = parseRow(line);
+        const rowNum = idx + 2;
+
+        const rawSupplierName = COL.supplierName >= 0 ? (cols[COL.supplierName] ?? '').trim() : '';
+        const rawItemName     = COL.itemName     >= 0 ? (cols[COL.itemName]     ?? '').trim() : '';
+        const rawPrice        = COL.unitPrice    >= 0 ? (cols[COL.unitPrice]    ?? '').trim() : '0';
+
+        if (!rawItemName) {
+          parseErrors.push(`Row ${rowNum}: empty item name — skipped.`);
+          continue;
+        }
+        if (!rawSupplierName) {
+          parseErrors.push(`Row ${rowNum}: empty supplier name for "${rawItemName}" — skipped.`);
+          continue;
+        }
+
+        const normItemName = normalizeItemName(rawItemName);
+        const inventoryItemId = nameToId.get(normItemName) ?? null;
+
+        const row = {
+          rowNum,
+          rawItemName,
+          normItemName,
+          inventoryItemId,
+          supplierName:        rawSupplierName,
+          supplierProductName: COL.supplierProductName >= 0 ? (cols[COL.supplierProductName] ?? '').trim() || null : null,
+          purchaseUom:         COL.purchaseUom  >= 0 ? (cols[COL.purchaseUom]  ?? '').trim() || 'ea'  : 'ea',
+          packQty:             COL.packQty      >= 0 ? (parseFloat(cols[COL.packQty]  ?? '') || null)  : null,
+          packUom:             COL.packUom      >= 0 ? (cols[COL.packUom]  ?? '').trim() || null : null,
+          unitPrice:           parseFloat(rawPrice) || 0,
+          isPreferred:         COL.isPreferred  >= 0
+            ? ['true', '1', 'yes', 'y'].includes((cols[COL.isPreferred] ?? '').trim().toLowerCase())
+            : false,
+        };
+
+        console.log(
+          `[SupplierImport] Row ${rowNum}: "${rawItemName}" → norm="${normItemName}"` +
+          ` | matched=${inventoryItemId ? `YES (${inventoryItemId})` : 'NO'}` +
+          ` | supplier="${rawSupplierName}" | price=${row.unitPrice}`
+        );
+
+        if (inventoryItemId) {
+          matched.push(row);
+        } else {
+          unmatched.push(row);
+        }
+      }
+
+      setSupplierImportPreview(matched);
+      setSupplierImportUnmatched(unmatched);
+      setSupplierImportErrors(parseErrors);
+      setSupplierImportSummary(null); // clear previous run summary
+
+      console.log(
+        `[SupplierImport] Parse complete: ${matched.length} matched, ${unmatched.length} unmatched, ${parseErrors.length} parse errors`
+      );
+    };
+    reader.readAsText(file);
+  };
+
+  const commitSupplierImport = async () => {
+    if (supplierImportPreview.length === 0) return;
+    setIsCommittingSuppliers(true);
+    setSupplierImportErrors([]);
+    try {
+      const rows = supplierImportPreview.map(r => ({
+        inventoryItemId:     r.inventoryItemId,
+        supplierName:        r.supplierName,
+        supplierProductName: r.supplierProductName ?? null,
+        purchaseUom:         r.purchaseUom || 'ea',
+        packQty:             r.packQty,
+        packUom:             r.packUom,
+        unitPrice:           r.unitPrice,
+        isPreferred:         r.isPreferred,
+      }));
+
+      const res = await insertPurchaseOptions(rows);
+      if (!res.success) {
+        setSupplierImportErrors([`DB insert failed: ${(res as any).error?.message ?? 'Unknown error'}`]);
+        return;
+      }
+
+      const summary = {
+        total:     supplierImportPreview.length + supplierImportUnmatched.length,
+        matched:   supplierImportPreview.length,
+        inserted:  supplierImportPreview.length,
+        unmatched: supplierImportUnmatched.length,
+      };
+      setSupplierImportSummary(summary);
+      setSupplierImportPreview([]);
+      console.log('[SupplierImport] Committed:', summary);
+    } catch (err: any) {
+      setSupplierImportErrors([`Fatal error: ${err.message}`]);
+    } finally {
+      setIsCommittingSuppliers(false);
+    }
+  };
+
   const revertBatch = async (batchId: string) => {
     const batchIdx = importBatches.findIndex(b => b.batchId === batchId);
     const batch = importBatches[batchIdx];
@@ -1152,7 +1368,19 @@ export default function Inventory() {
             }}
             className="flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 w-full sm:w-auto shadow-sm"
           >
-            <Upload className="h-4 w-4" /> Import
+            <Upload className="h-4 w-4" /> Import Inventory
+          </button>
+          <button
+            onClick={() => {
+              setSupplierImportPreview([]);
+              setSupplierImportUnmatched([]);
+              setSupplierImportErrors([]);
+              setSupplierImportSummary(null);
+              setIsSupplierImportDrawerOpen(true);
+            }}
+            className="flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium bg-violet-600 text-white rounded-lg hover:bg-violet-700 w-full sm:w-auto shadow-sm transition-colors"
+          >
+            <Upload className="h-4 w-4" /> Import Suppliers
           </button>
           <button 
             onClick={() => setIsAddDrawerOpen(true)}
@@ -2333,6 +2561,189 @@ export default function Inventory() {
            })()}
         </div>
       </Drawer>
+
+      {/* ── Supplier Import Drawer ──────────────────────────────────────────── */}
+      <Drawer
+        isOpen={isSupplierImportDrawerOpen}
+        onClose={() => setIsSupplierImportDrawerOpen(false)}
+        title="Import Supplier Pricing"
+        footer={
+          supplierImportPreview.length > 0 ? (
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setIsSupplierImportDrawerOpen(false)}
+                className="px-4 py-2 text-sm font-medium bg-neutral-100 text-neutral-700 rounded-lg hover:bg-neutral-200"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={commitSupplierImport}
+                disabled={isCommittingSuppliers}
+                className="px-4 py-2 text-sm font-bold bg-violet-600 text-white rounded-lg hover:bg-violet-700 disabled:opacity-50 flex items-center gap-2"
+              >
+                {isCommittingSuppliers && <Loader2 className="h-4 w-4 animate-spin" />}
+                {isCommittingSuppliers
+                  ? 'Inserting…'
+                  : `Insert ${supplierImportPreview.length} Supplier Row${supplierImportPreview.length !== 1 ? 's' : ''}`}
+              </button>
+            </div>
+          ) : null
+        }
+      >
+        <div className="space-y-5 p-1">
+
+          {/* Post-commit summary */}
+          {supplierImportSummary && (
+            <div className="rounded-lg bg-green-50 border border-green-200 p-4 space-y-1">
+              <p className="text-sm font-bold text-green-800">✓ Import complete</p>
+              <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-green-700 mt-1">
+                <span>Total CSV rows</span>   <span className="font-semibold">{supplierImportSummary.total}</span>
+                <span>Matched &amp; inserted</span> <span className="font-semibold">{supplierImportSummary.inserted}</span>
+                <span>Unmatched (skipped)</span><span className="font-semibold">{supplierImportSummary.unmatched}</span>
+              </div>
+              {supplierImportSummary.unmatched > 0 && (
+                <p className="text-xs text-amber-700 mt-2">
+                  {supplierImportSummary.unmatched} rows could not be matched to an inventory item. Review the unmatched section below, fix item names in your CSV, and re-import.
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* ── Step 1: Upload ── */}
+          <div className="space-y-2">
+            <h3 className="text-sm font-semibold text-neutral-800">1. Upload supplier CSV</h3>
+            <p className="text-xs text-neutral-500 leading-relaxed">
+              Columns are detected by header name (case-insensitive, comma or semicolon delimited).
+              Required: <code className="bg-neutral-100 px-1 rounded">supplier_name</code>,{' '}
+              <code className="bg-neutral-100 px-1 rounded">item_name</code>,{' '}
+              <code className="bg-neutral-100 px-1 rounded">unit_price</code>.<br />
+              Optional: <code className="bg-neutral-100 px-1 rounded">supplier_product_name</code>,{' '}
+              <code className="bg-neutral-100 px-1 rounded">purchase_uom</code>,{' '}
+              <code className="bg-neutral-100 px-1 rounded">pack_qty</code>,{' '}
+              <code className="bg-neutral-100 px-1 rounded">pack_uom</code>,{' '}
+              <code className="bg-neutral-100 px-1 rounded">is_preferred</code>.
+            </p>
+            <label className="flex items-center gap-2 px-4 py-2 w-fit text-sm font-medium bg-violet-600 text-white rounded-lg cursor-pointer hover:bg-violet-700 transition-colors">
+              <Upload className="h-4 w-4" />
+              Choose CSV file
+              <input
+                ref={supplierFileInputRef}
+                type="file"
+                accept=".csv"
+                className="hidden"
+                onChange={handleSupplierCSVUpload}
+                onClick={(e) => { (e.target as HTMLInputElement).value = ''; }}
+              />
+            </label>
+          </div>
+
+          {/* Parse errors */}
+          {supplierImportErrors.length > 0 && (
+            <div className="rounded-lg bg-red-50 border border-red-200 p-3 space-y-1">
+              <p className="text-xs font-semibold text-red-700">Parse errors</p>
+              {supplierImportErrors.map((e, i) => (
+                <p key={i} className="text-xs text-red-600">{e}</p>
+              ))}
+            </div>
+          )}
+
+          {/* ── Step 2: Matched preview ── */}
+          {supplierImportPreview.length > 0 && (
+            <div className="space-y-2">
+              <h3 className="text-sm font-semibold text-neutral-800">
+                2. Matched rows — ready to insert
+                <span className="ml-2 text-xs font-normal text-green-700 bg-green-50 border border-green-200 px-2 py-0.5 rounded-full">
+                  {supplierImportPreview.length} rows
+                </span>
+              </h3>
+              <div className="overflow-x-auto rounded-lg border border-neutral-200 max-h-72">
+                <table className="w-full text-xs">
+                  <thead className="bg-neutral-50 sticky top-0">
+                    <tr>
+                      <th className="px-3 py-2 text-left font-semibold text-neutral-600">CSV Item Name</th>
+                      <th className="px-3 py-2 text-left font-semibold text-neutral-600">Matched Inventory Item</th>
+                      <th className="px-3 py-2 text-left font-semibold text-neutral-600">Supplier</th>
+                      <th className="px-3 py-2 text-left font-semibold text-neutral-600">UOM</th>
+                      <th className="px-3 py-2 text-right font-semibold text-neutral-600">Unit Price</th>
+                      <th className="px-3 py-2 text-center font-semibold text-neutral-600">Preferred</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {supplierImportPreview.map((r, i) => {
+                      const invItem = inventoryData.find(x => String(x.id) === r.inventoryItemId);
+                      return (
+                        <tr key={i} className="border-t border-neutral-100 hover:bg-neutral-50">
+                          <td className="px-3 py-2 text-neutral-500">{r.rawItemName}</td>
+                          <td className="px-3 py-2 font-medium text-neutral-800">{invItem?.name ?? r.inventoryItemId}</td>
+                          <td className="px-3 py-2 text-neutral-700">{r.supplierName}</td>
+                          <td className="px-3 py-2 text-neutral-600">{r.purchaseUom}{r.packQty ? ` (${r.packQty}${r.packUom ? ' ' + r.packUom : ''})` : ''}</td>
+                          <td className="px-3 py-2 text-right font-mono">${r.unitPrice.toFixed(2)}</td>
+                          <td className="px-3 py-2 text-center">{r.isPreferred ? '★' : ''}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* ── Step 3: Unmatched review ── */}
+          {supplierImportUnmatched.length > 0 && (
+            <div className="space-y-2">
+              <h3 className="text-sm font-semibold text-amber-700 flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4" />
+                Unmatched rows — will NOT be inserted
+                <span className="text-xs font-normal bg-amber-50 border border-amber-200 text-amber-700 px-2 py-0.5 rounded-full">
+                  {supplierImportUnmatched.length} rows
+                </span>
+              </h3>
+              <p className="text-xs text-neutral-500">
+                These rows could not be matched to any inventory item by name.
+                Fix the <code className="bg-neutral-100 px-1 rounded">item_name</code> column in your CSV
+                to match the canonical name in inventory_items, then re-upload.
+              </p>
+              <div className="overflow-x-auto rounded-lg border border-amber-200 max-h-56 bg-amber-50">
+                <table className="w-full text-xs">
+                  <thead className="bg-amber-100 sticky top-0">
+                    <tr>
+                      <th className="px-3 py-2 text-left font-semibold text-amber-800">Row</th>
+                      <th className="px-3 py-2 text-left font-semibold text-amber-800">CSV Item Name</th>
+                      <th className="px-3 py-2 text-left font-semibold text-amber-800">Normalized Match Attempt</th>
+                      <th className="px-3 py-2 text-left font-semibold text-amber-800">Supplier</th>
+                      <th className="px-3 py-2 text-right font-semibold text-amber-800">Price</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {supplierImportUnmatched.map((r, i) => (
+                      <tr key={i} className="border-t border-amber-200">
+                        <td className="px-3 py-2 text-amber-600">{r.rowNum}</td>
+                        <td className="px-3 py-2 text-amber-800 font-medium">{r.rawItemName}</td>
+                        <td className="px-3 py-2 font-mono text-amber-600">{r.normItemName}</td>
+                        <td className="px-3 py-2 text-amber-700">{r.supplierName}</td>
+                        <td className="px-3 py-2 text-right font-mono text-amber-700">${r.unitPrice.toFixed(2)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Empty state */}
+          {supplierImportPreview.length === 0 && supplierImportUnmatched.length === 0 && !supplierImportSummary && supplierImportErrors.length === 0 && (
+            <div className="flex flex-col items-center justify-center py-12 text-center space-y-2">
+              <Upload className="h-10 w-10 text-neutral-300" />
+              <p className="text-sm font-medium text-neutral-500">Upload a supplier CSV to begin</p>
+              <p className="text-xs text-neutral-400">
+                Each row maps a supplier price to an inventory item.<br />
+                Item names are normalized before matching (size suffixes like "1 KG", "55LBS" are stripped).
+              </p>
+            </div>
+          )}
+        </div>
+      </Drawer>
+
     </div>
   );
 }
