@@ -4,6 +4,7 @@ import { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/components/AuthProvider";
 import { isHqAdmin, resolveLocationId } from "@/lib/roles";
+import { useActiveLocation } from "@/components/LocationContext";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
@@ -14,6 +15,7 @@ import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActiv
 export default function Inventory() {
   const router = useRouter();
   const { user } = useAuth();   // role + locationId from user_profiles
+  const { activeLocation } = useActiveLocation(); // HQ admin location picker
   const [inventoryData, setInventoryData] = useState<any[]>([]);
   const [activityData, setActivityData] = useState<Record<string, any[]>>({});
   const [categories, setCategories] = useState<string[]>([]);
@@ -542,13 +544,38 @@ export default function Inventory() {
       return;
     }
 
-    // HQ admins always write to LOC-HQ; location managers use their assigned location.
-    const locationId: string = resolveLocationId(user);
+    // ── Resolve location_id for this new item ──────────────────────────────
+    //
+    // HQ admins MUST have picked a specific location from the header dropdown.
+    // If they are still in "All Locations (HQ View)" mode, block creation and
+    // show a friendly message — a null location_id would violate NOT NULL.
+    //
+    // Location managers: always use their profile's fixed locationId.
+    let locationId: string;
 
-    // Always log so the real values are visible in the console.
-    console.log("[AddItem] role=", user?.role, " locationId=", user?.locationId, " → resolved location_id=", locationId, " isHqAdmin=", isHqAdmin(user));
+    if (isHqAdmin(user)) {
+      if (!activeLocation) {
+        alert(
+          "Please select a specific location before creating an inventory item.\n\n" +
+          "Use the location dropdown in the top header (currently showing \"All Locations (HQ View)\").\n" +
+          "Select the location where this item will be stocked, then try again."
+        );
+        return;
+      }
+      locationId = activeLocation.id;
+    } else {
+      locationId = resolveLocationId(user);
+    }
 
-    // Should never be empty after resolveLocationId, but guard defensively
+    // Debug logging — confirms exact values sent to DB
+    console.log(
+      "[AddItem] role=", user?.role,
+      "| user.locationId=", user?.locationId,
+      "| activeLocation=", activeLocation,
+      "| → resolved location_id =", locationId,
+      "| isHqAdmin=", isHqAdmin(user)
+    );
+
     if (!locationId) {
       alert("Your profile has no location assigned. Cannot add item.");
       return;

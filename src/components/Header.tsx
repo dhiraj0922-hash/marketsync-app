@@ -1,10 +1,12 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { Bell, Search, MapPin, ChevronDown, LogOut, User } from "lucide-react";
+import { Bell, Search, MapPin, ChevronDown, LogOut, User, Check } from "lucide-react";
 import { useAuth } from "./AuthProvider";
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { isHqAdmin, accessScopeLabel } from "@/lib/roles";
+import { useActiveLocation, type LocationOption } from "./LocationContext";
+import { loadLocations } from "@/lib/storage";
 
 const getPageTitle = (pathname: string) => {
   if (pathname === "/") return "Overview";
@@ -16,39 +18,132 @@ export function Header() {
   const pathname = usePathname();
   const title = getPageTitle(pathname);
   const { user, signOut } = useAuth();
+  const { activeLocation, setActiveLocation } = useActiveLocation();
+
   const [profileOpen, setProfileOpen] = useState(false);
+  const [locationOpen, setLocationOpen] = useState(false);
+  const [locations, setLocations] = useState<LocationOption[]>([]);
+  const locationBtnRef = useRef<HTMLDivElement>(null);
 
-  const rawRole: string = user?.role ?? "";
-  const isLocationMgr = !isHqAdmin(user) && !!user?.role;
+  const isHQ = isHqAdmin(user);
 
-  // Location pill label
-  const locationLabel: string = isLocationMgr
-    ? (user?.locationId || "My Location")
-    : accessScopeLabel(user);
+  // Load location list once for HQ admins
+  useEffect(() => {
+    if (!isHQ) return;
+    loadLocations().then((locs: any[]) => {
+      const mapped: LocationOption[] = Array.isArray(locs)
+        ? locs.map((l: any) => ({ id: l.id, name: l.name || l.id }))
+        : [];
+      console.log("[Header] loaded locations for dropdown:", mapped);
+      setLocations(mapped);
+    });
+  }, [isHQ]);
 
-  console.log("HEADER ROLE", rawRole, "| isLocationMgr:", isLocationMgr, "| locationId:", user?.locationId);
+  // Close location dropdown on outside click
+  useEffect(() => {
+    if (!locationOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (locationBtnRef.current && !locationBtnRef.current.contains(e.target as Node)) {
+        setLocationOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [locationOpen]);
+
+  const locationLabel = isHQ
+    ? (activeLocation ? activeLocation.name : "All Locations (HQ View)")
+    : (user?.locationId || "My Location");
+
+  console.log(
+    "[Header] role=", user?.role,
+    "| isHQ=", isHQ,
+    "| activeLocation=", activeLocation,
+    "| user.locationId=", user?.locationId
+  );
 
   return (
     <header className="h-16 flex items-center justify-between px-6 lg:px-8 border-b border-neutral-200 bg-white sticky top-0 z-10 w-full shadow-sm">
       <div className="flex items-center gap-6">
         <h1 className="text-xl font-semibold text-neutral-800 tracking-tight">{title}</h1>
+        <div className="h-6 w-px bg-neutral-200 hidden md:block" />
 
-        <div className="h-6 w-px bg-neutral-200 hidden md:block"></div>
-
-        {/* ── Location selector — role-aware ─────────────────────────────── */}
-        {isLocationMgr ? (
-          /* Location manager: read-only pill, no dropdown, no location switching */
+        {/* ── Location selector ─────────────────────────────────────────── */}
+        {!isHQ ? (
+          /* Location manager: fixed read-only pill */
           <div className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-md border border-neutral-200 bg-neutral-50 text-sm font-medium text-neutral-700 cursor-default select-none">
             <MapPin className="h-4 w-4 text-brand-600" />
             <span>{locationLabel}</span>
           </div>
         ) : (
-          /* HQ admin: interactive dropdown with All Locations label */
-          <button className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-md hover:bg-neutral-50 border border-transparent hover:border-neutral-200 transition-all text-sm font-medium text-neutral-700">
-            <MapPin className="h-4 w-4 text-brand-600" />
-            <span>All Locations (HQ View)</span>
-            <ChevronDown className="h-4 w-4 text-neutral-400 ml-1" />
-          </button>
+          /* HQ admin: functional dropdown */
+          <div ref={locationBtnRef} className="relative hidden md:block">
+            <button
+              onClick={() => setLocationOpen((o) => !o)}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-md border transition-all text-sm font-medium ${
+                activeLocation
+                  ? "border-brand-400 bg-brand-50 text-brand-700"
+                  : "border-neutral-200 hover:bg-neutral-50 text-neutral-700 hover:border-neutral-300"
+              }`}
+            >
+              <MapPin className={`h-4 w-4 ${activeLocation ? "text-brand-600" : "text-neutral-400"}`} />
+              <span className="max-w-[160px] truncate">{locationLabel}</span>
+              <ChevronDown className="h-4 w-4 text-neutral-400 ml-1 shrink-0" />
+            </button>
+
+            {locationOpen && (
+              <div className="absolute left-0 mt-2 w-64 bg-white border border-neutral-200 rounded-xl shadow-xl overflow-hidden z-50">
+                {/* All Locations (read-only) option */}
+                <button
+                  onClick={() => {
+                    console.log("[Header] selected: All Locations (read-only mode)");
+                    setActiveLocation(null);
+                    setLocationOpen(false);
+                  }}
+                  className={`w-full text-left px-4 py-3 text-sm flex items-center justify-between transition-colors ${
+                    !activeLocation ? "bg-neutral-50 font-semibold text-neutral-900" : "hover:bg-neutral-50 text-neutral-700"
+                  }`}
+                >
+                  <span>All Locations (HQ View)</span>
+                  {!activeLocation && <Check className="h-3.5 w-3.5 text-brand-600" />}
+                </button>
+
+                {locations.length > 0 && (
+                  <div className="border-t border-neutral-100">
+                    <p className="px-4 pt-2 pb-1 text-[10px] font-bold text-neutral-400 uppercase tracking-wider">
+                      Select Active Location
+                    </p>
+                    {locations.map((loc) => (
+                      <button
+                        key={loc.id}
+                        onClick={() => {
+                          console.log("[Header] selected location →", loc);
+                          setActiveLocation(loc);
+                          setLocationOpen(false);
+                        }}
+                        className={`w-full text-left px-4 py-2.5 text-sm flex items-center justify-between transition-colors ${
+                          activeLocation?.id === loc.id
+                            ? "bg-brand-50 text-brand-700 font-semibold"
+                            : "hover:bg-neutral-50 text-neutral-700"
+                        }`}
+                      >
+                        <span>{loc.name}</span>
+                        {activeLocation?.id === loc.id && (
+                          <Check className="h-3.5 w-3.5 text-brand-600" />
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {locations.length === 0 && (
+                  <p className="px-4 py-3 text-xs text-neutral-400 italic border-t border-neutral-100">
+                    No locations found in DB.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
         )}
       </div>
 
@@ -66,10 +161,10 @@ export function Header() {
 
         <button className="relative p-2 text-neutral-500 hover:text-neutral-700 hover:bg-neutral-100 rounded-full transition-colors mr-2">
           <Bell className="h-5 w-5" />
-          <span className="absolute top-1.5 right-1.5 h-2 w-2 rounded-full bg-danger-500 border-2 border-white"></span>
+          <span className="absolute top-1.5 right-1.5 h-2 w-2 rounded-full bg-danger-500 border-2 border-white" />
         </button>
 
-        {/* Profile / Context Bound Menu */}
+        {/* Profile menu */}
         <div className="relative">
           <button
             onClick={() => setProfileOpen(!profileOpen)}

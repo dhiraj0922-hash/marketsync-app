@@ -3,6 +3,7 @@ import { Inter } from "next/font/google";
 import "./globals.css";
 import { AppLayoutWrapper } from "@/components/AppLayoutWrapper";
 import { AuthProvider } from "@/components/AuthProvider";
+import { LocationProvider } from "@/components/LocationContext";
 
 const inter = Inter({
   variable: "--font-inter",
@@ -23,9 +24,12 @@ export default function RootLayout({
     <html lang="en" className={`${inter.variable} antialiased h-full`}>
       <body className="font-sans antialiased bg-neutral-50 h-full">
         <AuthProvider>
-          <AppLayoutWrapper>{children}</AppLayoutWrapper>
+          <LocationProvider>
+            <AppLayoutWrapper>{children}</AppLayoutWrapper>
+          </LocationProvider>
         </AuthProvider>
       </body>
     </html>
   );
 }
+
