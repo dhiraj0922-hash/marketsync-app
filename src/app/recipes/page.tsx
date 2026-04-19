@@ -117,14 +117,30 @@ function RecipesPageContent() {
     async function fetchData() {
       setIsLoading(true);
       try {
-        // Scope inventory to the user's location — identical to inventory page.
         const locationId: string = resolveLocationId(user);
+        const hqAdmin = isHqAdmin(user);
 
+        // KEY FIX: HQ admins must NOT pass locationId to loadInventory.
+        // Passing locationId='LOC-HQ' adds a DB-side WHERE location_id='LOC-HQ'
+        // which drops any row with a null or different location_id BEFORE
+        // PostgREST applies the range() limit — so those rows never arrive.
+        // Location managers still get their location scoped at the DB level.
         const [loadedRec, loadedInv, loadedSups] = await Promise.all([
           loadRecipes(),
-          loadInventory(locationId || undefined),
+          hqAdmin
+            ? loadInventory()           // HQ: fetch all rows, no WHERE location_id filter
+            : loadInventory(locationId), // location manager: DB-scoped to their location
           loadSuppliers(),
         ]);
+
+        // CLOVE diagnostic: verify rows arrived from DB
+        const cloveRows = loadedInv.filter((i: any) => i.name?.toLowerCase().includes('clove'));
+        console.log(
+          `[RecipeDiag] loadInventory fetched ${loadedInv.length} rows | clove rows: ${cloveRows.length}` +
+          ` | isHqAdmin=${hqAdmin} | locationId arg used=${hqAdmin ? 'none' : locationId}`,
+          cloveRows.map((i: any) => ({ name: i.name, locationId: i.locationId, itemType: i.itemType }))
+        );
+
         setRecipes(loadedRec);
         setInventory(loadedInv);
         setSuppliersData(Array.isArray(loadedSups) ? loadedSups : []);
@@ -924,6 +940,18 @@ function RecipesPageContent() {
                         (i.supplierId && supMap[i.supplierId]?.toLowerCase().includes(q))
                       )
                     : inventory;
+
+                  // CLOVE search diagnostic
+                  if (q.includes('clo') || q.includes('clove')) {
+                    const cloveInInv = inventory.filter((i: any) => i.name?.toLowerCase().includes('clove'));
+                    const cloveInFiltered = filtered.filter((i: any) => i.name?.toLowerCase().includes('clove'));
+                    console.log(
+                      `[RecipeSearchDiag] query="${q}" | inventory.length=${inventory.length}` +
+                      ` | clove in inventory=${cloveInInv.length} | clove in filtered=${cloveInFiltered.length}`,
+                      cloveInInv.map((i: any) => ({ name: i.name, id: i.id, locationId: i.locationId }))
+                    );
+                  }
+
                   const selectedItem = inventory.find((i: any) => i.id.toString() === selectedInvId);
 
                   // Open panel: capture anchor rect so the fixed dropdown aligns to the input
