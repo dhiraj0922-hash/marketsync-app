@@ -179,8 +179,13 @@ export default function Inventory() {
           setIsLoading(false);
        }
     }
+    // Guard: user=undefined means auth is still initialising — don't fetch yet.
+    // user=null means auth resolved but no session; user=object means logged in.
+    // Running with user=undefined/null causes resolveLocationId() to return "",
+    // which matches inventory rows with blank location_id and shows ghost data.
+    if (user === undefined) return;
     fetchData();
-  }, []);
+  }, [user]);  // re-run when auth resolves so location scoping is correct
 
   useEffect(() => {
     if (typeof window !== "undefined") {
