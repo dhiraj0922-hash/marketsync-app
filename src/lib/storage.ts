@@ -82,17 +82,31 @@ const mapInventoryToDB = (item: any) => {
 
 /**
  * Load inventory items.
+ *
+ * IMPORTANT: Supabase PostgREST has a default row-return cap (typically 1000).
+ * Without an explicit .range(), any table with >1000 rows silently returns only
+ * the first N rows — no error, no warning. Rows beyond the cap simply disappear
+ * from the UI (classic symptom: specific items missing despite existing in DB).
+ *
+ * Fix: always call .range(0, 9999) so up to 10 000 rows are fetched.
+ * For production scale beyond 10k rows, switch to cursor-based pagination.
+ *
  * - Pass locationId to scope to a specific location (HQ cross-location review).
  * - Pass null/undefined for the current user's default scoped view.
  */
 export async function loadInventory(locationId?: string | null) {
-  let query = supabase.from('inventory_items').select('*');
+  let query = supabase
+    .from('inventory_items')
+    .select('*')
+    .order('name', { ascending: true })  // stable ordering so results are deterministic
+    .range(0, 9999);                     // bypass the 1000-row PostgREST default cap
   if (locationId) query = query.eq('location_id', locationId);
   const { data, error } = await query;
   if (error) {
-    console.error("Error loading inventory:", error);
+    console.error('[loadInventory] error:', error);
     return [];
   }
+  console.log(`[loadInventory] fetched ${data?.length ?? 0} rows`);
   return Array.isArray(data) ? data.map(mapInventoryToFrontend) : [];
 }
 
@@ -644,9 +658,11 @@ export async function loadSaleItems(): Promise<SaleItem[]> {
   const { data, error } = await supabase
     .from('hq_sale_items')
     .select(SALE_ITEM_COLS)
-    .order('name', { ascending: true });
+    .order('name', { ascending: true })
+    .range(0, 4999);  // bypass PostgREST 1000-row default cap
 
   if (error) { console.error('[loadSaleItems]', error); return []; }
+  console.log(`[loadSaleItems] fetched ${data?.length ?? 0} rows`);
   return Array.isArray(data) ? data.map(mapSaleItemToFrontend) : [];
 }
 
@@ -934,8 +950,13 @@ const mapRecipeToDB = (r: any) => ({
 });
 
 export async function loadRecipes() {
-  const { data, error } = await supabase.from('recipes').select(RECIPE_SELECT);
+  const { data, error } = await supabase
+    .from('recipes')
+    .select(RECIPE_SELECT)
+    .order('name', { ascending: true })
+    .range(0, 4999);  // bypass PostgREST 1000-row default cap
   if (error) return [];
+  console.log(`[loadRecipes] fetched ${data?.length ?? 0} rows`);
   return Array.isArray(data) ? data.map(mapRecipeToFrontend) : [];
 }
 
