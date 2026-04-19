@@ -122,6 +122,52 @@ export async function updateInventoryItemCost(
 }
 
 /**
+ * Deduct a quantity from a single inventory_items row (atomic read-modify-write).
+ *
+ * Used by production execution to apply ingredient deductions after a production
+ * run. Each ingredient gets its own targeted UPDATE so we never need to re-upsert
+ * the full inventory array (which would ignore items not yet loaded in the page's
+ * local state).
+ *
+ * quantity: positive number — the amount to subtract (floor at 0).
+ * Returns the new instock value on success.
+ */
+export async function deductInventoryItemStock(
+  rowId: string,
+  quantity: number
+): Promise<{ success: boolean; newStock?: number; error?: any }> {
+  // Read current stock
+  const { data: current, error: fetchErr } = await supabase
+    .from('inventory_items')
+    .select('instock')
+    .eq('id', rowId)
+    .single();
+
+  if (fetchErr || !current) {
+    console.error('[deductInventoryItemStock] fetch error', fetchErr);
+    return { success: false, error: fetchErr };
+  }
+
+  const newStock = Math.max(0, Number(current.instock ?? 0) - quantity);
+
+  console.log(
+    `[deductInventoryItemStock] id=${rowId} current=${current.instock} deduct=${quantity} → newStock=${newStock}`
+  );
+
+  const { error: updateErr } = await supabase
+    .from('inventory_items')
+    .update({ instock: newStock })
+    .eq('id', rowId);
+
+  if (updateErr) {
+    console.error('[deductInventoryItemStock] update error', updateErr);
+    return { success: false, error: updateErr };
+  }
+  return { success: true, newStock };
+}
+
+
+/**
  * Insert a brand-new inventory item for a specific location.
  *
  * item_id assignment rules (bidirectional):

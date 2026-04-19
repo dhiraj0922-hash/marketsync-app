@@ -29,6 +29,7 @@ import {
   logMovement,
   loadSaleItems,
   updateSaleItemStock,
+  deductInventoryItemStock,
 } from "@/lib/storage";
 import { normalizeUnit } from "@/lib/units";
 import { FgImportModal } from "@/components/FgImportModal";
@@ -399,31 +400,61 @@ export default function FinishedGoods() {
 
     const isHqItem = fg._source === "hq_sale_items";
 
-    // ── Deduct raw ingredients from inventory_items (unchanged for both paths)
-    const _inv = [...inventoryData];
-    recipe.ingredients.forEach((ing: any) => {
-      const matchIndex = _inv.findIndex(
+    // ── 1. Build deduction plan ──────────────────────────────────────────────
+    //
+    // KEY FIX: Previously the isHqItem branch mutated a local _inv copy then
+    // discarded it because saveInventory() was inside the !isHqItem else block.
+    // Ingredient deductions NEVER reached the DB for hq_sale_items items.
+    //
+    // Fix: build a deductionPlan[] of (rowId, rawItem, normalizedQty) tuples
+    // up-front, then call deductInventoryItemStock() for EVERY ingredient on
+    // BOTH paths (step 5a). This is an atomic targeted UPDATE per row.
+    //
+    const _inv = [...inventoryData]; // still needed for auto-fulfill stock math
+
+    type DeductionPlan = {
+      rowId:         string;
+      rawItem:       any;
+      normalizedQty: number;
+    };
+    const deductionPlan: DeductionPlan[] = [];
+
+    for (const ing of recipe.ingredients) {
+      const rawItem = _inv.find(
         (i: any) => i.id.toString() === ing.inventoryId.toString()
       );
-      if (matchIndex !== -1) {
-        try {
-          const normalizedQty = normalizeUnit(
-            ing.qty,
-            ing.unit,
-            _inv[matchIndex].unit
-          );
-          _inv[matchIndex].inStock -= normalizedQty * targetBatches;
-          if (_inv[matchIndex].inStock < 0) _inv[matchIndex].inStock = 0;
-        } catch (e) {
-          console.error("Failed to deduct inventory safely:", e);
-        }
-      }
-    });
 
+      if (!rawItem) {
+        console.warn(
+          `[executeProduction] ingredient "${ing.name}" (inventoryId=${ing.inventoryId}) not found in loaded inventory — skipping`
+        );
+        continue;
+      }
+
+      let normalizedQty = 0;
+      try {
+        normalizedQty = normalizeUnit(ing.qty, ing.unit, rawItem.unit) * targetBatches;
+      } catch (e) {
+        console.error(
+          `[executeProduction] unit convert failed for "${ing.name}": ${(e as any)?.message}. Using raw qty.`
+        );
+        normalizedQty = ing.qty * targetBatches;
+      }
+      if (normalizedQty <= 0) continue;
+
+      deductionPlan.push({ rowId: String(rawItem.id), rawItem, normalizedQty });
+
+      // Mirror in _inv so auto-fulfill FG stock math (step 4) stays correct
+      const idx = _inv.findIndex((i: any) => i.id.toString() === rawItem.id.toString());
+      if (idx !== -1) {
+        _inv[idx].inStock = Math.max(0, _inv[idx].inStock - normalizedQty);
+      }
+    }
+
+    // ── 2. FG yield amount ───────────────────────────────────────────────────
     const yieldAmount = recipe.yieldQty * targetBatches;
 
-    // ── Stock increment — branched on source ─────────────────────────────
-    // inventory_items path: update inStock in _inv[] for saveInventory() below
+    // inventory_items path: apply FG output increment in _inv for saveInventory()
     const fgIndex = _inv.findIndex(
       (f: any) => f.id.toString() === fg.id.toString()
     );
@@ -436,7 +467,7 @@ export default function FinishedGoods() {
       });
     }
 
-    // ── Log production history ───────────────────────────────────────────
+    // ── 3. Production history log ────────────────────────────────────────────
     const newLog = {
       id:      `PRD-${1000 + productionHistory.length}`,
       fgId:    fg.id,
@@ -461,7 +492,7 @@ export default function FinishedGoods() {
 
     let alertMsg = `Successfully produced ${targetBatches} batches of ${fg.name} yielding ${yieldAmount} ${recipe.yieldUnit}!`;
 
-    // ── Auto-fulfill (inventory_items path only — requisitions reference inv IDs)
+    // ── 4. Auto-fulfill (inventory_items FG path only) ───────────────────────
     if (autoFulfill && !isHqItem && fgIndex !== -1) {
       const _reqs = [...requisitions];
       let fulfilledTotal = 0;
@@ -509,15 +540,47 @@ export default function FinishedGoods() {
       alertMsg += ` Auto-fulfilled ${fulfilledTotal} ${recipe.yieldUnit} to open Requisitions.`;
     }
 
-    // ── Persist inventory and/or hq_sale_items stock ─────────────────────
+    // ── 5a. Deduct ingredients from inventory_items (BOTH paths) ────────────
+    //
+    // Each call is an atomic read-modify-write UPDATE on inventory_items.
+    // This is the write that was missing for isHqItem items.
+    //
+    const failedDeductions: string[] = [];
+    for (const plan of deductionPlan) {
+      console.log(
+        `[Production] deducting: ${plan.rawItem.name} (id=${plan.rowId}) × ${plan.normalizedQty} ${plan.rawItem.unit}`
+      );
+      const deductRes = await deductInventoryItemStock(plan.rowId, plan.normalizedQty);
+      if (!deductRes.success) {
+        failedDeductions.push(plan.rawItem.name);
+        console.error(`[Production] deduction failed for ${plan.rawItem.name}:`, deductRes.error);
+      } else {
+        // Mirror confirmed new stock into local state (no full reload needed)
+        setInventoryData((prev: any[]) =>
+          prev.map((item: any) =>
+            item.id.toString() === plan.rowId
+              ? { ...item, inStock: deductRes.newStock ?? item.inStock }
+              : item
+          )
+        );
+      }
+    }
+
+    if (failedDeductions.length > 0) {
+      alert(
+        `Warning: Could not deduct stock for: ${failedDeductions.join(", ")}.\n` +
+        `Production log was saved. Please manually adjust inventory.`
+      );
+    }
+
+    // ── 5b. FG stock increment ───────────────────────────────────────────────
     if (isHqItem) {
-      // hq_sale_items path: increment instock via dedicated fn — no saveInventory() call
+      // hq_sale_items: increment instock via dedicated fn
       const stockRes = await updateSaleItemStock(fg.id, yieldAmount);
       if (!stockRes?.success) {
         alert(`Database Error (Update HQ Sale Item stock): ${stockRes?.error?.message}`);
         return;
       }
-      // Optimistic local update so the UI reflects the new stock without reload
       setSaleItems((prev: any[]) =>
         prev.map((si: any) =>
           si.id === fg.id
@@ -526,7 +589,7 @@ export default function FinishedGoods() {
         )
       );
     } else {
-      // inventory_items path — unchanged
+      // inventory_items: saveInventory() writes FG output increment + auto-fulfill changes
       const invRes = await saveInventory(_inv);
       if (!invRes?.success) {
         alert(`Database Error (Save Inventory): ${invRes?.error?.message}`);
@@ -535,43 +598,31 @@ export default function FinishedGoods() {
       setInventoryData(_inv);
     }
 
-    // ── Movement logging (fire-and-forget) ──────────────────────────────
+    // ── 6. Movement logging (fire-and-forget) ────────────────────────────────
     (async () => {
-      for (const ing of recipe.ingredients) {
-        const rawItem = inventoryData.find(
-          (i: any) => i.id.toString() === ing.inventoryId.toString()
-        );
-        if (!rawItem) continue;
-
-        let normalizedQty = 0;
-        try {
-          normalizedQty = normalizeUnit(ing.qty, ing.unit, rawItem.unit) * targetBatches;
-        } catch {
-          normalizedQty = ing.qty * targetBatches;
-        }
-        if (normalizedQty <= 0) continue;
-
+      // One production_consumption row per ingredient
+      for (const plan of deductionPlan) {
         await logMovement({
-          locationId:   rawItem.locationId ?? "LOC-HQ",
-          itemId:       String(rawItem.id),
-          movementType: "cogs_out",
-          quantity:     normalizedQty,
-          unitCost:     rawItem.cost ?? null,
+          locationId:    plan.rawItem.locationId ?? "LOC-HQ",
+          itemId:        plan.rowId,
+          movementType:  "production_consumption",
+          quantity:      plan.normalizedQty,
+          unitCost:      plan.rawItem.cost ?? null,
           referenceType: "production",
-          referenceId:  newLog.id,
-          notes: `Production run: ${targetBatches}x ${fg.name} — consumed ${normalizedQty} ${rawItem.unit} ${rawItem.name}`,
+          referenceId:   newLog.id,
+          notes: `Production: ${targetBatches}× ${fg.name} — consumed ${plan.normalizedQty} ${plan.rawItem.unit} of ${plan.rawItem.name}`,
         });
       }
 
-      // production_in log — works for both sources (item_id is TEXT, no FK)
+      // production_in for the finished good (works for both sources; item_id is TEXT)
       await logMovement({
-        locationId:   fg.locationId ?? "LOC-HQ",
-        itemId:       String(fg.id),
-        movementType: "production_in",
-        quantity:     yieldAmount,
-        unitCost:     fg.cost ?? null,
+        locationId:    fg.locationId ?? "LOC-HQ",
+        itemId:        String(fg.id),
+        movementType:  "production_in",
+        quantity:      yieldAmount,
+        unitCost:      fg.cost ?? null,
         referenceType: "production",
-        referenceId:  newLog.id,
+        referenceId:   newLog.id,
         notes: `Production output: ${targetBatches} batches of ${fg.name}${isHqItem ? " [hq_sale_items]" : ""}`,
       });
     })();
