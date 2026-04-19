@@ -261,6 +261,102 @@ export async function insertInventoryItem(
 }
 
 /**
+ * Hard-delete a single inventory_items row by its UUID primary key.
+ *
+ * Use this instead of saveInventory(filtered) which calls upsert and never
+ * actually deletes the row — the item reappears on next page load.
+ */
+export async function deleteInventoryItem(
+  rowId: string
+): Promise<{ success: boolean; error?: any }> {
+  console.log('[deleteInventoryItem] Deleting inventory item:', rowId);
+  const { error } = await supabase
+    .from('inventory_items')
+    .delete()
+    .eq('id', rowId);
+  if (error) {
+    console.error('[deleteInventoryItem] error:', error);
+    return { success: false, error };
+  }
+  return { success: true };
+}
+
+/**
+ * Hard-delete a single hq_sale_items row.
+ *
+ * Tries by id first. If the id does not exist in hq_sale_items (item came
+ * from inventory_items only), falls back to a case-insensitive name match.
+ * This covers the "same item in both tables with different row ids" case.
+ */
+export async function deleteSaleItemByNameOrId(
+  id: string,
+  name: string
+): Promise<{ success: boolean; deletedCount: number; error?: any }> {
+  console.log('[deleteSaleItemByNameOrId] Deleting finished good: id=', id, 'name=', name);
+
+  // Attempt by id first (fast, exact)
+  const { data: byId, error: idErr } = await supabase
+    .from('hq_sale_items')
+    .select('id')
+    .eq('id', id)
+    .limit(1);
+
+  if (idErr) {
+    console.error('[deleteSaleItemByNameOrId] id-lookup error:', idErr);
+    return { success: false, deletedCount: 0, error: idErr };
+  }
+
+  if (byId && byId.length > 0) {
+    // Found by id — delete it
+    const { error: delErr } = await supabase
+      .from('hq_sale_items')
+      .delete()
+      .eq('id', id);
+    if (delErr) {
+      console.error('[deleteSaleItemByNameOrId] delete-by-id error:', delErr);
+      return { success: false, deletedCount: 0, error: delErr };
+    }
+    console.log('[deleteSaleItemByNameOrId] deleted 1 row by id:', id);
+    return { success: true, deletedCount: 1 };
+  }
+
+  // Not found by id → try name match (covers cross-table name-based duplicates)
+  if (!name?.trim()) {
+    console.log('[deleteSaleItemByNameOrId] no id match and no name provided — nothing to delete');
+    return { success: true, deletedCount: 0 };
+  }
+
+  const { data: byName, error: nameErr } = await supabase
+    .from('hq_sale_items')
+    .select('id')
+    .ilike('name', name.trim());
+
+  if (nameErr) {
+    console.error('[deleteSaleItemByNameOrId] name-lookup error:', nameErr);
+    return { success: false, deletedCount: 0, error: nameErr };
+  }
+
+  if (!byName || byName.length === 0) {
+    console.log('[deleteSaleItemByNameOrId] no matching hq_sale_item found for name:', name);
+    return { success: true, deletedCount: 0 }; // not an error — item simply didn't exist
+  }
+
+  const ids = byName.map((r: any) => r.id);
+  const { error: bulkDelErr } = await supabase
+    .from('hq_sale_items')
+    .delete()
+    .in('id', ids);
+
+  if (bulkDelErr) {
+    console.error('[deleteSaleItemByNameOrId] bulk name-delete error:', bulkDelErr);
+    return { success: false, deletedCount: 0, error: bulkDelErr };
+  }
+
+  console.log('[deleteSaleItemByNameOrId] deleted', ids.length, 'row(s) by name:', name);
+  return { success: true, deletedCount: ids.length };
+}
+
+/**
  * Resolve the shared item_id for a product being created at locationId.
  * Checks the opposite side of the HQ/store boundary so whichever location
  * creates the product first the second always gets the same item_id.

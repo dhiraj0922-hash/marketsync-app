@@ -10,7 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
 import { Search, Plus, Upload, MoreHorizontal, ShoppingCart, History, Save, Trash2, ArrowDown, ArrowUp, AlertTriangle, X, Download, Loader2 } from "lucide-react";
-import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId, logMovement } from "@/lib/storage";
+import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId, logMovement, deleteInventoryItem, deleteSaleItemByNameOrId } from "@/lib/storage";
 
 export default function Inventory() {
   const router = useRouter();
@@ -352,16 +352,44 @@ export default function Inventory() {
   };
 
   // ── Delete Item ───────────────────────────────────────────────────────────
+  //
+  // DEFAULT = DELETE BOTH tables.
+  // 1. Hard-DELETE from inventory_items by row UUID (the only reliable delete).
+  // 2. Hard-DELETE from hq_sale_items (try same UUID first, name-match fallback)
+  //    to catch cross-table duplicates where the same item exists in both.
+  // 3. Re-fetch from DB after both deletes — no local-only filter — so the
+  //    item cannot reappear on the next load.
+  //
   const handleDeleteItem = async (item: any) => {
-    if (!confirm(`Delete "${item.name}" from inventory? This cannot be undone.`)) return;
+    if (!confirm(
+      `Delete "${item.name}" from Inventory AND Finished Goods?\n\nThis removes the item from both inventory_items and hq_sale_items. Cannot be undone.`
+    )) return;
     setOpenMenuId(null);
-    const newInventory = inventoryData.filter(i => i.id !== item.id);
-    const res = await saveInventory(newInventory);
-    if (!res?.success) {
-      alert(`Delete failed: ${res?.error?.message ?? "Unknown error"}`);
+
+    // 1. Delete from inventory_items
+    const invRes = await deleteInventoryItem(String(item.id));
+    if (!invRes.success) {
+      alert(`Delete failed (inventory_items): ${invRes.error?.message ?? "Unknown error"}`);
       return;
     }
-    setInventoryData(newInventory);
+
+    // 2. Delete from hq_sale_items (id first, then name-match fallback)
+    const fgRes = await deleteSaleItemByNameOrId(String(item.id), item.name);
+    if (!fgRes.success) {
+      alert(
+        `inventory_items deleted but hq_sale_items delete failed: ${fgRes.error?.message ?? "Unknown error"}\n` +
+        `Please manually remove the Finished Good entry named "${item.name}".`
+      );
+      // Still re-fetch so inventory side is accurate
+    }
+
+    // 3. Re-fetch from DB — authoritative state, not a local filter
+    const freshInv = await loadInventory();
+    const userLocationId = resolveLocationId(user);
+    const scopedInv = userLocationId
+      ? freshInv.filter((i: any) => i.locationId === userLocationId)
+      : freshInv;
+    setInventoryData(scopedInv);
   };
 
   const openItemDrawer = (item: any) => {
@@ -2086,18 +2114,37 @@ export default function Inventory() {
         footer={
            <div className="flex items-center gap-3">
              <button onClick={() => setIsDeleteModalOpen(false)} className="px-4 py-2 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 transition-colors w-full">Abort Task</button>
-             <button 
-               onClick={async () => {
-                  let safeInventory = inventoryData.filter(i => !selectedItemIds.includes(i.id));
-                  const res = await saveInventory(safeInventory);
-                  if (!res.success) {
-                     alert(`Delete Failed: ${res.error?.message || "Database rejected row destruction."}`);
-                     return;
+              <button
+                onClick={async () => {
+                  // Bulk delete: DELETE from both tables for every selected item
+                  const toDelete = inventoryData.filter((i: any) => selectedItemIds.includes(i.id));
+                  const errors: string[] = [];
+
+                  for (const item of toDelete) {
+                    const invRes = await deleteInventoryItem(String(item.id));
+                    if (!invRes.success) {
+                      errors.push(`inventory: ${item.name} (${invRes.error?.message ?? "err"})`);
+                      continue;
+                    }
+                    const fgRes = await deleteSaleItemByNameOrId(String(item.id), item.name);
+                    if (!fgRes.success) {
+                      errors.push(`hq_sale_items: ${item.name} (${fgRes.error?.message ?? "err"})`);
+                    }
                   }
-                  setInventoryData(safeInventory);
+
+                  if (errors.length > 0) {
+                    alert(`Some items failed:\n${errors.join("\n")}\nList will refresh.`);
+                  }
+
+                  const freshInv = await loadInventory();
+                  const userLocationId = resolveLocationId(user);
+                  const scopedInv = userLocationId
+                    ? freshInv.filter((i: any) => i.locationId === userLocationId)
+                    : freshInv;
+                  setInventoryData(scopedInv);
                   setSelectedItemIds([]);
                   setIsDeleteModalOpen(false);
-               }} 
+                }}
                className="px-4 py-2 text-sm font-bold bg-danger-600 text-white rounded-lg hover:bg-danger-700 transition-colors shadow-sm w-full"
              >
                Purge {selectedItemIds.length} Object{selectedItemIds.length !== 1 ? 's' : ''}
