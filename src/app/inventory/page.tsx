@@ -705,24 +705,47 @@ export default function Inventory() {
       const parsedData = [];
       const errors = [];
 
+      // ── UOM → baseUnit derivation ────────────────────────────────────────────
+      // Maps the raw UOM from the CSV column to the canonical DB baseunit value.
+      // This runs at parse time so every preview row already carries baseUnit.
+      const deriveBaseUnit = (rawUom: string): string => {
+        const u = rawUom.trim().toLowerCase();
+        if (['kg', 'kgs', 'kilogram', 'kilograms',
+             'g', 'gm', 'gms', 'gram', 'grams',
+             'lb', 'lbs', 'pound', 'pounds'].includes(u)) return 'kg';
+        if (['l', 'ltr', 'litre', 'litres', 'liter', 'liters',
+             'ml', 'millilitre', 'milliliter'].includes(u)) return 'L';
+        return 'ea';  // default: each/piece/unit
+      };
+
       for (const [idx, row] of dataRows.entries()) {
         const cols = row.split(',').map(c => c.trim().replace(/^"|"$/g, ''));
         if (cols.length < 7) {
           errors.push(`Row ${idx+2} is missing required standard columns.`);
           continue;
         }
-        
+
+        const rawUom   = cols[2] || '';
+        const baseUnit = deriveBaseUnit(rawUom);
+
         const payload = {
-          name: cols[0],
-          category: cols[1],
-          unit: cols[2],
+          name:         cols[0],
+          category:     cols[1],
+          unit:         rawUom || 'ea',
+          baseUnit,                        // ← derived from UOM, never blank
+          itemType:     'Ingredient',      // ← default for all food imports
           supplierText: cols[3],
-          inStock: parseFloat(cols[4]) || 0,
-          parLevel: parseFloat(cols[5]) || 0,
-          cost: parseFloat(cols[6]) || 0,
-          priceTrend: "steady",
+          inStock:      parseFloat(cols[4]) || 0,
+          parLevel:     parseFloat(cols[5]) || 0,
+          cost:         parseFloat(cols[6]) || 0,
+          priceTrend:   "steady",
           priceIncrease: false
         };
+
+        console.log(
+          `[Import Parse] Row ${idx+2}: name="${payload.name}"` +
+          ` | sourceUOM="${rawUom}" → baseUnit="${baseUnit}" | itemType="${payload.itemType}"`
+        );
 
         const isDuplicate = inventoryData.some(i => i.name.toLowerCase() === payload.name.toLowerCase());
         parsedData.push({ payload, isDuplicate });
@@ -804,12 +827,29 @@ export default function Inventory() {
                   continue;
               }
               rollbackData[matchingItem.id] = { ...matchingItem };
+
+              // Explicit itemType / baseUnit resolution for UPDATE path:
+              // p.payload spreads an itemType of 'Ingredient' and a derived baseUnit.
+              // We preserve the existing values if they are already set (non-blank);
+              // only backfill from the import row when the DB row had blanks.
+              const resolvedItemType  = matchingItem.itemType  || p.payload.itemType  || 'Ingredient';
+              const resolvedBaseUnit  = matchingItem.baseUnit  || p.payload.baseUnit  || p.payload.unit || 'ea';
+
+              console.log(
+                `[Import Update] "${p.payload.name}"` +
+                ` itemType: "${matchingItem.itemType}" → "${resolvedItemType}"` +
+                ` | baseUnit: "${matchingItem.baseUnit}" → "${resolvedBaseUnit}"` +
+                ` | sourceUOM: "${p.payload.unit}"`
+              );
+
               updatedItems.push({
                   ...matchingItem,
                   ...p.payload,
-                  category: cat,
+                  itemType:   resolvedItemType,   // explicitly overrides spread
+                  baseUnit:   resolvedBaseUnit,   // explicitly overrides spread
+                  category:   cat,
                   supplierId: suppIdVal,
-                  updatedAt: timestamp
+                  updatedAt:  timestamp
               });
           } else {
               // Determine location for this import (HQ admin → LOC-HQ, else current user location)
@@ -826,8 +866,24 @@ export default function Inventory() {
               }
 
               newlyCreatedIds.push(newRowId);
+
+              // Explicit itemType / baseUnit for INSERT path:
+              // payload already carries both (set in handleCSVUpload parse step), but
+              // we set them explicitly here too so the object is self-documenting and
+              // safe even if parse step changes.
+              const newItemType = p.payload.itemType  || 'Ingredient';
+              const newBaseUnit = p.payload.baseUnit  || p.payload.unit || 'ea';
+
+              console.log(
+                `[Import Insert] "${p.payload.name}"` +
+                ` itemType="${newItemType}" | baseUnit="${newBaseUnit}"` +
+                ` | sourceUOM="${p.payload.unit}" | locationId="${importLocationId}"`
+              );
+
               newItems.push({
                   ...p.payload,
+                  itemType:    newItemType,       // explicit — never blank
+                  baseUnit:    newBaseUnit,       // explicit — never blank
                   category:    cat,
                   supplierId:  suppIdVal,
                   id:          newRowId,
@@ -898,7 +954,38 @@ export default function Inventory() {
          setImportBatches(newBatchesList);
       }
 
-      alert(`Successfully committed block!\n\nNew items: ${newItems.length}\nUpdated fields: ${updatedItems.length}\nSkipped: ${skipped}\nAuto-created ${newlyCreatedCategories.length} categories.`);
+      // \u2500\u2500 Post-import summary ───────────────────────────────────────────────────
+      const defaultedItemType = newItems .filter((i: any) => i.itemType === 'Ingredient').length
+                              + updatedItems.filter((i: any) => i.itemType === 'Ingredient' && !currentInventoryMap.get(i.name?.toLowerCase())?.itemType).length;
+      const defaultedBaseUnit = newItems .filter((i: any) => !importPreview.find((p: any) => p.payload.name === i.name && p.payload.baseUnit && p.payload.unit !== p.payload.baseUnit)).length;
+
+      console.log(
+        `[Import Summary]\n` +
+        `  Inserted:               ${newItems.length}\n` +
+        `  Updated:                ${updatedItems.length}\n` +
+        `  Skipped (no-overwrite): ${skipped}\n` +
+        `  Defaulted itemType:     ${defaultedItemType} (→ 'Ingredient')\n` +
+        `  Auto-created categories: ${newlyCreatedCategories.length}`
+      );
+
+      // Log per-item final payload for traceability
+      console.groupCollapsed('[Import] Final payloads written to DB');
+      for (const item of [...newItems, ...updatedItems]) {
+        console.log(
+          `  ${item.name} | itemType="${item.itemType}" | baseUnit="${item.baseUnit}" | unit="${item.unit}" | locationId="${item.locationId ?? item.location_id}"`
+        );
+      }
+      console.groupEnd();
+
+      alert(
+        `Import committed!\n\n` +
+        `  Inserted:  ${newItems.length}\n` +
+        `  Updated:   ${updatedItems.length}\n` +
+        `  Skipped:   ${skipped}\n` +
+        `  Categories auto-created: ${newlyCreatedCategories.length}\n\n` +
+        `All items defaulted to itemType="Ingredient" if not set.\n` +
+        `(See browser console for per-row baseUnit mapping.)`
+      );
 
       setImportPreview([]);
       setImportErrors([]);
