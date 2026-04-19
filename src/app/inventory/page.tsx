@@ -114,23 +114,29 @@ export default function Inventory() {
           const userLocationId: string =
             resolveLocationId(user);
 
-          // \u2500\u2500 CLOVE diagnostic: raw DB rows \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+          // ── CLOVE diagnostic: raw DB rows ─────────────────────────────────────
           const rawCloveRows = inv.filter((i: any) => i.name?.toLowerCase().includes('clove'));
+          const hqAdmin = isHqAdmin(user);
           console.log(
-            `[LoadDiag] Raw DB rows for 'clove': ${rawCloveRows.length} / ${inv.length} total`,
+            `[LoadDiag] Raw DB rows for 'clove': ${rawCloveRows.length} / ${inv.length} total` +
+            ` | isHqAdmin=${hqAdmin} | resolvedLocationId="${userLocationId}"`,
             rawCloveRows.map((i: any) => ({
               name: i.name, locationId: i.locationId, itemType: i.itemType, baseUnit: i.baseUnit, inStock: i.inStock, parLevel: i.parLevel
             }))
           );
-          console.log(`[LoadDiag] resolvedLocationId for current user: "${userLocationId}"`);
 
-          const scopedInv = userLocationId
-            ? inv.filter((item: any) => item.locationId === userLocationId)
-            : inv;
+          // Scope inventory to the current user's location:
+          // - HQ admins see ALL rows (they manage every location; filtering by LOC-HQ
+          //   was wrong because some rows may be stored with a NULL or different location_id)
+          // - Location managers see only their location's rows
+          const scopedInv = hqAdmin
+            ? inv
+            : inv.filter((item: any) => item.locationId === userLocationId);
 
           const scopedCloveRows = scopedInv.filter((i: any) => i.name?.toLowerCase().includes('clove'));
           console.log(
-            `[LoadDiag] After location scope (locationId="${userLocationId}"): clove rows = ${scopedCloveRows.length} / ${scopedInv.length} total`,
+            `[LoadDiag] scopedInv: ${scopedInv.length} rows (clove: ${scopedCloveRows.length})` +
+            ` | scope="${hqAdmin ? "ALL (HQ admin)" : `location=${userLocationId}`}"`,
             scopedCloveRows.map((i: any) => ({ name: i.name, locationId: i.locationId }))
           );
 
@@ -444,9 +450,9 @@ export default function Inventory() {
     // 3. Re-fetch from DB — authoritative state, not a local filter
     const freshInv = await loadInventory();
     const userLocationId = resolveLocationId(user);
-    const scopedInv = userLocationId
-      ? freshInv.filter((i: any) => i.locationId === userLocationId)
-      : freshInv;
+    const scopedInv = isHqAdmin(user)
+      ? freshInv
+      : freshInv.filter((i: any) => i.locationId === userLocationId);
     setInventoryData(scopedInv);
   };
 
@@ -2283,9 +2289,9 @@ export default function Inventory() {
 
                   const freshInv = await loadInventory();
                   const userLocationId = resolveLocationId(user);
-                  const scopedInv = userLocationId
-                    ? freshInv.filter((i: any) => i.locationId === userLocationId)
-                    : freshInv;
+                  const scopedInv = isHqAdmin(user)
+                    ? freshInv
+                    : freshInv.filter((i: any) => i.locationId === userLocationId);
                   setInventoryData(scopedInv);
                   setSelectedItemIds([]);
                   setIsDeleteModalOpen(false);
