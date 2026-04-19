@@ -10,7 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
 import { Search, Plus, Upload, MoreHorizontal, ShoppingCart, History, Save, Trash2, ArrowDown, ArrowUp, AlertTriangle, X, Download, Loader2 } from "lucide-react";
-import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId, logMovement, deleteInventoryItem, deleteSaleItemByNameOrId, insertPurchaseOptions } from "@/lib/storage";
+import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId, logMovement, deleteInventoryItem, deleteSaleItemByNameOrId, insertPurchaseOptions, loadPurchaseOptions, savePurchaseOptions, deletePurchaseOption } from "@/lib/storage";
 
 export default function Inventory() {
   const router = useRouter();
@@ -104,6 +104,16 @@ export default function Inventory() {
   const [editInnerUnitUom,   setEditInnerUnitUom]   = useState("");
   const [editBaseUomNew,     setEditBaseUomNew]     = useState("");
   const [editAllowedUoms,    setEditAllowedUoms]    = useState("");
+
+  // Edit drawer: purchase_options state
+  const [editPurchaseOptions,    setEditPurchaseOptions]    = useState<any[]>([]);
+  const [isLoadingPurchOpts,     setIsLoadingPurchOpts]     = useState(false);
+  const [isSavingPurchOpt,       setIsSavingPurchOpt]       = useState<string | null>(null);
+  const [addingPurchOpt,         setAddingPurchOpt]         = useState(false);
+  const [newPurchOpt,            setNewPurchOpt]            = useState<any>({
+    supplierName: '', supplierProductName: '', purchaseUom: 'ea',
+    packQty: '', packUom: '', unitPrice: '', isPreferred: false,
+  });
 
   const [isLoading, setIsLoading] = useState(true);
 
@@ -360,6 +370,14 @@ export default function Inventory() {
     );
     setOpenMenuId(null);
     setIsEditDrawerOpen(true);
+    setAddingPurchOpt(false);
+    setNewPurchOpt({ supplierName: '', supplierProductName: '', purchaseUom: 'ea', packQty: '', packUom: '', unitPrice: '', isPreferred: false });
+    // Load purchase_options for this item fresh from DB
+    setIsLoadingPurchOpts(true);
+    loadPurchaseOptions(String(item.id))
+      .then((rows: any[]) => setEditPurchaseOptions(rows))
+      .catch(() => setEditPurchaseOptions([]))
+      .finally(() => setIsLoadingPurchOpts(false));
   };
 
   // ── Save Edit ─────────────────────────────────────────────────────────────
@@ -427,6 +445,55 @@ export default function Inventory() {
     } finally {
       setIsSavingEdit(false);
     }
+  };
+
+  // Purchase Options CRUD helpers (used inside edit drawer)
+  const updatePurchOptField = (id: string, field: string, value: any) =>
+    setEditPurchaseOptions((prev: any[]) =>
+      prev.map((r: any) => r.id === id ? { ...r, [field]: value } : r)
+    );
+
+  const savePurchOpt = async (row: any) => {
+    setIsSavingPurchOpt(row.id);
+    try {
+      const res = await savePurchaseOptions([row]);
+      if (!res.success) alert(`Save failed: ${(res as any).error?.message ?? 'Unknown'}`);
+    } finally {
+      setIsSavingPurchOpt(null);
+    }
+  };
+
+  const deletePurchOpt = async (id: string) => {
+    if (!confirm('Remove this supplier row?')) return;
+    const res = await deletePurchaseOption(id);
+    if (res.success) {
+      setEditPurchaseOptions((prev: any[]) => prev.filter((r: any) => r.id !== id));
+    } else {
+      alert(`Delete failed: ${(res as any).error?.message ?? 'Unknown'}`);
+    }
+  };
+
+  const makePreferred = async (id: string) => {
+    const updated = editPurchaseOptions.map((r: any) => ({ ...r, isPreferred: r.id === id }));
+    setEditPurchaseOptions(updated);
+    const res = await savePurchaseOptions(updated);
+    if (!res.success) alert(`Could not update preferred: ${(res as any).error?.message ?? ''}`);
+  };
+
+  const commitNewPurchOpt = async () => {
+    if (!editItem) return;
+    if (!newPurchOpt.supplierName.trim()) { alert('Supplier name is required.'); return; }
+    const res = await insertPurchaseOptions([{
+      ...newPurchOpt,
+      inventoryItemId: String(editItem.id),
+      packQty:   newPurchOpt.packQty   !== '' ? Number(newPurchOpt.packQty)   : null,
+      unitPrice: newPurchOpt.unitPrice !== '' ? Number(newPurchOpt.unitPrice) : 0,
+    }]);
+    if (!res.success) { alert(`Insert failed: ${(res as any).error?.message ?? ''}`); return; }
+    const rows = await loadPurchaseOptions(String(editItem.id));
+    setEditPurchaseOptions(rows);
+    setAddingPurchOpt(false);
+    setNewPurchOpt({ supplierName: '', supplierProductName: '', purchaseUom: 'ea', packQty: '', packUom: '', unitPrice: '', isPreferred: false });
   };
 
   // ── Delete Item ───────────────────────────────────────────────────────────
