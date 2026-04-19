@@ -2504,3 +2504,138 @@ export async function logMovement(params: {
   }
   return null;
 }
+
+
+// ----------------------------------------------------------------------------
+// PURCHASE OPTIONS  — multi-supplier pricing rows per inventory item
+// ----------------------------------------------------------------------------
+// Schema:
+//   id                uuid PK (gen_random_uuid)
+//   inventory_item_id TEXT FK → inventory_items.id (TEXT PK, SET NULL on delete)
+//   supplier_name     text NOT NULL
+//   supplier_product_name text
+//   purchase_uom      text NOT NULL
+//   pack_qty          numeric
+//   pack_uom          text
+//   unit_price        numeric NOT NULL DEFAULT 0
+//   is_preferred      boolean NOT NULL DEFAULT false
+//   created_at        timestamptz
+//   updated_at        timestamptz   (auto-updated by trigger)
+// ----------------------------------------------------------------------------
+
+const mapPurchaseOptionToFrontend = (db: any) => ({
+  id:                   db.id,                             // uuid (string)
+  inventoryItemId:      db.inventory_item_id ?? null,      // TEXT FK
+  supplierName:         db.supplier_name ?? '',
+  supplierProductName:  db.supplier_product_name ?? '',
+  purchaseUom:          db.purchase_uom ?? '',
+  packQty:              db.pack_qty != null ? Number(db.pack_qty) : null,
+  packUom:              db.pack_uom ?? null,
+  unitPrice:            db.unit_price != null ? Number(db.unit_price) : 0,
+  isPreferred:          Boolean(db.is_preferred),
+  createdAt:            db.created_at,
+  updatedAt:            db.updated_at,
+});
+
+const mapPurchaseOptionToDB = (opt: any) => ({
+  // id: omit on insert (DB generates uuid); include on update/upsert
+  ...(opt.id ? { id: String(opt.id) } : {}),
+  inventory_item_id:    opt.inventoryItemId ? String(opt.inventoryItemId) : null,
+  supplier_name:        opt.supplierName   ?? '',
+  supplier_product_name: opt.supplierProductName ?? null,
+  purchase_uom:         opt.purchaseUom    ?? '',
+  pack_qty:             opt.packQty  != null ? Number(opt.packQty)   : null,
+  pack_uom:             opt.packUom  ?? null,
+  unit_price:           isNaN(parseFloat(opt.unitPrice)) ? 0 : parseFloat(opt.unitPrice),
+  is_preferred:         Boolean(opt.isPreferred),
+});
+
+/**
+ * Load purchase options.
+ * @param inventoryItemId  When supplied, returns options for that item only.
+ *                         When omitted, returns all rows (e.g. bulk import audit).
+ */
+export async function loadPurchaseOptions(inventoryItemId?: string | null) {
+  let query = supabase
+    .from('purchase_options')
+    .select('*')
+    .order('is_preferred', { ascending: false })  // preferred row first
+    .order('supplier_name', { ascending: true })
+    .range(0, 9999);
+  if (inventoryItemId) query = query.eq('inventory_item_id', inventoryItemId);
+  const { data, error } = await query;
+  if (error) {
+    console.error('[loadPurchaseOptions] error:', error);
+    return [];
+  }
+  return Array.isArray(data) ? data.map(mapPurchaseOptionToFrontend) : [];
+}
+
+/**
+ * Upsert one or many purchase options.
+ * Rows with an existing id are updated; rows without an id are inserted (DB generates uuid).
+ */
+export async function savePurchaseOptions(options: any[]) {
+  if (!options.length) return { success: true };
+  const rows = options.map(mapPurchaseOptionToDB);
+  const { error } = await supabase
+    .from('purchase_options')
+    .upsert(rows, { onConflict: 'id', ignoreDuplicates: false });
+  if (error) {
+    console.error('[savePurchaseOptions] error:', error);
+    return { success: false, error };
+  }
+  return { success: true };
+}
+
+/**
+ * Bulk-insert purchase options (no id needed — DB generates uuid for each row).
+ * Use this for the initial CSV import when rows are guaranteed new.
+ */
+export async function insertPurchaseOptions(options: any[]) {
+  if (!options.length) return { success: true };
+  const rows = options.map(opt => {
+    const mapped = mapPurchaseOptionToDB(opt);
+    // Remove id entirely so Postgres generates a fresh uuid
+    const { id: _id, ...rest } = mapped as any;
+    return rest;
+  });
+  const { error } = await supabase.from('purchase_options').insert(rows);
+  if (error) {
+    console.error('[insertPurchaseOptions] error:', error);
+    return { success: false, error };
+  }
+  return { success: true };
+}
+
+/**
+ * Delete all purchase options for one inventory item.
+ * Used before a re-import to clear stale supplier rows cleanly.
+ */
+export async function deletePurchaseOptionsForItem(inventoryItemId: string) {
+  const { error } = await supabase
+    .from('purchase_options')
+    .delete()
+    .eq('inventory_item_id', inventoryItemId);
+  if (error) {
+    console.error('[deletePurchaseOptionsForItem] error:', error);
+    return { success: false, error };
+  }
+  return { success: true };
+}
+
+/**
+ * Delete a single purchase option by its uuid.
+ */
+export async function deletePurchaseOption(id: string) {
+  const { error } = await supabase
+    .from('purchase_options')
+    .delete()
+    .eq('id', id);
+  if (error) {
+    console.error('[deletePurchaseOption] error:', error);
+    return { success: false, error };
+  }
+  return { success: true };
+}
+
