@@ -192,17 +192,22 @@ export default function FinishedGoods() {
   // These items are never written into inventory_items.
   const saleItemVirtuals = saleItems
     .filter((si: any) => !invFgIds.has(String(si.id))) // deduplicate by ID
-    .map((si: any) => ({
-      id:       si.id,
-      name:     si.name,
-      inStock:  si.instock ?? si.inStock ?? 0,
-      unit:     si.baseUnit ?? "ea",
-      category: si.category ?? "",
-      itemType: "Finished Good",
-      cost:     si.makingCost ?? 0,
-      locationId: "LOC-HQ",
-      _source:  "hq_sale_items" as const, // ← routing flag, isolated to this page
-    }));
+    .map((si: any) => {
+      // Required debug log per request
+      console.log("FG:", si.name, "source_recipe_id:", si.sourceRecipeId);
+      return {
+        id:             si.id,
+        name:           si.name,
+        inStock:        si.instock ?? si.inStock ?? 0,
+        unit:           si.baseUnit ?? "ea",
+        category:       si.category ?? "",
+        itemType:       "Finished Good",
+        cost:           si.makingCost ?? 0,
+        locationId:     "LOC-HQ",
+        _source:        "hq_sale_items" as const,   // routing flag
+        sourceRecipeId: si.sourceRecipeId ?? null,  // hq_sale_items.source_recipe_id
+      };
+    });
 
   // ── Merged display list ──────────────────────────────────────────────────
   // inventory_items items first (existing behaviour), then hq_sale_items adapters.
@@ -272,20 +277,37 @@ export default function FinishedGoods() {
     return true;
   });
 
-  // ── Recipe lookup ───────────────────────────────────────────────────────────
-  // For inventory_items items: exact match on outputItemId.
-  // For hq_sale_items items (no outputItemId link): fall back to name-match.
-  // Defined here (before getProductionConstraints) so both callers can use it.
+  // ── Recipe lookup ─────────────────────────────────────────────────────────
+  // Priority for hq_sale_items virtual items:
+  //   1. sourceRecipeId  — hq_sale_items.source_recipe_id (UUID FK → recipes.id)
+  //                        Most reliable: no name ambiguity, no outputItemId needed.
+  //   2. outputItemId    — covers inventory_items-based items (existing path).
+  //   3. Name-match      — last resort for hq_sale_items only (exact, trimmed, case-insensitive).
   const findRecipeForFg = (fg: any) => {
-    const byId = recipes.find(
+    // 1. source_recipe_id — the canonical link stored on hq_sale_items
+    if (fg.sourceRecipeId) {
+      const bySourceId = recipes.find(
+        (r) => r.id?.toString() === fg.sourceRecipeId.toString()
+      );
+      if (bySourceId) return bySourceId;
+      // Set but not loaded — warn so it's traceable
+      console.warn(
+        `[findRecipeForFg] source_recipe_id=${fg.sourceRecipeId} not found in loaded recipes for "${fg.name}"`
+      );
+    }
+
+    // 2. outputItemId match (inventory_items path — unchanged)
+    const byOutputId = recipes.find(
       (r) => r.outputItemId?.toString() === fg.id.toString()
     );
-    if (byId) return byId;
-    // Name-match fallback only for hq_sale_items items (exact, case-insensitive, trim)
+    if (byOutputId) return byOutputId;
+
+    // 3. Name-match fallback — hq_sale_items only, exact match
     if (fg._source === "hq_sale_items") {
       const norm = fg.name.trim().toLowerCase();
       return recipes.find((r) => r.name?.trim().toLowerCase() === norm) ?? null;
     }
+
     return null;
   };
 
@@ -949,22 +971,19 @@ export default function FinishedGoods() {
             )}
           </div>
 
-          {/* No-recipe warning */}
-          {selectedFG &&
-            !recipes.find(
-              (r: any) => r.outputItemId?.toString() === selectedFG.id.toString()
-            ) && (
-              <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-lg p-4">
-                <AlertTriangle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
-                <div>
-                  <p className="text-sm font-semibold text-amber-900">No linked recipe</p>
-                  <p className="text-xs text-amber-700 mt-0.5">
-                    This item has no recipe attached. Link a recipe in the Recipes page
-                    to enable ingredient tracking and constraint checking.
-                  </p>
-                </div>
+          {/* No-recipe warning — uses findRecipeForFg for consistent source_recipe_id check */}
+          {selectedFG && !findRecipeForFg(selectedFG) && (
+            <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-lg p-4">
+              <AlertTriangle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-sm font-semibold text-amber-900">No linked recipe</p>
+                <p className="text-xs text-amber-700 mt-0.5">
+                  This item has no recipe attached. Link a recipe in the Recipes page
+                  to enable ingredient tracking and constraint checking.
+                </p>
               </div>
-            )}
+            </div>
+          )}
 
           {/* Ingredients table */}
           <div className="bg-white border border-neutral-200 rounded-lg overflow-hidden">
