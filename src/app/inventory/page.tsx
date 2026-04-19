@@ -114,9 +114,25 @@ export default function Inventory() {
           const userLocationId: string =
             resolveLocationId(user);
 
+          // \u2500\u2500 CLOVE diagnostic: raw DB rows \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+          const rawCloveRows = inv.filter((i: any) => i.name?.toLowerCase().includes('clove'));
+          console.log(
+            `[LoadDiag] Raw DB rows for 'clove': ${rawCloveRows.length} / ${inv.length} total`,
+            rawCloveRows.map((i: any) => ({
+              name: i.name, locationId: i.locationId, itemType: i.itemType, baseUnit: i.baseUnit, inStock: i.inStock, parLevel: i.parLevel
+            }))
+          );
+          console.log(`[LoadDiag] resolvedLocationId for current user: "${userLocationId}"`);
+
           const scopedInv = userLocationId
             ? inv.filter((item: any) => item.locationId === userLocationId)
             : inv;
+
+          const scopedCloveRows = scopedInv.filter((i: any) => i.name?.toLowerCase().includes('clove'));
+          console.log(
+            `[LoadDiag] After location scope (locationId="${userLocationId}"): clove rows = ${scopedCloveRows.length} / ${scopedInv.length} total`,
+            scopedCloveRows.map((i: any) => ({ name: i.name, locationId: i.locationId }))
+          );
 
           setInventoryData(scopedInv);
           setActivityData(act);
@@ -130,8 +146,23 @@ export default function Inventory() {
               try {
                 const p = JSON.parse(saved);
                 if (p.searchQuery !== undefined) setSearchQuery(p.searchQuery);
+                // Only restore filterStatus if it's a valid recognised value.
+                // A stale 'Healthy'/'Critical'/'Low' filter hides rows that don't
+                // match the status purely because parLevel=0 is treated as Healthy.
                 if (p.filterStatus !== undefined) setFilterStatus(p.filterStatus);
-                if (p.filterCategory !== undefined) setFilterCategory(p.filterCategory);
+                // Only restore filterCategory/filterSupplier if the value still
+                // exists in the freshly loaded data. A stale category value (e.g.
+                // "Dry Goods" was not previously in the list) silently hides every
+                // item in that category because there's no UI feedback that the
+                // filter is active-but-unknown.
+                if (p.filterCategory !== undefined && p.filterCategory !== "All") {
+                  const catExists = (cats as string[]).some(
+                    (c: string) => c.toLowerCase() === p.filterCategory.toLowerCase()
+                  );
+                  setFilterCategory(catExists ? p.filterCategory : "All");
+                } else if (p.filterCategory !== undefined) {
+                  setFilterCategory(p.filterCategory);
+                }
                 if (p.filterSupplier !== undefined) setFilterSupplier(p.filterSupplier);
               } catch (e) {}
             }
@@ -185,14 +216,39 @@ export default function Inventory() {
   console.log(`[Diagnostic] Extracted ${uniqueSuppliers.length} suppliers from Inventory.`);
 
   const filteredInventory = inventoryData.filter(item => {
-    const stockRatio = item.inStock / item.parLevel;
+    // Divide-by-zero guard: when parLevel = 0, stockRatio = NaN which makes
+    // ALL status checks false, causing 'Healthy' to be assigned but the item
+    // may not match a saved filterStatus. Clamp to a safe ratio.
+    const safeParLevel = item.parLevel > 0 ? item.parLevel : null;
+    const stockRatio = safeParLevel !== null ? (item.inStock / safeParLevel) : (item.inStock > 0 ? 1 : 0);
     const isCritical = stockRatio < 0.3;
     const isLowStock = stockRatio >= 0.3 && stockRatio <= 0.7;
     const dynamicStatus = isCritical ? "Critical" : isLowStock ? "Low" : "Healthy";
 
-    if (filterStatus !== "All" && dynamicStatus !== filterStatus) return false;
-    if (filterCategory !== "All" && item.category !== filterCategory) return false;
-    if (filterSupplier !== "All" && getSupplierName(item.supplierId) !== filterSupplier) return false;
+    // ── CLOVE debug logging (temporary, for diagnosis) ───────────────────
+    const isClove = item.name?.toLowerCase().includes('clove');
+    if (isClove) {
+      console.log(
+        `[FilterDiag] "${item.name}" | locationId="${item.locationId}"` +
+        ` | inStock=${item.inStock} parLevel=${item.parLevel}` +
+        ` | stockRatio=${stockRatio.toFixed(3)} status="${dynamicStatus}"` +
+        ` | category="${item.category}" | filterCategory="${filterCategory}"` +
+        ` | filterStatus="${filterStatus}"`
+      );
+    }
+
+    if (filterStatus !== "All" && dynamicStatus !== filterStatus) {
+      if (isClove) console.log(`  \u2192 DROPPED by filterStatus: item=${dynamicStatus} filter=${filterStatus}`);
+      return false;
+    }
+    if (filterCategory !== "All" && item.category !== filterCategory) {
+      if (isClove) console.log(`  \u2192 DROPPED by filterCategory: item="${item.category}" filter="${filterCategory}"`);
+      return false;
+    }
+    if (filterSupplier !== "All" && getSupplierName(item.supplierId) !== filterSupplier) {
+      if (isClove) console.log(`  \u2192 DROPPED by filterSupplier`);
+      return false;
+    }
 
     if (searchQuery) {
       const qs = searchQuery.toLowerCase();
@@ -201,9 +257,11 @@ export default function Inventory() {
           !item.category?.toLowerCase().includes(qs) &&
           !suppName.toLowerCase().includes(qs) &&
           !item.unit?.toLowerCase().includes(qs)) {
+        if (isClove) console.log(`  \u2192 DROPPED by searchQuery: "${searchQuery}"`);
         return false;
       }
     }
+    if (isClove) console.log(`  \u2192 PASSED all filters \u2713`);
     return true;
   }).sort((a, b) => {
      let valA = a[sortKey] || "";
