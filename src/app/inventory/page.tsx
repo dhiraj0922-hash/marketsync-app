@@ -988,7 +988,16 @@ export default function Inventory() {
          setIsCommitting(false);
          return;
       }
-      setInventoryData(unifiedInventory);
+      // Re-fetch from DB instead of stamping local state from unifiedInventory.
+      // This guarantees the UI reflects actual DB state after the commit —
+      // prevents ghost-data where a reset DB still shows old rows in the component.
+      const hqAdmin = isHqAdmin(user);
+      const freshInv = await loadInventory();
+      const scopedAfterImport = hqAdmin
+        ? freshInv
+        : freshInv.filter((i: any) => i.locationId === resolveLocationId(user));
+      setInventoryData(scopedAfterImport);
+      console.log(`[commitImport] Re-fetched ${freshInv.length} rows from DB after commit (scoped: ${scopedAfterImport.length})`);
 
       if (newlyCreatedCategories.length > 0) {
          setCategories(finalCategoriesList);
