@@ -2011,28 +2011,34 @@ export default function Inventory() {
               ))}
             </div>
 
-            {/* Supplier */}
-            <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Preferred Supplier</label>
-              <input
-                list="edit-supplier-options"
-                type="text"
-                value={suppliersData.find(s => s.id === editItem.supplierId)?.name ?? ""}
-                onChange={async e => {
-                  const name = e.target.value;
-                  try {
-                    const { resolveSupplier: rs } = await import("@/lib/storage");
-                    const id = await rs(name).catch(() => null);
-                    setEditItem({...editItem, supplierId: id});
-                  } catch { setEditItem({...editItem, supplierId: null}); }
-                }}
-                className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
-                placeholder="Select supplier…"
-              />
-              <datalist id="edit-supplier-options">
-                {suppliersData.map(s => <option key={s.id} value={s.name} />)}
-              </datalist>
-            </div>
+            {/* Preferred Supplier — derived from purchase_options, NOT inventory_items */}
+            {(() => {
+              const preferred = editPurchaseOptions.find((p: any) => p.isPreferred);
+              const lowestPrice = editPurchaseOptions.length > 0
+                ? editPurchaseOptions.reduce((min: any, p: any) => p.unitPrice < min.unitPrice ? p : min)
+                : null;
+              return (
+                <div className="space-y-1.5">
+                  <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Preferred Supplier</label>
+                  <div className={`w-full p-2 border rounded text-sm flex items-center justify-between gap-2 ${
+                    preferred ? 'border-violet-300 bg-violet-50' : 'border-neutral-200 bg-neutral-50'
+                  }`}>
+                    <span className={preferred ? 'font-semibold text-violet-800' : 'text-neutral-400 italic'}>
+                      {preferred ? preferred.supplierName : (editPurchaseOptions.length > 0 ? 'None set — click Make Preferred below' : 'No suppliers yet')}
+                    </span>
+                    {preferred && (
+                      <span className="text-[10px] font-bold uppercase text-violet-600 bg-violet-100 border border-violet-300 px-1.5 py-0.5 rounded whitespace-nowrap">★ Preferred</span>
+                    )}
+                    {!preferred && lowestPrice && (
+                      <span className="text-[10px] text-neutral-400">(lowest: {lowestPrice.supplierName})</span>
+                    )}
+                  </div>
+                  {preferred?.supplierProductName && (
+                    <p className="text-[11px] text-neutral-500">{preferred.supplierProductName} · {preferred.purchaseUom}{preferred.packQty ? ` · ${preferred.packQty}${preferred.packUom ? ' ' + preferred.packUom : ''}` : ''}</p>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Stock / Par / Cost */}
             <div className="grid grid-cols-3 gap-3">
@@ -2055,18 +2061,43 @@ export default function Inventory() {
                 />
               </div>
               <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">
-                  {editItem.purchaseUnits?.some((u: any) => u.isPrimary && parseFloat(u.conversion) > 0)
-                    ? `Cost / ${(editItem.purchaseUnits.find((u: any) => u.isPrimary) || editItem.purchaseUnits[0]).name}`
-                    : "Cost / Base Unit"}
-                </label>
-                <input
-                  type="number" step="0.01"
-                  value={editPurchaseCost}
-                  onChange={e => setEditPurchaseCost(e.target.value)}
-                  className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
-                  placeholder="$0.00"
-                />
+                {(() => {
+                  const preferred = editPurchaseOptions.find((p: any) => p.isPreferred);
+                  const lowest = editPurchaseOptions.length > 0
+                    ? editPurchaseOptions.reduce((min: any, p: any) => p.unitPrice < min.unitPrice ? p : min)
+                    : null;
+                  // Auto-fill editPurchaseCost from preferred (or lowest) whenever it hasn't been manually overridden.
+                  // We do this as a display-time derivation so it reacts instantly to Make Preferred clicks.
+                  const autoPrice = preferred?.unitPrice ?? lowest?.unitPrice ?? null;
+                  const autoLabel = preferred
+                    ? `Cost — from ${preferred.supplierName}`
+                    : lowest
+                      ? `Cost — lowest (${lowest.supplierName})`
+                      : editItem.purchaseUnits?.some((u: any) => u.isPrimary && parseFloat(u.conversion) > 0)
+                        ? `Cost / ${(editItem.purchaseUnits.find((u: any) => u.isPrimary) || editItem.purchaseUnits[0]).name}`
+                        : 'Cost / Base Unit';
+                  return (
+                    <>
+                      <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">{autoLabel}</label>
+                      <input
+                        type="number" step="0.01"
+                        value={autoPrice !== null && editPurchaseCost === '' ? String(autoPrice) : editPurchaseCost}
+                        onChange={e => setEditPurchaseCost(e.target.value)}
+                        onFocus={() => {
+                          // On focus, if field is empty, seed it from auto price so user can edit from there
+                          if (editPurchaseCost === '' && autoPrice !== null) setEditPurchaseCost(String(autoPrice));
+                        }}
+                        className={`w-full p-2 border rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 ${
+                          autoPrice !== null && editPurchaseCost === '' ? 'border-violet-200 bg-violet-50 text-violet-800' : 'border-neutral-200'
+                        }`}
+                        placeholder="$0.00"
+                      />
+                      {autoPrice !== null && editPurchaseCost === '' && (
+                        <p className="text-[10px] text-violet-500">Auto-filled from supplier. Edit to override.</p>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
             </div>
 
