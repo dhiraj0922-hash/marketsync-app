@@ -406,6 +406,15 @@ export default function Inventory() {
         : (!isNaN(parsedCost) ? parsedCost : editItem.cost);
       const purchCost  = hasValidPrim && !isNaN(parsedCost) ? parsedCost : null;
 
+      // Compute preferred supplier summary from purchase_options state.
+      // This MUST be included in `updated` so that setInventoryData(newInventory)
+      // does not discard the patch applied by syncInventoryRowSupplier / makePreferred.
+      const _prefRow  = editPurchaseOptions.find((r: any) => r.isPreferred);
+      const _lowRow   = editPurchaseOptions.length > 0
+        ? [...editPurchaseOptions].sort((a: any, b: any) => a.unitPrice - b.unitPrice)[0]
+        : null;
+      const _chosen   = _prefRow ?? _lowRow ?? null;
+
       const updated = {
         ...editItem,
         baseUnit:      editBaseUnit || editItem.unit || "",
@@ -425,6 +434,10 @@ export default function Inventory() {
         allowedRecipeUoms: editAllowedUoms.trim()
           ? editAllowedUoms.split(",").map(s => s.trim()).filter(Boolean)
           : null,
+        // Preserve purchase_options-derived supplier summary so the inventory list
+        // does not revert to legacy supplierId / suppliersData after Save Changes.
+        preferredSupplierName: _chosen?.supplierName ?? null,
+        preferredCost:         _chosen?.unitPrice    ?? null,
       };
 
       const newInventory = inventoryData.map(i => i.id === updated.id ? updated : i);
