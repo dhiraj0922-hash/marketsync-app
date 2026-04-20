@@ -275,14 +275,14 @@ export default function Inventory() {
       if (isClove) console.log(`  \u2192 DROPPED by filterCategory: item="${item.category}" filter="${filterCategory}"`);
       return false;
     }
-    if (filterSupplier !== "All" && getSupplierName(item.supplierId) !== filterSupplier) {
-      if (isClove) console.log(`  \u2192 DROPPED by filterSupplier`);
-      return false;
+    if (filterSupplier !== "All") {
+      const displayedSupplier = item.preferredSupplierName ?? getSupplierName(item.supplierId);
+      if (displayedSupplier !== filterSupplier) return false;
     }
 
     if (searchQuery) {
       const qs = searchQuery.toLowerCase();
-      const suppName = getSupplierName(item.supplierId);
+      const suppName = item.preferredSupplierName ?? getSupplierName(item.supplierId);
       if (!item.name?.toLowerCase().includes(qs) &&
           !item.category?.toLowerCase().includes(qs) &&
           !suppName.toLowerCase().includes(qs) &&
@@ -299,8 +299,8 @@ export default function Inventory() {
 
      // Remap if sorting by supplier
      if (sortKey === 'supplier') {
-        valA = getSupplierName(a.supplierId);
-        valB = getSupplierName(b.supplierId);
+        valA = a.preferredSupplierName ?? getSupplierName(a.supplierId) ?? '';
+        valB = b.preferredSupplierName ?? getSupplierName(b.supplierId) ?? '';
      }
 
      if (typeof valA === "string") valA = valA.toLowerCase();
@@ -463,25 +463,40 @@ export default function Inventory() {
     }
   };
 
-  // Patches the matching inventoryData row with supplier info derived from purchase_options.
-  // This keeps the list row in sync without an extra DB round-trip.
   const syncInventoryRowSupplier = (rows: any[]) => {
-    if (!editItem) return;
+    if (!editItem) {
+      console.log('[syncInventoryRowSupplier] SKIPPED — editItem is null');
+      return;
+    }
     const preferred = rows.find((r: any) => r.isPreferred);
     const lowest = rows.length > 0
       ? [...rows].sort((a: any, b: any) => a.unitPrice - b.unitPrice)[0]
       : null;
     const chosen = preferred ?? lowest ?? null;
+    console.log('[syncInventoryRowSupplier]', {
+      editItemId: editItem.id,
+      chosenSupplierName: chosen?.supplierName ?? null,
+      chosenUnitPrice: chosen?.unitPrice ?? null,
+      preferredFound: !!preferred,
+      totalRows: rows.length,
+    });
     setInventoryData((prev: any[]) =>
-      prev.map((inv: any) =>
-        String(inv.id) === String(editItem.id)
-          ? {
-              ...inv,
-              preferredSupplierName: chosen?.supplierName ?? null,
-              preferredCost: chosen?.unitPrice ?? null,
-            }
-          : inv
-      )
+      prev.map((inv: any) => {
+        if (String(inv.id) === String(editItem.id)) {
+          const patched = {
+            ...inv,
+            preferredSupplierName: chosen?.supplierName ?? null,
+            preferredCost: chosen?.unitPrice ?? null,
+          };
+          console.log('[syncInventoryRowSupplier] patched row', {
+            id: patched.id, name: patched.name,
+            preferredSupplierName: patched.preferredSupplierName,
+            preferredCost: patched.preferredCost,
+          });
+          return patched;
+        }
+        return inv;
+      })
     );
   };
 
@@ -1639,9 +1654,11 @@ export default function Inventory() {
                       </div>
                     </TableCell>
                     <TableCell className="py-4">
-                      <span className="text-sm font-medium text-neutral-700">
-                        {item.preferredSupplierName ?? getSupplierName(item.supplierId)}
-                      </span>
+                      {(() => {
+                        const displayName = item.preferredSupplierName ?? getSupplierName(item.supplierId);
+                        console.log('[ListRow supplier]', { id: item.id, name: item.name, preferredSupplierName: item.preferredSupplierName, supplierId: item.supplierId, displayed: displayName });
+                        return <span className="text-sm font-medium text-neutral-700">{displayName}</span>;
+                      })()}
                     </TableCell>
                     <TableCell className="py-4">
                       <div className="flex flex-col gap-1">
