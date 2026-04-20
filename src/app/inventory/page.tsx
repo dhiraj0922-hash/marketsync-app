@@ -20,7 +20,7 @@ export default function Inventory() {
   const [activityData, setActivityData] = useState<Record<string, any[]>>({});
   const [categories, setCategories] = useState<string[]>([]);
   const [suppliersData, setSuppliersData] = useState<any[]>([]);
-  
+
   // Filtering States
   const [searchQuery, setSearchQuery] = useState("");
   const [filterStatus, setFilterStatus] = useState("All");
@@ -34,14 +34,14 @@ export default function Inventory() {
   const [selectedItem, setSelectedItem] = useState<any>(null);
 
   // Adjustment Form States
-  const [adjType, setAdjType] = useState<"Add"|"Remove"|"Waste">("Add");
+  const [adjType, setAdjType] = useState<"Add" | "Remove" | "Waste">("Add");
   const [adjQty, setAdjQty] = useState("");
   const [adjUnit, setAdjUnit] = useState("");
   const [adjNotes, setAdjNotes] = useState("");
 
   const [newParLevel, setNewParLevel] = useState("");
   const [parNotes, setParNotes] = useState("");
-  const [userRole, setUserRole] = useState<"HQ"|"Location">("HQ");
+  const [userRole, setUserRole] = useState<"HQ" | "Location">("HQ");
 
   // Unit Mapping Config States
   const [editBaseUnit, setEditBaseUnit] = useState("");
@@ -55,12 +55,12 @@ export default function Inventory() {
     supplier: "Fresh Farms Produce", inStock: "", parLevel: "", cost: "",
     purchaseUnits: [{ name: "Case", conversion: '1', isPrimary: true }] as any[],
     // Phase 2: Structured packaging fields (all optional, all default null/empty)
-    purchaseUom:       "",   // e.g. 'case', 'bag'
-    packQty:           "",   // inner units per purchase_uom
-    innerUnitType:     "",   // e.g. 'can', 'bottle'
-    innerUnitSize:     "",   // qty per inner unit
-    innerUnitUom:      "",   // unit for innerUnitSize
-    baseUomNew:        "",   // preferred costing unit (backfills baseunit if blank)
+    purchaseUom: "",   // e.g. 'case', 'bag'
+    packQty: "",   // inner units per purchase_uom
+    innerUnitType: "",   // e.g. 'can', 'bottle'
+    innerUnitSize: "",   // qty per inner unit
+    innerUnitUom: "",   // unit for innerUnitSize
+    baseUomNew: "",   // preferred costing unit (backfills baseunit if blank)
     allowedRecipeUoms: "",   // comma-separated, parsed on save
   });
 
@@ -93,24 +93,24 @@ export default function Inventory() {
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
 
   // Edit Item Drawer States
-  const [isEditDrawerOpen, setIsEditDrawerOpen]   = useState(false);
-  const [isSavingEdit, setIsSavingEdit]           = useState(false);
-  const [editItem, setEditItem]                   = useState<any>(null);
+  const [isEditDrawerOpen, setIsEditDrawerOpen] = useState(false);
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [editItem, setEditItem] = useState<any>(null);
   // Edit packaging fields (separate string state for controlled inputs)
-  const [editPurchaseUom,    setEditPurchaseUom]    = useState("");
-  const [editPackQty,        setEditPackQty]        = useState("");
-  const [editInnerUnitType,  setEditInnerUnitType]  = useState("");
-  const [editInnerUnitSize,  setEditInnerUnitSize]  = useState("");
-  const [editInnerUnitUom,   setEditInnerUnitUom]   = useState("");
-  const [editBaseUomNew,     setEditBaseUomNew]     = useState("");
-  const [editAllowedUoms,    setEditAllowedUoms]    = useState("");
+  const [editPurchaseUom, setEditPurchaseUom] = useState("");
+  const [editPackQty, setEditPackQty] = useState("");
+  const [editInnerUnitType, setEditInnerUnitType] = useState("");
+  const [editInnerUnitSize, setEditInnerUnitSize] = useState("");
+  const [editInnerUnitUom, setEditInnerUnitUom] = useState("");
+  const [editBaseUomNew, setEditBaseUomNew] = useState("");
+  const [editAllowedUoms, setEditAllowedUoms] = useState("");
 
   // Edit drawer: purchase_options state
-  const [editPurchaseOptions,    setEditPurchaseOptions]    = useState<any[]>([]);
-  const [isLoadingPurchOpts,     setIsLoadingPurchOpts]     = useState(false);
-  const [isSavingPurchOpt,       setIsSavingPurchOpt]       = useState<string | null>(null);
-  const [addingPurchOpt,         setAddingPurchOpt]         = useState(false);
-  const [newPurchOpt,            setNewPurchOpt]            = useState<any>({
+  const [editPurchaseOptions, setEditPurchaseOptions] = useState<any[]>([]);
+  const [isLoadingPurchOpts, setIsLoadingPurchOpts] = useState(false);
+  const [isSavingPurchOpt, setIsSavingPurchOpt] = useState<string | null>(null);
+  const [addingPurchOpt, setAddingPurchOpt] = useState(false);
+  const [newPurchOpt, setNewPurchOpt] = useState<any>({
     supplierName: '', supplierProductName: '', purchaseUom: 'ea',
     packQty: '', packUom: '', unitPrice: '', isPreferred: false,
   });
@@ -119,84 +119,102 @@ export default function Inventory() {
 
   useEffect(() => {
     async function fetchData() {
-       setIsLoading(true);
-       try {
-          const [inv, act, cats, batches, sups] = await Promise.all([
-             loadInventory(),
-             loadInventoryActivity(),
-             loadCategories('inventory'),
-             loadImportBatches(),
-             loadSuppliers()
-          ]);
-          // Scope to current user's location — loadInventory() returns all rows across
-          // all locations. Without filtering, HQ users would see store rows and vice-versa.
-          const userLocationId: string =
-            resolveLocationId(user);
+      setIsLoading(true);
+      try {
+        const [inv, act, cats, batches, sups, allPurchOpts] = await Promise.all([
+          loadInventory(),
+          loadInventoryActivity(),
+          loadCategories('inventory'),
+          loadImportBatches(),
+          loadSuppliers(),
+          loadPurchaseOptions()   // bulk-load all rows up-front for startup merge
+        ]);
+        // Scope to current user's location
+        const userLocationId: string = resolveLocationId(user);
 
-          // ── CLOVE diagnostic: raw DB rows ─────────────────────────────────────
-          const rawCloveRows = inv.filter((i: any) => i.name?.toLowerCase().includes('clove'));
-          const hqAdmin = isHqAdmin(user);
-          console.log(
-            `[LoadDiag] Raw DB rows for 'clove': ${rawCloveRows.length} / ${inv.length} total` +
-            ` | isHqAdmin=${hqAdmin} | resolvedLocationId="${userLocationId}"`,
-            rawCloveRows.map((i: any) => ({
-              name: i.name, locationId: i.locationId, itemType: i.itemType, baseUnit: i.baseUnit, inStock: i.inStock, parLevel: i.parLevel
-            }))
-          );
+        // ── CLOVE diagnostic: raw DB rows ─────────────────────────────────────
+        const rawCloveRows = inv.filter((i: any) => i.name?.toLowerCase().includes('clove'));
+        const hqAdmin = isHqAdmin(user);
+        console.log(
+          `[LoadDiag] Raw DB rows for 'clove': ${rawCloveRows.length} / ${inv.length} total` +
+          ` | isHqAdmin=${hqAdmin} | resolvedLocationId="${userLocationId}"`,
+          rawCloveRows.map((i: any) => ({
+            name: i.name, locationId: i.locationId, itemType: i.itemType, baseUnit: i.baseUnit, inStock: i.inStock, parLevel: i.parLevel
+          }))
+        );
 
-          // Scope inventory to the current user's location:
-          // - HQ admins see ALL rows (they manage every location; filtering by LOC-HQ
-          //   was wrong because some rows may be stored with a NULL or different location_id)
-          // - Location managers see only their location's rows
-          const scopedInv = hqAdmin
-            ? inv
-            : inv.filter((item: any) => item.locationId === userLocationId);
+        const scopedInv = hqAdmin
+          ? inv
+          : inv.filter((item: any) => item.locationId === userLocationId);
 
-          const scopedCloveRows = scopedInv.filter((i: any) => i.name?.toLowerCase().includes('clove'));
-          console.log(
-            `[LoadDiag] scopedInv: ${scopedInv.length} rows (clove: ${scopedCloveRows.length})` +
-            ` | scope="${hqAdmin ? "ALL (HQ admin)" : `location=${userLocationId}`}"`,
-            scopedCloveRows.map((i: any) => ({ name: i.name, locationId: i.locationId }))
-          );
+        // Build inventoryItemId → purchase_option[] map, then merge preferred/lowest
+        // supplier name + price into every inventory row as transient client-side fields.
+        // These are the same fields that syncInventoryRowSupplier / handleEditSave maintain
+        // during the session. Without this merge, every page reload wiped them.
+        const purchOptsByItem = new Map<string, any[]>();
+        (allPurchOpts as any[]).forEach((opt: any) => {
+          const key = String(opt.inventoryItemId ?? '');
+          if (!purchOptsByItem.has(key)) purchOptsByItem.set(key, []);
+          purchOptsByItem.get(key)!.push(opt);
+        });
 
-          setInventoryData(scopedInv);
-          setActivityData(act);
-          setCategories(cats);
-          setImportBatches(batches);
-          setSuppliersData(sups);
+        const mergedInv = scopedInv.map((item: any) => {
+          const opts     = purchOptsByItem.get(String(item.id)) ?? [];
+          const preferred = opts.find((r: any) => r.isPreferred);
+          const lowest   = opts.length > 0
+            ? [...opts].sort((a: any, b: any) => a.unitPrice - b.unitPrice)[0]
+            : null;
+          const chosen   = preferred ?? lowest ?? null;
+          return chosen
+            ? { ...item, preferredSupplierName: chosen.supplierName, preferredCost: chosen.unitPrice }
+            : item;
+        });
 
-          if (typeof window !== "undefined") {
-            const saved = localStorage.getItem("inventory_filters");
-            if (saved) {
-              try {
-                const p = JSON.parse(saved);
-                if (p.searchQuery !== undefined) setSearchQuery(p.searchQuery);
-                // Only restore filterStatus if it's a valid recognised value.
-                // A stale 'Healthy'/'Critical'/'Low' filter hides rows that don't
-                // match the status purely because parLevel=0 is treated as Healthy.
-                if (p.filterStatus !== undefined) setFilterStatus(p.filterStatus);
-                // Only restore filterCategory/filterSupplier if the value still
-                // exists in the freshly loaded data. A stale category value (e.g.
-                // "Dry Goods" was not previously in the list) silently hides every
-                // item in that category because there's no UI feedback that the
-                // filter is active-but-unknown.
-                if (p.filterCategory !== undefined && p.filterCategory !== "All") {
-                  const catExists = (cats as string[]).some(
-                    (c: string) => c.toLowerCase() === p.filterCategory.toLowerCase()
-                  );
-                  setFilterCategory(catExists ? p.filterCategory : "All");
-                } else if (p.filterCategory !== undefined) {
-                  setFilterCategory(p.filterCategory);
-                }
-                if (p.filterSupplier !== undefined) setFilterSupplier(p.filterSupplier);
-              } catch (e) {}
-            }
+        const scopedCloveRows = mergedInv.filter((i: any) => i.name?.toLowerCase().includes('clove'));
+        console.log(
+          `[LoadDiag] mergedInv: ${mergedInv.length} rows (clove: ${scopedCloveRows.length})` +
+          ` | scope="${hqAdmin ? "ALL (HQ admin)" : `location=${userLocationId}`}"`,
+          scopedCloveRows.map((i: any) => ({ name: i.name, locationId: i.locationId, preferredSupplierName: i.preferredSupplierName, preferredCost: i.preferredCost }))
+        );
+
+        setInventoryData(mergedInv);
+        setActivityData(act);
+        setCategories(cats);
+        setImportBatches(batches);
+        setSuppliersData(sups);
+
+        if (typeof window !== "undefined") {
+          const saved = localStorage.getItem("inventory_filters");
+          if (saved) {
+            try {
+              const p = JSON.parse(saved);
+              if (p.searchQuery !== undefined) setSearchQuery(p.searchQuery);
+              // Only restore filterStatus if it's a valid recognised value.
+              // A stale 'Healthy'/'Critical'/'Low' filter hides rows that don't
+              // match the status purely because parLevel=0 is treated as Healthy.
+              if (p.filterStatus !== undefined) setFilterStatus(p.filterStatus);
+              // Only restore filterCategory/filterSupplier if the value still
+              // exists in the freshly loaded data. A stale category value (e.g.
+              // "Dry Goods" was not previously in the list) silently hides every
+              // item in that category because there's no UI feedback that the
+              // filter is active-but-unknown.
+              if (p.filterCategory !== undefined && p.filterCategory !== "All") {
+                const catExists = (cats as string[]).some(
+                  (c: string) => c.toLowerCase() === p.filterCategory.toLowerCase()
+                );
+                setFilterCategory(catExists ? p.filterCategory : "All");
+              } else if (p.filterCategory !== undefined) {
+                setFilterCategory(p.filterCategory);
+              }
+              if (p.filterSupplier !== undefined) setFilterSupplier(p.filterSupplier);
+            } catch (e) { }
           }
-       } catch (e) {
-          console.error(e);
-       } finally {
-          setIsLoading(false);
-       }
+        }
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setIsLoading(false);
+      }
     }
     // Guard: user=undefined means auth is still initialising — don't fetch yet.
     // user=null means auth resolved but no session; user=object means logged in.
@@ -222,21 +240,21 @@ export default function Inventory() {
   const normalizedCategoriesMap = new Map();
   const normalizedSuppliersMap = new Map();
   inventoryData.forEach(item => {
-     if (item.category && item.category.trim() !== '') {
-        const normCat = item.category.trim().toLowerCase();
-        if (!normalizedCategoriesMap.has(normCat)) {
-           normalizedCategoriesMap.set(normCat, item.category.trim());
+    if (item.category && item.category.trim() !== '') {
+      const normCat = item.category.trim().toLowerCase();
+      if (!normalizedCategoriesMap.has(normCat)) {
+        normalizedCategoriesMap.set(normCat, item.category.trim());
+      }
+    }
+    if (item.supplierId) {
+      const suppObj = suppliersData.find(s => s.id === item.supplierId);
+      if (suppObj) {
+        const normSupp = suppObj.name.trim().toLowerCase();
+        if (!normalizedSuppliersMap.has(normSupp)) {
+          normalizedSuppliersMap.set(normSupp, suppObj.name.trim());
         }
-     }
-     if (item.supplierId) {
-        const suppObj = suppliersData.find(s => s.id === item.supplierId);
-        if (suppObj) {
-           const normSupp = suppObj.name.trim().toLowerCase();
-           if (!normalizedSuppliersMap.has(normSupp)) {
-              normalizedSuppliersMap.set(normSupp, suppObj.name.trim());
-           }
-        }
-     }
+      }
+    }
   });
 
   const uniqueCategories = Array.from(normalizedCategoriesMap.values()).sort();
@@ -284,9 +302,9 @@ export default function Inventory() {
       const qs = searchQuery.toLowerCase();
       const suppName = item.preferredSupplierName ?? getSupplierName(item.supplierId);
       if (!item.name?.toLowerCase().includes(qs) &&
-          !item.category?.toLowerCase().includes(qs) &&
-          !suppName.toLowerCase().includes(qs) &&
-          !item.unit?.toLowerCase().includes(qs)) {
+        !item.category?.toLowerCase().includes(qs) &&
+        !suppName.toLowerCase().includes(qs) &&
+        !item.unit?.toLowerCase().includes(qs)) {
         if (isClove) console.log(`  \u2192 DROPPED by searchQuery: "${searchQuery}"`);
         return false;
       }
@@ -294,20 +312,20 @@ export default function Inventory() {
     if (isClove) console.log(`  \u2192 PASSED all filters \u2713`);
     return true;
   }).sort((a, b) => {
-     let valA = a[sortKey] || "";
-     let valB = b[sortKey] || "";
+    let valA = a[sortKey] || "";
+    let valB = b[sortKey] || "";
 
-     // Remap if sorting by supplier
-     if (sortKey === 'supplier') {
-        valA = a.preferredSupplierName ?? getSupplierName(a.supplierId) ?? '';
-        valB = b.preferredSupplierName ?? getSupplierName(b.supplierId) ?? '';
-     }
+    // Remap if sorting by supplier
+    if (sortKey === 'supplier') {
+      valA = a.preferredSupplierName ?? getSupplierName(a.supplierId) ?? '';
+      valB = b.preferredSupplierName ?? getSupplierName(b.supplierId) ?? '';
+    }
 
-     if (typeof valA === "string") valA = valA.toLowerCase();
-     if (typeof valB === "string") valB = valB.toLowerCase();
-     if (valA < valB) return sortDirection === "asc" ? -1 : 1;
-     if (valA > valB) return sortDirection === "asc" ? 1 : -1;
-     return 0;
+    if (typeof valA === "string") valA = valA.toLowerCase();
+    if (typeof valB === "string") valB = valB.toLowerCase();
+    if (valA < valB) return sortDirection === "asc" ? -1 : 1;
+    if (valA > valB) return sortDirection === "asc" ? 1 : -1;
+    return 0;
   });
 
   const clearFilters = () => {
@@ -321,7 +339,7 @@ export default function Inventory() {
     e.stopPropagation();
     const currentOrders = await loadOrders();
     const qtyNeeded = Math.max(1, item.parLevel - item.inStock);
-    
+
     const newDraft = {
       id: `PO-${1000 + currentOrders.length + 1}`,
       supplierId: item.supplierId,
@@ -359,12 +377,12 @@ export default function Inventory() {
         : item.cost !== undefined ? String(item.cost) : ""
     );
     // Packaging fields — coerce null → ""
-    setEditPurchaseUom(item.purchaseUom   ?? "");
-    setEditPackQty(item.packQty           != null ? String(item.packQty)       : "");
+    setEditPurchaseUom(item.purchaseUom ?? "");
+    setEditPackQty(item.packQty != null ? String(item.packQty) : "");
     setEditInnerUnitType(item.innerUnitType ?? "");
     setEditInnerUnitSize(item.innerUnitSize != null ? String(item.innerUnitSize) : "");
-    setEditInnerUnitUom(item.innerUnitUom  ?? "");
-    setEditBaseUomNew(item.baseUomNew      ?? "");
+    setEditInnerUnitUom(item.innerUnitUom ?? "");
+    setEditBaseUomNew(item.baseUomNew ?? "");
     setEditAllowedUoms(
       Array.isArray(item.allowedRecipeUoms) ? item.allowedRecipeUoms.join(", ") : ""
     );
@@ -397,50 +415,64 @@ export default function Inventory() {
         .filter((u: any) => u.name?.trim());
       if (pUnits.length > 0 && !pUnits.some((u: any) => u.isPrimary)) pUnits[0].isPrimary = true;
 
-      const primaryUnit  = pUnits.find((u: any) => u.isPrimary) || pUnits[0];
+      const primaryUnit = pUnits.find((u: any) => u.isPrimary) || pUnits[0];
       const hasValidPrim = primaryUnit && primaryUnit.name && primaryUnit.conversion > 0;
 
       const parsedCost = parseFloat(editPurchaseCost);
-      const baseCost   = hasValidPrim && !isNaN(parsedCost)
+      const baseCost = hasValidPrim && !isNaN(parsedCost)
         ? parsedCost / primaryUnit.conversion
         : (!isNaN(parsedCost) ? parsedCost : editItem.cost);
-      const purchCost  = hasValidPrim && !isNaN(parsedCost) ? parsedCost : null;
+      const purchCost = hasValidPrim && !isNaN(parsedCost) ? parsedCost : null;
 
       // Compute preferred supplier summary from purchase_options state.
       // This MUST be included in `updated` so that setInventoryData(newInventory)
       // does not discard the patch applied by syncInventoryRowSupplier / makePreferred.
-      const _prefRow  = editPurchaseOptions.find((r: any) => r.isPreferred);
-      const _lowRow   = editPurchaseOptions.length > 0
+      const _prefRow = editPurchaseOptions.find((r: any) => r.isPreferred);
+      const _lowRow = editPurchaseOptions.length > 0
         ? [...editPurchaseOptions].sort((a: any, b: any) => a.unitPrice - b.unitPrice)[0]
         : null;
-      const _chosen   = _prefRow ?? _lowRow ?? null;
+      const _chosen = _prefRow ?? _lowRow ?? null;
 
       const updated = {
         ...editItem,
-        baseUnit:      editBaseUnit || editItem.unit || "",
-        unit:          editBaseUnit || editItem.unit || "",
+        baseUnit: editBaseUnit || editItem.unit || "",
+        unit: editBaseUnit || editItem.unit || "",
         purchaseUnits: pUnits,
-        cost:          baseCost,
-        purchaseCost:  purchCost,
-        updatedAt:     Date.now(),
+        cost: baseCost,
+        purchaseCost: purchCost,
+        updatedAt: Date.now(),
         // Packaging fields
-        purchaseUom:       editPurchaseUom.trim()   || null,
-        packQty:           editPackQty !== ""        ? Number(editPackQty)       : null,
-        innerUnitType:     editInnerUnitType.trim()  || null,
-        innerUnitSize:     editInnerUnitSize !== ""  ? Number(editInnerUnitSize) : null,
-        innerUnitUom:      editInnerUnitUom.trim()   || null,
+        purchaseUom: editPurchaseUom.trim() || null,
+        packQty: editPackQty !== "" ? Number(editPackQty) : null,
+        innerUnitType: editInnerUnitType.trim() || null,
+        innerUnitSize: editInnerUnitSize !== "" ? Number(editInnerUnitSize) : null,
+        innerUnitUom: editInnerUnitUom.trim() || null,
         // base_uom: only backfill baseunit when currently blank
-        baseUomNew:        editBaseUomNew.trim()     || null,
+        baseUomNew: editBaseUomNew.trim() || null,
         allowedRecipeUoms: editAllowedUoms.trim()
           ? editAllowedUoms.split(",").map(s => s.trim()).filter(Boolean)
           : null,
         // Preserve purchase_options-derived supplier summary so the inventory list
         // does not revert to legacy supplierId / suppliersData after Save Changes.
         preferredSupplierName: _chosen?.supplierName ?? null,
-        preferredCost:         _chosen?.unitPrice    ?? null,
+        preferredCost: _chosen?.unitPrice ?? null,
       };
 
       const newInventory = inventoryData.map(i => i.id === updated.id ? updated : i);
+
+      // Diagnostic: confirm preferred supplier fields are present before and after save
+      const _beforeRow = inventoryData.find((i: any) => i.id === updated.id);
+      console.log('[handleEditSave] BEFORE setInventoryData', {
+        id: updated.id,
+        preferredSupplierName_before: _beforeRow?.preferredSupplierName,
+        preferredCost_before: _beforeRow?.preferredCost,
+        preferredSupplierName_on_updated: updated.preferredSupplierName,
+        preferredCost_on_updated: updated.preferredCost,
+        editPurchaseOptions: editPurchaseOptions.map((r: any) => ({
+          supplierName: r.supplierName, isPreferred: r.isPreferred, unitPrice: r.unitPrice,
+        })),
+      });
+
       console.log("[EditItem] request start  id=", updated.id);
       const res = await saveInventory(newInventory);
       if (!res?.success) {
@@ -451,6 +483,15 @@ export default function Inventory() {
       }
       console.log("[EditItem] request success");
       setInventoryData(newInventory);
+
+      // Diagnostic: confirm the row in newInventory after setInventoryData
+      const _afterRow = newInventory.find((i: any) => i.id === updated.id);
+      console.log('[handleEditSave] AFTER setInventoryData', {
+        id: updated.id,
+        preferredSupplierName_after: _afterRow?.preferredSupplierName,
+        preferredCost_after: _afterRow?.preferredCost,
+      });
+
       setIsEditDrawerOpen(false);
     } catch (err: any) {
       console.log("[EditItem] caught error", err?.message);
@@ -552,7 +593,7 @@ export default function Inventory() {
     const res = await insertPurchaseOptions([{
       ...newPurchOpt,
       inventoryItemId: String(editItem.id),
-      packQty:   newPurchOpt.packQty   !== '' ? Number(newPurchOpt.packQty)   : null,
+      packQty: newPurchOpt.packQty !== '' ? Number(newPurchOpt.packQty) : null,
       unitPrice: newPurchOpt.unitPrice !== '' ? Number(newPurchOpt.unitPrice) : 0,
     }]);
     if (!res.success) { alert(`Insert failed: ${(res as any).error?.message ?? ''}`); return; }
@@ -614,10 +655,10 @@ export default function Inventory() {
     setAdjType("Add");
     setAdjQty("");
     if (item.purchaseUnits && item.purchaseUnits.length > 0) {
-       const pUnit = item.purchaseUnits.find((u: any) => u.isPrimary) || item.purchaseUnits[0];
-       setAdjUnit(pUnit.name);
+      const pUnit = item.purchaseUnits.find((u: any) => u.isPrimary) || item.purchaseUnits[0];
+      setAdjUnit(pUnit.name);
     } else {
-       setAdjUnit(item.baseUnit || item.unit);
+      setAdjUnit(item.baseUnit || item.unit);
     }
     setAdjNotes("");
     setNewParLevel(item.parLevel.toString());
@@ -635,19 +676,19 @@ export default function Inventory() {
 
     let conversion = 1;
     if (selectedItem.purchaseUnits) {
-       const mappedUnit = selectedItem.purchaseUnits.find((u: any) => u.name === adjUnit);
-       if (mappedUnit) conversion = mappedUnit.conversion;
+      const mappedUnit = selectedItem.purchaseUnits.find((u: any) => u.name === adjUnit);
+      if (mappedUnit) conversion = mappedUnit.conversion;
     }
 
     let variance = 0;
     const normalizedInput = numericQty * conversion;
-    
+
     if (adjType === "Add") variance = normalizedInput;
     if (adjType === "Remove" || adjType === "Waste") variance = -normalizedInput;
 
     let updatedItem = { ...selectedItem, inStock: selectedItem.inStock + variance, updatedAt: Date.now() };
     const newInventory = inventoryData.map(i => i.id === selectedItem.id ? updatedItem : i);
-    
+
     const logEntry = {
       date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
       time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
@@ -666,8 +707,8 @@ export default function Inventory() {
 
     const res = await saveInventory(newInventory);
     if (!res.success) {
-       alert(`Save Failed: ${res.error?.message || "Database rejected the adjustment."}`);
-       return;
+      alert(`Save Failed: ${res.error?.message || "Database rejected the adjustment."}`);
+      return;
     }
     setInventoryData(newInventory);
     setActivityData(newActivityData);
@@ -676,18 +717,18 @@ export default function Inventory() {
 
     // ── Log movement (fire-and-forget, non-fatal) ──────────────────────────────
     // Use the canonical item_id (shared identity) if set, else fall back to row id.
-    const movItemId  = selectedItem.itemId ?? selectedItem.id;
-    const movLocId   = selectedItem.locationId ?? resolveLocationId(user);
-    const movType    = (adjType === 'Add') ? 'adjustment_in' : 'adjustment_out';
-    const absQty     = Math.abs(normalizedInput);
+    const movItemId = selectedItem.itemId ?? selectedItem.id;
+    const movLocId = selectedItem.locationId ?? resolveLocationId(user);
+    const movType = (adjType === 'Add') ? 'adjustment_in' : 'adjustment_out';
+    const absQty = Math.abs(normalizedInput);
     logMovement({
-      locationId:    movLocId,
-      itemId:        String(movItemId),
-      movementType:  movType,
-      quantity:      absQty,
-      unitCost:      selectedItem.cost ?? null,
+      locationId: movLocId,
+      itemId: String(movItemId),
+      movementType: movType,
+      quantity: absQty,
+      unitCost: selectedItem.cost ?? null,
       referenceType: 'manual',
-      notes:         adjNotes ? `${adjType}: ${adjNotes}` : adjType,
+      notes: adjNotes ? `${adjType}: ${adjNotes}` : adjType,
     });
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -699,12 +740,12 @@ export default function Inventory() {
     if (!selectedItem) return;
     if (!editBaseUnit) return alert("Base unit is required.");
     if (editPurchaseUnits.some(u => !u.name || !u.conversion || isNaN(parseFloat(u.conversion)))) return alert("All purchase units must have a valid name and conversion multiplier.");
-    
+
     let pUnits = [...editPurchaseUnits];
     pUnits.forEach(u => u.conversion = parseFloat(u.conversion));
 
     if (pUnits.length > 0 && !pUnits.some(u => u.isPrimary)) {
-        pUnits[0].isPrimary = true;
+      pUnits[0].isPrimary = true;
     }
 
     const primaryUnit = pUnits.find(u => u.isPrimary) || pUnits[0];
@@ -715,35 +756,35 @@ export default function Inventory() {
     let purchaseCost = parsedInput;
 
     if (hasValidPrimary && !isNaN(parsedInput)) {
-       purchaseCost = parsedInput;
-       baseCost = purchaseCost / primaryUnit.conversion;
-       primaryUnit.cost = purchaseCost;
+      purchaseCost = parsedInput;
+      baseCost = purchaseCost / primaryUnit.conversion;
+      primaryUnit.cost = purchaseCost;
     }
 
-    let updatedItem = { 
-       ...selectedItem, 
-       baseUnit: editBaseUnit, 
-       unit: editBaseUnit, 
-       purchaseUnits: pUnits, 
-       cost: !isNaN(baseCost) ? baseCost : selectedItem.cost,
-       purchaseCost: !isNaN(purchaseCost) ? purchaseCost : selectedItem.purchaseCost,
-       updatedAt: Date.now() 
+    let updatedItem = {
+      ...selectedItem,
+      baseUnit: editBaseUnit,
+      unit: editBaseUnit,
+      purchaseUnits: pUnits,
+      cost: !isNaN(baseCost) ? baseCost : selectedItem.cost,
+      purchaseCost: !isNaN(purchaseCost) ? purchaseCost : selectedItem.purchaseCost,
+      updatedAt: Date.now()
     };
     const newInventory = inventoryData.map(i => i.id === selectedItem.id ? updatedItem : i);
-    
+
     const res = await saveInventory(newInventory);
     if (!res.success) {
-       alert(`Save Failed: ${res.error?.message || "Database rejected unit update."}`);
-       return;
+      alert(`Save Failed: ${res.error?.message || "Database rejected unit update."}`);
+      return;
     }
     setInventoryData(newInventory);
-    setSelectedItem(updatedItem); 
-    
+    setSelectedItem(updatedItem);
+
     if (pUnits.length > 0) {
-       const primary = pUnits.find((u: any) => u.isPrimary) || pUnits[0];
-       setAdjUnit(primary.name);
+      const primary = pUnits.find((u: any) => u.isPrimary) || pUnits[0];
+      setAdjUnit(primary.name);
     } else {
-       setAdjUnit(editBaseUnit);
+      setAdjUnit(editBaseUnit);
     }
     alert("Unit map schema updated effectively.");
   };
@@ -755,7 +796,7 @@ export default function Inventory() {
 
     let updatedItem = { ...selectedItem, parLevel: numPar, updatedAt: Date.now() };
     const newInventory = inventoryData.map(i => i.id === selectedItem.id ? updatedItem : i);
-    
+
     const logEntry = {
       date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
       time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
@@ -773,18 +814,18 @@ export default function Inventory() {
 
     const res = await saveInventory(newInventory);
     if (!res.success) {
-       alert(`Save Failed: ${res.error?.message || "Database rejected supplier match."}`);
-       return;
+      alert(`Save Failed: ${res.error?.message || "Database rejected supplier match."}`);
+      return;
     }
     setInventoryData(newInventory);
     setActivityData(newActivityData);
     await saveInventoryActivity(newActivityData);
-    setSelectedItem(updatedItem); 
+    setSelectedItem(updatedItem);
     setParNotes("");
   };
 
   const handleAddNewItem = async () => {
-    if(!newItem.name || !newItem.inStock || !newItem.parLevel || !newItem.cost) {
+    if (!newItem.name || !newItem.inStock || !newItem.parLevel || !newItem.cost) {
       alert("Please fill in all required fields.");
       return;
     }
@@ -840,7 +881,7 @@ export default function Inventory() {
     let pUnits = [...newItem.purchaseUnits];
     pUnits.forEach((u: any) => u.conversion = parseFloat(u.conversion));
     if (pUnits.length > 0 && !pUnits.some((u: any) => u.isPrimary)) {
-        pUnits[0].isPrimary = true;
+      pUnits[0].isPrimary = true;
     }
 
     pUnits = pUnits.filter((u: any) => u.name.trim() !== "");
@@ -853,9 +894,9 @@ export default function Inventory() {
     let purchaseCost = parsedInput;
 
     if (hasValidPrimary) {
-       purchaseCost = parsedInput;
-       baseCost = purchaseCost / primaryUnit.conversion;
-       primaryUnit.cost = purchaseCost;
+      purchaseCost = parsedInput;
+      baseCost = purchaseCost / primaryUnit.conversion;
+      primaryUnit.cost = purchaseCost;
     }
 
     const finalItem = {
@@ -872,12 +913,12 @@ export default function Inventory() {
       updatedAt: Date.now(),
       // Phase 2: structured packaging fields — pass nulls when left blank so the
       // DB columns stay NULL and costing falls back to legacy for this item.
-      purchaseUom:       newItem.purchaseUom.trim()       || null,
-      packQty:           newItem.packQty !== ""           ? Number(newItem.packQty)       : null,
-      innerUnitType:     newItem.innerUnitType.trim()     || null,
-      innerUnitSize:     newItem.innerUnitSize !== ""     ? Number(newItem.innerUnitSize) : null,
-      innerUnitUom:      newItem.innerUnitUom.trim()      || null,
-      baseUomNew:        newItem.baseUomNew.trim()        || null,
+      purchaseUom: newItem.purchaseUom.trim() || null,
+      packQty: newItem.packQty !== "" ? Number(newItem.packQty) : null,
+      innerUnitType: newItem.innerUnitType.trim() || null,
+      innerUnitSize: newItem.innerUnitSize !== "" ? Number(newItem.innerUnitSize) : null,
+      innerUnitUom: newItem.innerUnitUom.trim() || null,
+      baseUomNew: newItem.baseUomNew.trim() || null,
       // allowedRecipeUoms: comma-separated in the UI → split into TEXT[] for the DB
       allowedRecipeUoms: newItem.allowedRecipeUoms.trim()
         ? newItem.allowedRecipeUoms.split(',').map(s => s.trim()).filter(Boolean)
@@ -911,13 +952,13 @@ export default function Inventory() {
     reader.onload = (event) => {
       const text = event.target?.result as string;
       const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
-      
+
       if (lines.length < 2) {
         setImportErrors(["Uploaded file does not contain valid data rows."]);
         setImportPreview([]);
         return;
       }
-      
+
       const dataRows = lines.slice(1);
       const parsedData = [];
       const errors = [];
@@ -928,46 +969,46 @@ export default function Inventory() {
       const deriveBaseUnit = (rawUom: string): string => {
         const u = rawUom.trim().toLowerCase();
         if (['kg', 'kgs', 'kilogram', 'kilograms',
-             'g', 'gm', 'gms', 'gram', 'grams',
-             'lb', 'lbs', 'pound', 'pounds'].includes(u)) return 'kg';
+          'g', 'gm', 'gms', 'gram', 'grams',
+          'lb', 'lbs', 'pound', 'pounds'].includes(u)) return 'kg';
         if (['l', 'ltr', 'litre', 'litres', 'liter', 'liters',
-             'ml', 'millilitre', 'milliliter'].includes(u)) return 'L';
+          'ml', 'millilitre', 'milliliter'].includes(u)) return 'L';
         return 'ea';  // default: each/piece/unit
       };
 
       for (const [idx, row] of dataRows.entries()) {
         const cols = row.split(',').map(c => c.trim().replace(/^"|"$/g, ''));
         if (cols.length < 7) {
-          errors.push(`Row ${idx+2} is missing required standard columns.`);
+          errors.push(`Row ${idx + 2} is missing required standard columns.`);
           continue;
         }
 
-        const rawUom   = cols[2] || '';
+        const rawUom = cols[2] || '';
         const baseUnit = deriveBaseUnit(rawUom);
 
         const payload = {
-          name:         cols[0],
-          category:     cols[1],
-          unit:         rawUom || 'ea',
+          name: cols[0],
+          category: cols[1],
+          unit: rawUom || 'ea',
           baseUnit,                        // ← derived from UOM, never blank
-          itemType:     'Ingredient',      // ← default for all food imports
+          itemType: 'Ingredient',      // ← default for all food imports
           supplierText: cols[3],
-          inStock:      parseFloat(cols[4]) || 0,
-          parLevel:     parseFloat(cols[5]) || 0,
-          cost:         parseFloat(cols[6]) || 0,
-          priceTrend:   "steady",
+          inStock: parseFloat(cols[4]) || 0,
+          parLevel: parseFloat(cols[5]) || 0,
+          cost: parseFloat(cols[6]) || 0,
+          priceTrend: "steady",
           priceIncrease: false
         };
 
         console.log(
-          `[Import Parse] Row ${idx+2}: name="${payload.name}"` +
+          `[Import Parse] Row ${idx + 2}: name="${payload.name}"` +
           ` | sourceUOM="${rawUom}" → baseUnit="${baseUnit}" | itemType="${payload.itemType}"`
         );
 
         const isDuplicate = inventoryData.some(i => i.name.toLowerCase() === payload.name.toLowerCase());
         parsedData.push({ payload, isDuplicate });
       }
-      
+
       setImportPreview(parsedData);
       setImportErrors(errors);
     };
@@ -997,128 +1038,128 @@ export default function Inventory() {
 
       const currentInventoryMap = new Map(inventoryData.map(i => [i.name.toLowerCase(), i]));
       const timestamp = Date.now();
-      
+
       const newItems: any[] = [];
       const updatedItems: any[] = [];
       const rollbackData: Record<number, any> = {};
       const newlyCreatedIds: string[] = [];  // UUID PKs for rollback
       let skipped = 0;
-      
+
       const phaseAErrors: string[] = [];
 
       for (const [idx, p] of importPreview.entries()) {
-          if (!p.payload.name || p.payload.name.trim() === "") {
-             phaseAErrors.push(`Row ${idx+1}: Missing required field 'Item Name'.`);
-          }
-          if (isNaN(parseFloat(p.payload.inStock)) || isNaN(parseFloat(p.payload.cost))) {
-             phaseAErrors.push(`Row ${idx+1} [${p.payload.name}]: Pricing/Stock bounds are invalid. Numeric limits required.`);
-          }
+        if (!p.payload.name || p.payload.name.trim() === "") {
+          phaseAErrors.push(`Row ${idx + 1}: Missing required field 'Item Name'.`);
+        }
+        if (isNaN(parseFloat(p.payload.inStock)) || isNaN(parseFloat(p.payload.cost))) {
+          phaseAErrors.push(`Row ${idx + 1} [${p.payload.name}]: Pricing/Stock bounds are invalid. Numeric limits required.`);
+        }
 
-          let cat = (p.payload.category || 'General').trim();
-          const catLower = cat.toLowerCase();
-          
-          const existingIdx = currentCategoriesLower.indexOf(catLower);
-          if (existingIdx !== -1) {
-             cat = categories[existingIdx];
+        let cat = (p.payload.category || 'General').trim();
+        const catLower = cat.toLowerCase();
+
+        const existingIdx = currentCategoriesLower.indexOf(catLower);
+        if (existingIdx !== -1) {
+          cat = categories[existingIdx];
+        } else {
+          if (!newlyCreatedCategories.includes(cat)) {
+            newlyCreatedCategories.push(cat);
+            finalCategoriesList.push(cat);
+            currentCategoriesLower.push(catLower);
+          }
+        }
+
+        let suppText = p.payload.supplierText ? p.payload.supplierText.trim() : "";
+        let suppIdVal = null;
+        try {
+          suppIdVal = suppText ? await resolveSupplier(suppText) : null;
+        } catch (e: any) {
+          phaseAErrors.push(`Row ${idx + 1} [${p.payload.name}]: Failed resolving supplier '${suppText}'. ${e.message}`);
+        }
+
+        const matchingItem = currentInventoryMap.get(p.payload.name.toLowerCase());
+
+        if (matchingItem) {
+          if (!overwriteExisting) {
+            skipped++;
+            continue;
+          }
+          rollbackData[matchingItem.id] = { ...matchingItem };
+
+          // Explicit itemType / baseUnit resolution for UPDATE path:
+          // p.payload spreads an itemType of 'Ingredient' and a derived baseUnit.
+          // We preserve the existing values if they are already set (non-blank);
+          // only backfill from the import row when the DB row had blanks.
+          const resolvedItemType = matchingItem.itemType || p.payload.itemType || 'Ingredient';
+          const resolvedBaseUnit = matchingItem.baseUnit || p.payload.baseUnit || p.payload.unit || 'ea';
+
+          console.log(
+            `[Import Update] "${p.payload.name}"` +
+            ` itemType: "${matchingItem.itemType}" → "${resolvedItemType}"` +
+            ` | baseUnit: "${matchingItem.baseUnit}" → "${resolvedBaseUnit}"` +
+            ` | sourceUOM: "${p.payload.unit}"`
+          );
+
+          updatedItems.push({
+            ...matchingItem,
+            ...p.payload,
+            itemType: resolvedItemType,   // explicitly overrides spread
+            baseUnit: resolvedBaseUnit,   // explicitly overrides spread
+            category: cat,
+            supplierId: suppIdVal,
+            updatedAt: timestamp
+          });
+        } else {
+          // Determine location for this import (HQ admin → LOC-HQ, else current user location)
+          const importLocationId: string = resolveLocationId(user);
+          const newRowId = crypto.randomUUID(); // always unique per location row
+
+          // Reuse shared item_id if same product name exists on the other side of HQ/store boundary
+          let resolvedItemId: string;
+          if (p.payload.name) {
+            const existingId = await resolveSharedItemId(p.payload.name, importLocationId);
+            resolvedItemId = existingId ?? crypto.randomUUID();
           } else {
-             if (!newlyCreatedCategories.includes(cat)) {
-                newlyCreatedCategories.push(cat);
-                finalCategoriesList.push(cat);
-                currentCategoriesLower.push(catLower);
-             }
+            resolvedItemId = crypto.randomUUID();
           }
 
-          let suppText = p.payload.supplierText ? p.payload.supplierText.trim() : "";
-          let suppIdVal = null;
-          try {
-             suppIdVal = suppText ? await resolveSupplier(suppText) : null;
-          } catch (e: any) {
-             phaseAErrors.push(`Row ${idx+1} [${p.payload.name}]: Failed resolving supplier '${suppText}'. ${e.message}`);
-          }
+          newlyCreatedIds.push(newRowId);
 
-          const matchingItem = currentInventoryMap.get(p.payload.name.toLowerCase());
-          
-          if (matchingItem) {
-              if (!overwriteExisting) {
-                  skipped++;
-                  continue;
-              }
-              rollbackData[matchingItem.id] = { ...matchingItem };
+          // Explicit itemType / baseUnit for INSERT path:
+          // payload already carries both (set in handleCSVUpload parse step), but
+          // we set them explicitly here too so the object is self-documenting and
+          // safe even if parse step changes.
+          const newItemType = p.payload.itemType || 'Ingredient';
+          const newBaseUnit = p.payload.baseUnit || p.payload.unit || 'ea';
 
-              // Explicit itemType / baseUnit resolution for UPDATE path:
-              // p.payload spreads an itemType of 'Ingredient' and a derived baseUnit.
-              // We preserve the existing values if they are already set (non-blank);
-              // only backfill from the import row when the DB row had blanks.
-              const resolvedItemType  = matchingItem.itemType  || p.payload.itemType  || 'Ingredient';
-              const resolvedBaseUnit  = matchingItem.baseUnit  || p.payload.baseUnit  || p.payload.unit || 'ea';
+          console.log(
+            `[Import Insert] "${p.payload.name}"` +
+            ` itemType="${newItemType}" | baseUnit="${newBaseUnit}"` +
+            ` | sourceUOM="${p.payload.unit}" | locationId="${importLocationId}"`
+          );
 
-              console.log(
-                `[Import Update] "${p.payload.name}"` +
-                ` itemType: "${matchingItem.itemType}" → "${resolvedItemType}"` +
-                ` | baseUnit: "${matchingItem.baseUnit}" → "${resolvedBaseUnit}"` +
-                ` | sourceUOM: "${p.payload.unit}"`
-              );
-
-              updatedItems.push({
-                  ...matchingItem,
-                  ...p.payload,
-                  itemType:   resolvedItemType,   // explicitly overrides spread
-                  baseUnit:   resolvedBaseUnit,   // explicitly overrides spread
-                  category:   cat,
-                  supplierId: suppIdVal,
-                  updatedAt:  timestamp
-              });
-          } else {
-              // Determine location for this import (HQ admin → LOC-HQ, else current user location)
-              const importLocationId: string = resolveLocationId(user);
-              const newRowId = crypto.randomUUID(); // always unique per location row
-
-              // Reuse shared item_id if same product name exists on the other side of HQ/store boundary
-              let resolvedItemId: string;
-              if (p.payload.name) {
-                const existingId = await resolveSharedItemId(p.payload.name, importLocationId);
-                resolvedItemId = existingId ?? crypto.randomUUID();
-              } else {
-                resolvedItemId = crypto.randomUUID();
-              }
-
-              newlyCreatedIds.push(newRowId);
-
-              // Explicit itemType / baseUnit for INSERT path:
-              // payload already carries both (set in handleCSVUpload parse step), but
-              // we set them explicitly here too so the object is self-documenting and
-              // safe even if parse step changes.
-              const newItemType = p.payload.itemType  || 'Ingredient';
-              const newBaseUnit = p.payload.baseUnit  || p.payload.unit || 'ea';
-
-              console.log(
-                `[Import Insert] "${p.payload.name}"` +
-                ` itemType="${newItemType}" | baseUnit="${newBaseUnit}"` +
-                ` | sourceUOM="${p.payload.unit}" | locationId="${importLocationId}"`
-              );
-
-              newItems.push({
-                  ...p.payload,
-                  itemType:    newItemType,       // explicit — never blank
-                  baseUnit:    newBaseUnit,       // explicit — never blank
-                  category:    cat,
-                  supplierId:  suppIdVal,
-                  id:          newRowId,
-                  item_id:     resolvedItemId,
-                  itemId:      resolvedItemId,
-                  location_id: importLocationId,
-                  locationId:  importLocationId,
-                  updatedAt:   timestamp
-              });
-          }
+          newItems.push({
+            ...p.payload,
+            itemType: newItemType,       // explicit — never blank
+            baseUnit: newBaseUnit,       // explicit — never blank
+            category: cat,
+            supplierId: suppIdVal,
+            id: newRowId,
+            item_id: resolvedItemId,
+            itemId: resolvedItemId,
+            location_id: importLocationId,
+            locationId: importLocationId,
+            updatedAt: timestamp
+          });
+        }
 
       }
 
       if (phaseAErrors.length > 0) {
-         console.warn("[Commit Import] Phase A Validation Failed. Committing halt.");
-         setImportErrors(phaseAErrors);
-         setIsCommitting(false);
-         return; 
+        console.warn("[Commit Import] Phase A Validation Failed. Committing halt.");
+        setImportErrors(phaseAErrors);
+        setIsCommitting(false);
+        return;
       }
 
       if (newItems.length === 0 && updatedItems.length === 0) {
@@ -1130,16 +1171,16 @@ export default function Inventory() {
       console.log("[Commit Import] Phase B: Database Schema Commits");
       let unifiedInventory = [...inventoryData];
       for (const u of updatedItems) {
-         const ix = unifiedInventory.findIndex(i => i.id === u.id);
-         if (ix > -1) unifiedInventory[ix] = u;
+        const ix = unifiedInventory.findIndex(i => i.id === u.id);
+        if (ix > -1) unifiedInventory[ix] = u;
       }
       unifiedInventory = [...newItems, ...unifiedInventory];
 
       const res = await saveInventory(unifiedInventory);
       if (!res.success) {
-         setImportErrors([`Database Rejected Bulk Upsert: ${res.error?.message || JSON.stringify(res.error)}`]);
-         setIsCommitting(false);
-         return;
+        setImportErrors([`Database Rejected Bulk Upsert: ${res.error?.message || JSON.stringify(res.error)}`]);
+        setIsCommitting(false);
+        return;
       }
       // Re-fetch from DB instead of stamping local state from unifiedInventory.
       // This guarantees the UI reflects actual DB state after the commit —
@@ -1153,37 +1194,37 @@ export default function Inventory() {
       console.log(`[commitImport] Re-fetched ${freshInv.length} rows from DB after commit (scoped: ${scopedAfterImport.length})`);
 
       if (newlyCreatedCategories.length > 0) {
-         setCategories(finalCategoriesList);
-         // Persist newly discovered categories to DB
-         await Promise.all(
-           newlyCreatedCategories.map((cat: string) => addCategory(cat, 'inventory'))
-         );
+        setCategories(finalCategoriesList);
+        // Persist newly discovered categories to DB
+        await Promise.all(
+          newlyCreatedCategories.map((cat: string) => addCategory(cat, 'inventory'))
+        );
       }
-      
+
       const newBatch = {
-         batchId: `IMP-${timestamp}`,
-         timestamp,
-         fileName: fileInputRef.current?.files?.[0]?.name || "Unknown Array",
-         totalRowsProcessed: importPreview.length,
-         metrics: { new: newItems.length, updated: updatedItems.length, skipped },
-         newlyCreatedIds,
-         rollbackData,
-         status: "Active"
+        batchId: `IMP-${timestamp}`,
+        timestamp,
+        fileName: fileInputRef.current?.files?.[0]?.name || "Unknown Array",
+        totalRowsProcessed: importPreview.length,
+        metrics: { new: newItems.length, updated: updatedItems.length, skipped },
+        newlyCreatedIds,
+        rollbackData,
+        status: "Active"
       };
 
       const newBatchesList = [newBatch, ...importBatches];
       const batchRes = await saveImportBatches(newBatchesList);
       if (!batchRes?.success) {
-         setImportErrors([`Failed to append history ledger: ${batchRes?.error?.message}`]);
-         // Do not fail the entire commit if history fails, just alert the user because inventory was already saved.
+        setImportErrors([`Failed to append history ledger: ${batchRes?.error?.message}`]);
+        // Do not fail the entire commit if history fails, just alert the user because inventory was already saved.
       } else {
-         setImportBatches(newBatchesList);
+        setImportBatches(newBatchesList);
       }
 
       // \u2500\u2500 Post-import summary ───────────────────────────────────────────────────
-      const defaultedItemType = newItems .filter((i: any) => i.itemType === 'Ingredient').length
-                              + updatedItems.filter((i: any) => i.itemType === 'Ingredient' && !currentInventoryMap.get(i.name?.toLowerCase())?.itemType).length;
-      const defaultedBaseUnit = newItems .filter((i: any) => !importPreview.find((p: any) => p.payload.name === i.name && p.payload.baseUnit && p.payload.unit !== p.payload.baseUnit)).length;
+      const defaultedItemType = newItems.filter((i: any) => i.itemType === 'Ingredient').length
+        + updatedItems.filter((i: any) => i.itemType === 'Ingredient' && !currentInventoryMap.get(i.name?.toLowerCase())?.itemType).length;
+      const defaultedBaseUnit = newItems.filter((i: any) => !importPreview.find((p: any) => p.payload.name === i.name && p.payload.baseUnit && p.payload.unit !== p.payload.baseUnit)).length;
 
       console.log(
         `[Import Summary]\n` +
@@ -1273,21 +1314,21 @@ export default function Inventory() {
       };
 
       const COL = {
-        supplierName:        colIdx(['supplier_name', 'supplier', 'vendor', 'supplier_company']),
+        supplierName: colIdx(['supplier_name', 'supplier', 'vendor', 'supplier_company']),
         supplierProductName: colIdx(['supplier_product_name', 'product_name', 'product', 'description', 'supplier_description']),
-        itemName:            colIdx(['item_name', 'item', 'name', 'inventory_name', 'ingredient', 'ingredient_name']),
-        purchaseUom:         colIdx(['purchase_uom', 'uom', 'unit', 'buy_unit', 'order_unit']),
-        packQty:             colIdx(['pack_qty', 'pack_quantity', 'qty_per_pack', 'pack_size', 'quantity_per_pack']),
-        packUom:             colIdx(['pack_uom', 'inner_uom', 'inner_unit', 'unit_of_inner']),
-        unitPrice:           colIdx(['unit_price', 'price', 'cost', 'purchase_price', 'supplier_price']),
-        isPreferred:         colIdx(['is_preferred', 'preferred', 'default_supplier']),
+        itemName: colIdx(['item_name', 'item', 'name', 'inventory_name', 'ingredient', 'ingredient_name']),
+        purchaseUom: colIdx(['purchase_uom', 'uom', 'unit', 'buy_unit', 'order_unit']),
+        packQty: colIdx(['pack_qty', 'pack_quantity', 'qty_per_pack', 'pack_size', 'quantity_per_pack']),
+        packUom: colIdx(['pack_uom', 'inner_uom', 'inner_unit', 'unit_of_inner']),
+        unitPrice: colIdx(['unit_price', 'price', 'cost', 'purchase_price', 'supplier_price']),
+        isPreferred: colIdx(['is_preferred', 'preferred', 'default_supplier']),
       };
 
       // Require at minimum: supplier_name, item_name, unit_price
       const missing: string[] = [];
-      if (COL.supplierName  < 0) missing.push('supplier_name (or: supplier / vendor)');
-      if (COL.itemName      < 0) missing.push('item_name (or: item / name / inventory_name)');
-      if (COL.unitPrice     < 0) missing.push('unit_price (or: price / cost)');
+      if (COL.supplierName < 0) missing.push('supplier_name (or: supplier / vendor)');
+      if (COL.itemName < 0) missing.push('item_name (or: item / name / inventory_name)');
+      if (COL.unitPrice < 0) missing.push('unit_price (or: price / cost)');
       if (missing.length > 0) {
         setSupplierImportErrors([
           `Required columns not found in CSV header.`,
@@ -1328,7 +1369,7 @@ export default function Inventory() {
       console.log(`[SupplierImport] Name lookup map: ${nameToId.size} entries`);
 
       // ── Parse data rows ─────────────────────────────────────────────────────
-      const matched: any[]   = [];
+      const matched: any[] = [];
       const unmatched: any[] = [];
       const parseErrors: string[] = [];
 
@@ -1337,8 +1378,8 @@ export default function Inventory() {
         const rowNum = idx + 2;
 
         const rawSupplierName = COL.supplierName >= 0 ? (cols[COL.supplierName] ?? '').trim() : '';
-        const rawItemName     = COL.itemName     >= 0 ? (cols[COL.itemName]     ?? '').trim() : '';
-        const rawPrice        = COL.unitPrice    >= 0 ? (cols[COL.unitPrice]    ?? '').trim() : '0';
+        const rawItemName = COL.itemName >= 0 ? (cols[COL.itemName] ?? '').trim() : '';
+        const rawPrice = COL.unitPrice >= 0 ? (cols[COL.unitPrice] ?? '').trim() : '0';
 
         if (!rawItemName) {
           parseErrors.push(`Row ${rowNum}: empty item name — skipped.`);
@@ -1357,13 +1398,13 @@ export default function Inventory() {
           rawItemName,
           normItemName,
           inventoryItemId,
-          supplierName:        rawSupplierName,
+          supplierName: rawSupplierName,
           supplierProductName: COL.supplierProductName >= 0 ? (cols[COL.supplierProductName] ?? '').trim() || null : null,
-          purchaseUom:         COL.purchaseUom  >= 0 ? (cols[COL.purchaseUom]  ?? '').trim() || 'ea'  : 'ea',
-          packQty:             COL.packQty      >= 0 ? (parseFloat(cols[COL.packQty]  ?? '') || null)  : null,
-          packUom:             COL.packUom      >= 0 ? (cols[COL.packUom]  ?? '').trim() || null : null,
-          unitPrice:           parseFloat(rawPrice) || 0,
-          isPreferred:         COL.isPreferred  >= 0
+          purchaseUom: COL.purchaseUom >= 0 ? (cols[COL.purchaseUom] ?? '').trim() || 'ea' : 'ea',
+          packQty: COL.packQty >= 0 ? (parseFloat(cols[COL.packQty] ?? '') || null) : null,
+          packUom: COL.packUom >= 0 ? (cols[COL.packUom] ?? '').trim() || null : null,
+          unitPrice: parseFloat(rawPrice) || 0,
+          isPreferred: COL.isPreferred >= 0
             ? ['true', '1', 'yes', 'y'].includes((cols[COL.isPreferred] ?? '').trim().toLowerCase())
             : false,
         };
@@ -1399,14 +1440,14 @@ export default function Inventory() {
     setSupplierImportErrors([]);
     try {
       const rows = supplierImportPreview.map(r => ({
-        inventoryItemId:     r.inventoryItemId,
-        supplierName:        r.supplierName,
+        inventoryItemId: r.inventoryItemId,
+        supplierName: r.supplierName,
         supplierProductName: r.supplierProductName ?? null,
-        purchaseUom:         r.purchaseUom || 'ea',
-        packQty:             r.packQty,
-        packUom:             r.packUom,
-        unitPrice:           r.unitPrice,
-        isPreferred:         r.isPreferred,
+        purchaseUom: r.purchaseUom || 'ea',
+        packQty: r.packQty,
+        packUom: r.packUom,
+        unitPrice: r.unitPrice,
+        isPreferred: r.isPreferred,
       }));
 
       const res = await insertPurchaseOptions(rows);
@@ -1416,9 +1457,9 @@ export default function Inventory() {
       }
 
       const summary = {
-        total:     supplierImportPreview.length + supplierImportUnmatched.length,
-        matched:   supplierImportPreview.length,
-        inserted:  supplierImportPreview.length,
+        total: supplierImportPreview.length + supplierImportUnmatched.length,
+        matched: supplierImportPreview.length,
+        inserted: supplierImportPreview.length,
         unmatched: supplierImportUnmatched.length,
       };
       setSupplierImportSummary(summary);
@@ -1434,17 +1475,17 @@ export default function Inventory() {
   const revertBatch = async (batchId: string) => {
     const batchIdx = importBatches.findIndex(b => b.batchId === batchId);
     const batch = importBatches[batchIdx];
-    if(!batch || batch.status === "Reverted") return;
+    if (!batch || batch.status === "Reverted") return;
 
     const updatedIds = Object.keys(batch.rollbackData).map(Number);
     const allIds = [...batch.newlyCreatedIds, ...updatedIds];
-     
+
     for (const id of allIds) {
-       const liveItem = inventoryData.find(i => i.id === id);
-       if (liveItem && (liveItem as any).updatedAt > batch.timestamp) {
-          alert("Conflict Detected! System lock engaged. Items inside this bulk process were modified natively afterwards.");
-          return;
-       }
+      const liveItem = inventoryData.find(i => i.id === id);
+      if (liveItem && (liveItem as any).updatedAt > batch.timestamp) {
+        alert("Conflict Detected! System lock engaged. Items inside this bulk process were modified natively afterwards.");
+        return;
+      }
     }
 
     let safeInventory = inventoryData.filter(i => !batch.newlyCreatedIds.includes(i.id));
@@ -1456,8 +1497,8 @@ export default function Inventory() {
 
     const res = await saveInventory(safeInventory);
     if (!res.success) {
-       alert(`Rollback Failed: ${res.error?.message || "Database rejected state sequence revert."}`);
-       return;
+      alert(`Rollback Failed: ${res.error?.message || "Database rejected state sequence revert."}`);
+      return;
     }
     setInventoryData(safeInventory);
 
@@ -1465,8 +1506,8 @@ export default function Inventory() {
     mBatches[batchIdx].status = "Reverted";
     const resBatches = await saveImportBatches(mBatches);
     if (!resBatches?.success) {
-       alert(`Batch Status Revert Failed: ${resBatches?.error?.message}`);
-       return;
+      alert(`Batch Status Revert Failed: ${resBatches?.error?.message}`);
+      return;
     }
     setImportBatches(mBatches);
     alert(`Rollback Complete: Native array sequence ${batch.batchId} systematically purged and reverted.`);
@@ -1481,7 +1522,7 @@ export default function Inventory() {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
- };
+  };
 
   if (isLoading) return <div className="animate-pulse flex items-center justify-center p-12 text-neutral-400">Loading Inventory Module...</div>;
 
@@ -1493,13 +1534,13 @@ export default function Inventory() {
           <p className="text-neutral-500 text-sm mt-1">Manage your ingredient list and maintain optimal par levels.</p>
         </div>
         <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto">
-          <button 
+          <button
             onClick={() => setIsHistoryDrawerOpen(true)}
             className="flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium bg-neutral-100 border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-200 w-full sm:w-auto shadow-sm"
           >
             <History className="h-4 w-4" /> History
           </button>
-          <button 
+          <button
             onClick={() => {
               setImportPreview([]);
               setImportErrors([]);
@@ -1521,7 +1562,7 @@ export default function Inventory() {
           >
             <Upload className="h-4 w-4" /> Import Suppliers
           </button>
-          <button 
+          <button
             onClick={() => setIsAddDrawerOpen(true)}
             className="flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 shadow-sm w-full sm:w-auto transition-colors"
           >
@@ -1536,44 +1577,44 @@ export default function Inventory() {
             <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
               <Search className="h-4 w-4 text-neutral-400" />
             </div>
-            <input 
-              type="text" 
-              placeholder="Search items by name, category, or supplier..." 
+            <input
+              type="text"
+              placeholder="Search items by name, category, or supplier..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="pl-9 pr-4 py-1.5 border border-neutral-200 rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 focus:border-brand-500 w-full bg-neutral-50 hover:bg-white transition-colors"
             />
           </div>
           <div className="flex flex-wrap gap-2">
-             <select 
-               className="px-3 py-1.5 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm transition-colors"
-               value={filterStatus}
-               onChange={(e) => setFilterStatus(e.target.value)}
+            <select
+              className="px-3 py-1.5 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm transition-colors"
+              value={filterStatus}
+              onChange={(e) => setFilterStatus(e.target.value)}
             >
-               <option value="All">All Statuses</option>
-               <option value="Healthy">Healthy</option>
-               <option value="Low">Low</option>
-               <option value="Critical">Critical</option>
+              <option value="All">All Statuses</option>
+              <option value="Healthy">Healthy</option>
+              <option value="Low">Low</option>
+              <option value="Critical">Critical</option>
             </select>
-            <select 
-               className="px-3 py-1.5 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm transition-colors"
-               value={filterCategory}
-               onChange={(e) => setFilterCategory(e.target.value)}
+            <select
+              className="px-3 py-1.5 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm transition-colors"
+              value={filterCategory}
+              onChange={(e) => setFilterCategory(e.target.value)}
             >
-               <option value="All">All Categories</option>
-               {uniqueCategories.map(c => <option key={c as string} value={c as string}>{c as string}</option>)}
+              <option value="All">All Categories</option>
+              {uniqueCategories.map(c => <option key={c as string} value={c as string}>{c as string}</option>)}
             </select>
-            <select 
-               className="px-3 py-1.5 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm transition-colors"
-               value={filterSupplier}
-               onChange={(e) => setFilterSupplier(e.target.value)}
+            <select
+              className="px-3 py-1.5 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm transition-colors"
+              value={filterSupplier}
+              onChange={(e) => setFilterSupplier(e.target.value)}
             >
-               <option value="All">All Suppliers</option>
-               {uniqueSuppliers.map(s => <option key={s as string} value={s as string}>{s as string}</option>)}
+              <option value="All">All Suppliers</option>
+              {uniqueSuppliers.map(s => <option key={s as string} value={s as string}>{s as string}</option>)}
             </select>
 
             {(searchQuery || filterStatus !== 'All' || filterCategory !== 'All' || filterSupplier !== 'All') && (
-              <button 
+              <button
                 onClick={clearFilters}
                 className="text-xs font-semibold text-brand-600 hover:text-brand-700 hover:bg-brand-50 rounded-lg px-2 transition-colors ml-1"
               >
@@ -1584,25 +1625,25 @@ export default function Inventory() {
         </CardHeader>
         <CardContent className="p-0">
           {selectedItemIds.length > 0 && (
-             <div className="bg-brand-50 border-b border-brand-100 p-3 px-6 flex justify-between items-center transition-all">
-                <span className="text-sm font-semibold text-brand-800">{selectedItemIds.length} operational node{selectedItemIds.length !== 1 ? 's' : ''} targeted</span>
-                <div className="flex gap-4 items-center">
-                  <button onClick={() => setSelectedItemIds([])} className="text-xs font-semibold text-brand-700 hover:text-brand-900 transition-colors">Clear Targets</button>
-                  <button 
-                    onClick={() => setIsDeleteModalOpen(true)} 
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold bg-danger-600 text-white rounded hover:bg-danger-700 transition-colors shadow-sm"
-                  >
-                    <Trash2 className="h-3 w-3" /> Execute Purge
-                  </button>
-                </div>
-             </div>
+            <div className="bg-brand-50 border-b border-brand-100 p-3 px-6 flex justify-between items-center transition-all">
+              <span className="text-sm font-semibold text-brand-800">{selectedItemIds.length} operational node{selectedItemIds.length !== 1 ? 's' : ''} targeted</span>
+              <div className="flex gap-4 items-center">
+                <button onClick={() => setSelectedItemIds([])} className="text-xs font-semibold text-brand-700 hover:text-brand-900 transition-colors">Clear Targets</button>
+                <button
+                  onClick={() => setIsDeleteModalOpen(true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold bg-danger-600 text-white rounded hover:bg-danger-700 transition-colors shadow-sm"
+                >
+                  <Trash2 className="h-3 w-3" /> Execute Purge
+                </button>
+              </div>
+            </div>
           )}
           <Table>
             <TableHeader className="bg-neutral-50/80 text-xs text-neutral-500 uppercase tracking-wider border-b border-neutral-200">
               <TableRow>
                 <TableHead className="w-[50px] pl-6 pr-2 py-3">
-                  <input 
-                    type="checkbox" 
+                  <input
+                    type="checkbox"
                     className="h-4 w-4 rounded border-neutral-300 text-brand-600 focus:ring-brand-500 cursor-pointer"
                     checked={filteredInventory.length > 0 && selectedItemIds.length === filteredInventory.length}
                     onChange={(e) => {
@@ -1628,15 +1669,15 @@ export default function Inventory() {
                 const isLowStock = stockRatio >= 0.3 && stockRatio <= 0.7;
 
                 return (
-                  <TableRow 
-                    key={item.id} 
+                  <TableRow
+                    key={item.id}
                     className={`hover:bg-neutral-50/50 cursor-pointer transition-colors ${selectedItemIds.includes(item.id) ? 'bg-brand-50/30' : ''}`}
                     onClick={() => openItemDrawer(item)}
                   >
                     <TableCell className="pl-6 pr-2 py-4">
                       <div onClick={e => e.stopPropagation()}>
-                        <input 
-                          type="checkbox" 
+                        <input
+                          type="checkbox"
                           className="h-4 w-4 rounded border-neutral-300 text-brand-600 focus:ring-brand-500 cursor-pointer"
                           checked={selectedItemIds.includes(item.id)}
                           onChange={(e) => {
@@ -1661,7 +1702,7 @@ export default function Inventory() {
                         <span className="text-xs font-semibold text-neutral-500 uppercase tracking-wider">{item.baseUnit || item.unit}</span>
                         {item.purchaseUnits && item.purchaseUnits.length > 0 && (
                           <span className="text-[10px] text-neutral-400">
-                             Buy: {item.purchaseUnits.find((u: any) => u.isPrimary)?.name || item.purchaseUnits[0].name}
+                            Buy: {item.purchaseUnits.find((u: any) => u.isPrimary)?.name || item.purchaseUnits[0].name}
                           </span>
                         )}
                       </div>
@@ -1682,9 +1723,9 @@ export default function Inventory() {
                           <span className="text-xs text-neutral-500">/ {item.parLevel} {item.baseUnit || item.unit}</span>
                         </div>
                         {item.purchaseUnits && item.purchaseUnits.length > 0 && (() => {
-                           const pUnit = item.purchaseUnits.find((u: any) => u.isPrimary) || item.purchaseUnits[0];
-                           const pStock = (item.inStock / pUnit.conversion).toFixed(1);
-                           return <span className="text-[10px] text-brand-600 font-semibold block">{pStock} {pUnit.name}s</span>
+                          const pUnit = item.purchaseUnits.find((u: any) => u.isPrimary) || item.purchaseUnits[0];
+                          const pStock = (item.inStock / pUnit.conversion).toFixed(1);
+                          return <span className="text-[10px] text-brand-600 font-semibold block">{pStock} {pUnit.name}s</span>
                         })()}
                       </div>
                     </TableCell>
@@ -1706,7 +1747,7 @@ export default function Inventory() {
                         onClick={e => e.stopPropagation()}
                       >
                         {(isLowStock || isCritical) && (
-                          <button 
+                          <button
                             onClick={(e) => handleQuickReorder(item, e)}
                             className="flex items-center gap-1.5 px-3 py-1.5 bg-brand-50 hover:bg-brand-100 text-brand-700 text-xs font-semibold rounded-md transition-colors shadow-sm border border-brand-200"
                           >
@@ -1758,11 +1799,11 @@ export default function Inventory() {
                   </TableRow>
                 );
               }) : (
-                 <TableRow>
-                   <TableCell colSpan={6} className="text-center py-10 text-neutral-500 text-sm">
-                      No inventory items match your active filters.
-                   </TableCell>
-                 </TableRow>
+                <TableRow>
+                  <TableCell colSpan={6} className="text-center py-10 text-neutral-500 text-sm">
+                    No inventory items match your active filters.
+                  </TableCell>
+                </TableRow>
               )}
             </TableBody>
           </Table>
@@ -1776,20 +1817,20 @@ export default function Inventory() {
         title={selectedItem?.name || "Item Details"}
         description={`${selectedItem?.category} • Cost: $${selectedItem?.cost?.toFixed(2)}/${selectedItem?.unit}`}
         footer={
-           <button 
-             onClick={() => setIsDrawerOpen(false)}
-             className="w-full py-2 bg-neutral-100 text-neutral-800 rounded-lg font-medium text-sm hover:bg-neutral-200 transition-colors"
-           >
-             Close Drawer
-           </button>
+          <button
+            onClick={() => setIsDrawerOpen(false)}
+            className="w-full py-2 bg-neutral-100 text-neutral-800 rounded-lg font-medium text-sm hover:bg-neutral-200 transition-colors"
+          >
+            Close Drawer
+          </button>
         }
       >
         {selectedItem && (
           <div className="space-y-8">
             <div className="flex justify-center mb-2">
               <div className="inline-flex bg-neutral-100 border border-neutral-200 rounded-lg p-1">
-                 <button onClick={() => setUserRole("HQ")} className={`px-4 py-1.5 text-xs font-bold rounded-md transition-colors ${userRole === "HQ" ? 'bg-white shadow-sm text-brand-700' : 'text-neutral-500 hover:text-neutral-700'}`}>HQ View</button>
-                 <button onClick={() => setUserRole("Location")} className={`px-4 py-1.5 text-xs font-bold rounded-md transition-colors ${userRole === "Location" ? 'bg-white shadow-sm text-brand-700' : 'text-neutral-500 hover:text-neutral-700'}`}>Location View</button>
+                <button onClick={() => setUserRole("HQ")} className={`px-4 py-1.5 text-xs font-bold rounded-md transition-colors ${userRole === "HQ" ? 'bg-white shadow-sm text-brand-700' : 'text-neutral-500 hover:text-neutral-700'}`}>HQ View</button>
+                <button onClick={() => setUserRole("Location")} className={`px-4 py-1.5 text-xs font-bold rounded-md transition-colors ${userRole === "Location" ? 'bg-white shadow-sm text-brand-700' : 'text-neutral-500 hover:text-neutral-700'}`}>Location View</button>
               </div>
             </div>
 
@@ -1810,114 +1851,114 @@ export default function Inventory() {
             </div>
 
             <div>
-               <h3 className="text-sm font-bold text-neutral-900 mb-3 uppercase tracking-wider flex items-center justify-between border-b border-neutral-100 pb-2">
-                 <span className="flex items-center gap-2"><ArrowUp className="h-4 w-4 text-brand-600" /> Stock Adjustment</span>
-                 <span className="text-[10px] text-neutral-400 font-medium uppercase">{userRole} access granted</span>
-               </h3>
-               <div className="bg-white border border-neutral-200 rounded-lg p-4 space-y-4 shadow-sm">
-                  <div className="flex gap-2">
-                     <button onClick={() => setAdjType("Add")} className={`flex-1 py-1.5 border rounded flex items-center justify-center gap-1.5 text-xs font-semibold transition-all ${adjType === "Add" ? 'ring-2 ring-offset-1 text-success-700 bg-success-50 border-success-200 ring-success-500' : 'bg-white text-neutral-500 hover:bg-neutral-50'}`}><Plus className="h-3 w-3" /> Add</button>
-                     <button onClick={() => setAdjType("Remove")} className={`flex-1 py-1.5 border rounded flex items-center justify-center gap-1.5 text-xs font-semibold transition-all ${adjType === "Remove" ? 'ring-2 ring-offset-1 text-warning-700 bg-warning-50 border-warning-200 ring-warning-500' : 'bg-white text-neutral-500 hover:bg-neutral-50'}`}><ArrowDown className="h-3 w-3" /> Remove</button>
-                     <button onClick={() => setAdjType("Waste")} className={`flex-1 py-1.5 border rounded flex items-center justify-center gap-1.5 text-xs font-semibold transition-all ${adjType === "Waste" ? 'ring-2 ring-offset-1 text-danger-700 bg-danger-50 border-danger-200 ring-danger-500' : 'bg-white text-neutral-500 hover:bg-neutral-50'}`}><Trash2 className="h-3 w-3" /> Waste</button>
+              <h3 className="text-sm font-bold text-neutral-900 mb-3 uppercase tracking-wider flex items-center justify-between border-b border-neutral-100 pb-2">
+                <span className="flex items-center gap-2"><ArrowUp className="h-4 w-4 text-brand-600" /> Stock Adjustment</span>
+                <span className="text-[10px] text-neutral-400 font-medium uppercase">{userRole} access granted</span>
+              </h3>
+              <div className="bg-white border border-neutral-200 rounded-lg p-4 space-y-4 shadow-sm">
+                <div className="flex gap-2">
+                  <button onClick={() => setAdjType("Add")} className={`flex-1 py-1.5 border rounded flex items-center justify-center gap-1.5 text-xs font-semibold transition-all ${adjType === "Add" ? 'ring-2 ring-offset-1 text-success-700 bg-success-50 border-success-200 ring-success-500' : 'bg-white text-neutral-500 hover:bg-neutral-50'}`}><Plus className="h-3 w-3" /> Add</button>
+                  <button onClick={() => setAdjType("Remove")} className={`flex-1 py-1.5 border rounded flex items-center justify-center gap-1.5 text-xs font-semibold transition-all ${adjType === "Remove" ? 'ring-2 ring-offset-1 text-warning-700 bg-warning-50 border-warning-200 ring-warning-500' : 'bg-white text-neutral-500 hover:bg-neutral-50'}`}><ArrowDown className="h-3 w-3" /> Remove</button>
+                  <button onClick={() => setAdjType("Waste")} className={`flex-1 py-1.5 border rounded flex items-center justify-center gap-1.5 text-xs font-semibold transition-all ${adjType === "Waste" ? 'ring-2 ring-offset-1 text-danger-700 bg-danger-50 border-danger-200 ring-danger-500' : 'bg-white text-neutral-500 hover:bg-neutral-50'}`}><Trash2 className="h-3 w-3" /> Waste</button>
+                </div>
+                <div className="flex gap-3">
+                  <div className="flex-1 space-y-1.5">
+                    <label className="text-xs font-semibold text-neutral-900">Quantity</label>
+                    <input type="number" min="0" step="0.1" value={adjQty} onChange={(e) => setAdjQty(e.target.value)} className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="e.g., 2.5" />
                   </div>
-                  <div className="flex gap-3">
-                     <div className="flex-1 space-y-1.5">
-                       <label className="text-xs font-semibold text-neutral-900">Quantity</label>
-                       <input type="number" min="0" step="0.1" value={adjQty} onChange={(e) => setAdjQty(e.target.value)} className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="e.g., 2.5" />
-                     </div>
-                     <div className="flex-1 space-y-1.5">
-                       <label className="text-xs font-semibold text-neutral-900">Unit Transacted</label>
-                       <select value={adjUnit} onChange={(e) => setAdjUnit(e.target.value)} className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white">
-                         {selectedItem.purchaseUnits ? selectedItem.purchaseUnits.map((u: any) => (
-                           <option key={u.name} value={u.name}>{u.name} (x{u.conversion} {selectedItem.baseUnit || selectedItem.unit})</option>
-                         )) : (
-                           <option value={selectedItem.baseUnit || selectedItem.unit}>{selectedItem.baseUnit || selectedItem.unit}</option>
-                         )}
-                       </select>
-                     </div>
+                  <div className="flex-1 space-y-1.5">
+                    <label className="text-xs font-semibold text-neutral-900">Unit Transacted</label>
+                    <select value={adjUnit} onChange={(e) => setAdjUnit(e.target.value)} className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white">
+                      {selectedItem.purchaseUnits ? selectedItem.purchaseUnits.map((u: any) => (
+                        <option key={u.name} value={u.name}>{u.name} (x{u.conversion} {selectedItem.baseUnit || selectedItem.unit})</option>
+                      )) : (
+                        <option value={selectedItem.baseUnit || selectedItem.unit}>{selectedItem.baseUnit || selectedItem.unit}</option>
+                      )}
+                    </select>
                   </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-semibold text-neutral-900">Notes / Reason</label>
-                    <input type="text" value={adjNotes} onChange={(e) => setAdjNotes(e.target.value)} className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="Optional details..." />
-                  </div>
-                  <button disabled={!adjQty || parseFloat(adjQty) <= 0} onClick={saveAdjustment} className="w-full py-2 bg-neutral-900 text-white rounded text-sm font-semibold hover:bg-neutral-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
-                    <Save className="h-4 w-4" /> Commit Adjustment
-                  </button>
-               </div>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-semibold text-neutral-900">Notes / Reason</label>
+                  <input type="text" value={adjNotes} onChange={(e) => setAdjNotes(e.target.value)} className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="Optional details..." />
+                </div>
+                <button disabled={!adjQty || parseFloat(adjQty) <= 0} onClick={saveAdjustment} className="w-full py-2 bg-neutral-900 text-white rounded text-sm font-semibold hover:bg-neutral-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
+                  <Save className="h-4 w-4" /> Commit Adjustment
+                </button>
+              </div>
             </div>
 
             {userRole === "HQ" && (
               <div className="space-y-6">
-                 <div>
-                   <h3 className="text-sm font-bold text-neutral-900 mb-3 uppercase tracking-wider flex items-center justify-between border-b border-neutral-100 pb-2">
-                     <span className="flex items-center gap-2"><Save className="h-4 w-4 text-brand-600" /> Multi-Unit Configuration</span>
-                     <span className="text-[10px] text-brand-600 font-bold bg-brand-50 px-2 py-0.5 rounded uppercase">HQ Only</span>
-                   </h3>
-                   <div className="bg-neutral-50 border border-neutral-200 rounded-lg p-4 space-y-4 shadow-sm">
-                      <div className="space-y-1.5">
-                        <label className="text-xs font-semibold text-neutral-900">Base Unit (Calculations)</label>
-                        <input type="text" value={editBaseUnit} onChange={(e) => setEditBaseUnit(e.target.value)} className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white" placeholder="e.g. kg, lb, L" />
-                      </div>
-                      
-                      <div className="space-y-2">
-                        <label className="text-xs font-semibold text-neutral-900 flex justify-between">
-                           Purchase Units (Ordering)
-                           <button onClick={() => setEditPurchaseUnits([...editPurchaseUnits, { name: "", conversion: 1, isPrimary: editPurchaseUnits.length === 0 }])} className="text-brand-600 hover:text-brand-700 font-bold flex items-center gap-1"><Plus className="h-3 w-3" /> Add</button>
-                        </label>
-                        {editPurchaseUnits.length === 0 ? (
-                           <div className="text-xs text-neutral-500 italic py-2">No purchase units mapped. System will fall back to base unit for POs.</div>
-                        ) : editPurchaseUnits.map((pu, idx) => (
-                           <div key={idx} className="flex gap-2 items-center bg-white p-2 rounded border border-neutral-200">
-                              <input type="radio" name="primary_unit" checked={pu.isPrimary} onChange={() => {
-                                 const copy = [...editPurchaseUnits];
-                                 copy.forEach(u => u.isPrimary = false);
-                                 copy[idx].isPrimary = true;
-                                 setEditPurchaseUnits(copy);
-                              }} className="w-4 h-4 text-brand-600" title="Set as Primary for Auto-PO" />
-                              <input type="text" value={pu.name} onChange={(e) => {
-                                 const copy = [...editPurchaseUnits];
-                                 copy[idx].name = e.target.value;
-                                 setEditPurchaseUnits(copy);
-                              }} className="flex-1 py-1.5 px-2 border border-neutral-200 rounded text-sm outline-none focus:border-brand-500" placeholder="Name (e.g. Case)" />
-                              <span className="text-xs text-neutral-500">=</span>
-                              <input type="number" min="0" step="0.01" value={pu.conversion} onChange={(e) => {
-                                 const copy = [...editPurchaseUnits];
-                                 copy[idx].conversion = e.target.value;
-                                 setEditPurchaseUnits(copy);
-                              }} className="w-20 py-1.5 px-2 border border-neutral-200 rounded text-sm outline-none focus:border-brand-500" placeholder="Qty" />
-                              <span className="text-xs text-neutral-500 truncate w-8">{editBaseUnit || 'base'}</span>
-                              <button onClick={() => {
-                                 const copy = editPurchaseUnits.filter((_, i) => i !== idx);
-                                 if (pu.isPrimary && copy.length > 0) copy[0].isPrimary = true;
-                                 setEditPurchaseUnits(copy);
-                              }} className="p-1.5 text-neutral-400 hover:text-danger-600 hover:bg-danger-50 rounded transition-colors"><Trash2 className="h-3 w-3" /></button>
-                           </div>
-                        ))}
-                      </div>
+                <div>
+                  <h3 className="text-sm font-bold text-neutral-900 mb-3 uppercase tracking-wider flex items-center justify-between border-b border-neutral-100 pb-2">
+                    <span className="flex items-center gap-2"><Save className="h-4 w-4 text-brand-600" /> Multi-Unit Configuration</span>
+                    <span className="text-[10px] text-brand-600 font-bold bg-brand-50 px-2 py-0.5 rounded uppercase">HQ Only</span>
+                  </h3>
+                  <div className="bg-neutral-50 border border-neutral-200 rounded-lg p-4 space-y-4 shadow-sm">
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-semibold text-neutral-900">Base Unit (Calculations)</label>
+                      <input type="text" value={editBaseUnit} onChange={(e) => setEditBaseUnit(e.target.value)} className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white" placeholder="e.g. kg, lb, L" />
+                    </div>
 
-                      <div className="space-y-1.5 focus-within:z-10 mt-2 border-t border-neutral-200 pt-3">
-                        <label className="text-xs font-semibold text-neutral-900">
-                          {editPurchaseUnits.some(u => u.isPrimary && parseFloat(u.conversion) > 0) ? `Purchase Cost (/ ${(editPurchaseUnits.find(u => u.isPrimary) || editPurchaseUnits[0]).name})` : 'Cost / Base Unit'}
-                        </label>
-                        <input type="number" step="0.1" value={editPurchaseCost} onChange={(e) => setEditPurchaseCost(e.target.value)} className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white" placeholder="$0.00" />
-                        {editPurchaseUnits.some(u => u.isPrimary && parseFloat(u.conversion) > 0) && editPurchaseCost && !isNaN(parseFloat(editPurchaseCost)) && (
-                           <p className="text-[10px] text-brand-600 font-medium mt-1">
-                             Yields root base cost: ${(parseFloat(editPurchaseCost) / parseFloat((editPurchaseUnits.find(u => u.isPrimary) || editPurchaseUnits[0]).conversion)).toFixed(2)} / {editBaseUnit || 'base'}
-                           </p>
-                        )}
-                      </div>
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-neutral-900 flex justify-between">
+                        Purchase Units (Ordering)
+                        <button onClick={() => setEditPurchaseUnits([...editPurchaseUnits, { name: "", conversion: 1, isPrimary: editPurchaseUnits.length === 0 }])} className="text-brand-600 hover:text-brand-700 font-bold flex items-center gap-1"><Plus className="h-3 w-3" /> Add</button>
+                      </label>
+                      {editPurchaseUnits.length === 0 ? (
+                        <div className="text-xs text-neutral-500 italic py-2">No purchase units mapped. System will fall back to base unit for POs.</div>
+                      ) : editPurchaseUnits.map((pu, idx) => (
+                        <div key={idx} className="flex gap-2 items-center bg-white p-2 rounded border border-neutral-200">
+                          <input type="radio" name="primary_unit" checked={pu.isPrimary} onChange={() => {
+                            const copy = [...editPurchaseUnits];
+                            copy.forEach(u => u.isPrimary = false);
+                            copy[idx].isPrimary = true;
+                            setEditPurchaseUnits(copy);
+                          }} className="w-4 h-4 text-brand-600" title="Set as Primary for Auto-PO" />
+                          <input type="text" value={pu.name} onChange={(e) => {
+                            const copy = [...editPurchaseUnits];
+                            copy[idx].name = e.target.value;
+                            setEditPurchaseUnits(copy);
+                          }} className="flex-1 py-1.5 px-2 border border-neutral-200 rounded text-sm outline-none focus:border-brand-500" placeholder="Name (e.g. Case)" />
+                          <span className="text-xs text-neutral-500">=</span>
+                          <input type="number" min="0" step="0.01" value={pu.conversion} onChange={(e) => {
+                            const copy = [...editPurchaseUnits];
+                            copy[idx].conversion = e.target.value;
+                            setEditPurchaseUnits(copy);
+                          }} className="w-20 py-1.5 px-2 border border-neutral-200 rounded text-sm outline-none focus:border-brand-500" placeholder="Qty" />
+                          <span className="text-xs text-neutral-500 truncate w-8">{editBaseUnit || 'base'}</span>
+                          <button onClick={() => {
+                            const copy = editPurchaseUnits.filter((_, i) => i !== idx);
+                            if (pu.isPrimary && copy.length > 0) copy[0].isPrimary = true;
+                            setEditPurchaseUnits(copy);
+                          }} className="p-1.5 text-neutral-400 hover:text-danger-600 hover:bg-danger-50 rounded transition-colors"><Trash2 className="h-3 w-3" /></button>
+                        </div>
+                      ))}
+                    </div>
 
-                      <button onClick={saveUnitInfo} className="w-full py-2 bg-neutral-900 text-white rounded text-sm font-semibold hover:bg-neutral-800 transition-colors flex items-center justify-center gap-2">
-                        <Save className="h-4 w-4" /> Save Unit Configuration
-                      </button>
-                   </div>
-                 </div>
-              <div>
-                 <h3 className="text-sm font-bold text-neutral-900 mb-3 uppercase tracking-wider flex items-center justify-between border-b border-neutral-100 pb-2">
-                   <span className="flex items-center gap-2"><Save className="h-4 w-4 text-brand-600" /> Par Level Adjustment</span>
-                   <span className="text-[10px] text-brand-600 font-bold bg-brand-50 px-2 py-0.5 rounded uppercase">HQ Only</span>
-                 </h3>
-                 <div className="bg-neutral-50 border border-neutral-200 rounded-lg p-4 space-y-4 shadow-sm">
+                    <div className="space-y-1.5 focus-within:z-10 mt-2 border-t border-neutral-200 pt-3">
+                      <label className="text-xs font-semibold text-neutral-900">
+                        {editPurchaseUnits.some(u => u.isPrimary && parseFloat(u.conversion) > 0) ? `Purchase Cost (/ ${(editPurchaseUnits.find(u => u.isPrimary) || editPurchaseUnits[0]).name})` : 'Cost / Base Unit'}
+                      </label>
+                      <input type="number" step="0.1" value={editPurchaseCost} onChange={(e) => setEditPurchaseCost(e.target.value)} className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white" placeholder="$0.00" />
+                      {editPurchaseUnits.some(u => u.isPrimary && parseFloat(u.conversion) > 0) && editPurchaseCost && !isNaN(parseFloat(editPurchaseCost)) && (
+                        <p className="text-[10px] text-brand-600 font-medium mt-1">
+                          Yields root base cost: ${(parseFloat(editPurchaseCost) / parseFloat((editPurchaseUnits.find(u => u.isPrimary) || editPurchaseUnits[0]).conversion)).toFixed(2)} / {editBaseUnit || 'base'}
+                        </p>
+                      )}
+                    </div>
+
+                    <button onClick={saveUnitInfo} className="w-full py-2 bg-neutral-900 text-white rounded text-sm font-semibold hover:bg-neutral-800 transition-colors flex items-center justify-center gap-2">
+                      <Save className="h-4 w-4" /> Save Unit Configuration
+                    </button>
+                  </div>
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-neutral-900 mb-3 uppercase tracking-wider flex items-center justify-between border-b border-neutral-100 pb-2">
+                    <span className="flex items-center gap-2"><Save className="h-4 w-4 text-brand-600" /> Par Level Adjustment</span>
+                    <span className="text-[10px] text-brand-600 font-bold bg-brand-50 px-2 py-0.5 rounded uppercase">HQ Only</span>
+                  </h3>
+                  <div className="bg-neutral-50 border border-neutral-200 rounded-lg p-4 space-y-4 shadow-sm">
                     <div className="flex gap-4 items-end">
                       <div className="space-y-1.5 flex-1">
                         <label className="text-xs font-semibold text-neutral-900">New Par Benchmark ({selectedItem.unit})</label>
@@ -1931,37 +1972,37 @@ export default function Inventory() {
                     <button disabled={!newParLevel || parseFloat(newParLevel) === selectedItem.parLevel} onClick={saveParLevel} className="w-full py-2 bg-brand-600 text-white rounded text-sm font-semibold hover:bg-brand-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
                       <Save className="h-4 w-4" /> Enforce Par Shift
                     </button>
-                 </div>
-              </div>
+                  </div>
+                </div>
               </div>
             )}
 
             <div>
-               <h3 className="text-sm font-bold text-neutral-900 mb-3 uppercase tracking-wider flex items-center gap-2 border-b border-neutral-100 pb-2">
-                 <History className="h-4 w-4 text-brand-600" /> Recent Activity Log
-               </h3>
-               <div className="space-y-3">
-                 {(!activityData[selectedItem.id] || activityData[selectedItem.id].length === 0) ? (
-                    <p className="text-xs text-neutral-500 italic">No historical adjustments logged for this item yet.</p>
-                 ) : (
-                    activityData[selectedItem.id].map((log, idx) => (
-                      <div key={idx} className="flex items-start justify-between bg-neutral-50 rounded-lg p-3 border border-neutral-100">
-                         <div>
-                            <div className="flex items-center gap-2">
-                               <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${log.type === 'Add' ? 'bg-success-100 text-success-700' : log.type === 'Remove' ? 'bg-warning-100 text-warning-700' : log.type === 'Par Update' ? 'bg-brand-100 text-brand-700' : 'bg-danger-100 text-danger-700'}`}>{log.type}</span>
-                               <span className="text-sm font-bold text-neutral-900">{log.type === 'Par Update' ? `${log.qty} net shift` : log.baseTransacted ? `${log.baseTransacted > 0 ? '+' : ''}${log.baseTransacted} ${selectedItem.baseUnit||selectedItem.unit} (${log.qty})` : `${log.qty > 0 ? '+' : ''}${log.qty} ${selectedItem.unit}`}</span>
-                            </div>
-                            {log.notes && <p className="text-[11px] font-medium text-neutral-600 mt-1">{log.notes}</p>}
-                            {log.user && <p className="text-[10px] text-neutral-400 uppercase tracking-wide mt-1">- Authenticated via {log.user}</p>}
-                         </div>
-                         <div className="text-right flex flex-col">
-                           <span className="text-xs font-medium text-neutral-700">{log.date}</span>
-                           <span className="text-[10px] text-neutral-400">{log.time}</span>
-                         </div>
+              <h3 className="text-sm font-bold text-neutral-900 mb-3 uppercase tracking-wider flex items-center gap-2 border-b border-neutral-100 pb-2">
+                <History className="h-4 w-4 text-brand-600" /> Recent Activity Log
+              </h3>
+              <div className="space-y-3">
+                {(!activityData[selectedItem.id] || activityData[selectedItem.id].length === 0) ? (
+                  <p className="text-xs text-neutral-500 italic">No historical adjustments logged for this item yet.</p>
+                ) : (
+                  activityData[selectedItem.id].map((log, idx) => (
+                    <div key={idx} className="flex items-start justify-between bg-neutral-50 rounded-lg p-3 border border-neutral-100">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${log.type === 'Add' ? 'bg-success-100 text-success-700' : log.type === 'Remove' ? 'bg-warning-100 text-warning-700' : log.type === 'Par Update' ? 'bg-brand-100 text-brand-700' : 'bg-danger-100 text-danger-700'}`}>{log.type}</span>
+                          <span className="text-sm font-bold text-neutral-900">{log.type === 'Par Update' ? `${log.qty} net shift` : log.baseTransacted ? `${log.baseTransacted > 0 ? '+' : ''}${log.baseTransacted} ${selectedItem.baseUnit || selectedItem.unit} (${log.qty})` : `${log.qty > 0 ? '+' : ''}${log.qty} ${selectedItem.unit}`}</span>
+                        </div>
+                        {log.notes && <p className="text-[11px] font-medium text-neutral-600 mt-1">{log.notes}</p>}
+                        {log.user && <p className="text-[10px] text-neutral-400 uppercase tracking-wide mt-1">- Authenticated via {log.user}</p>}
                       </div>
-                    ))
-                 )}
-               </div>
+                      <div className="text-right flex flex-col">
+                        <span className="text-xs font-medium text-neutral-700">{log.date}</span>
+                        <span className="text-[10px] text-neutral-400">{log.time}</span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
           </div>
         )}
@@ -1984,9 +2025,8 @@ export default function Inventory() {
             <button
               onClick={handleEditSave}
               disabled={isSavingEdit}
-              className={`px-4 py-2 flex-1 text-sm font-medium rounded-lg transition-colors shadow-sm flex items-center justify-center gap-2 ${
-                isSavingEdit ? "bg-neutral-400 cursor-not-allowed text-white" : "bg-brand-600 text-white hover:bg-brand-700"
-              }`}
+              className={`px-4 py-2 flex-1 text-sm font-medium rounded-lg transition-colors shadow-sm flex items-center justify-center gap-2 ${isSavingEdit ? "bg-neutral-400 cursor-not-allowed text-white" : "bg-brand-600 text-white hover:bg-brand-700"
+                }`}
             >
               {isSavingEdit
                 ? <><div className="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Saving...</>
@@ -2003,7 +2043,7 @@ export default function Inventory() {
               <input
                 type="text"
                 value={editItem.name}
-                onChange={e => setEditItem({...editItem, name: e.target.value})}
+                onChange={e => setEditItem({ ...editItem, name: e.target.value })}
                 className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
                 placeholder="e.g. Garlic Powder"
               />
@@ -2015,7 +2055,7 @@ export default function Inventory() {
                 <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Type</label>
                 <select
                   value={editItem.itemType || "Raw"}
-                  onChange={e => setEditItem({...editItem, itemType: e.target.value})}
+                  onChange={e => setEditItem({ ...editItem, itemType: e.target.value })}
                   className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
                 >
                   <option value="Raw">Raw Asset</option>
@@ -2027,7 +2067,7 @@ export default function Inventory() {
                 <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Category</label>
                 <select
                   value={editItem.category}
-                  onChange={e => setEditItem({...editItem, category: e.target.value})}
+                  onChange={e => setEditItem({ ...editItem, category: e.target.value })}
                   className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
                 >
                   {categories.map(c => <option key={c} value={c}>{c}</option>)}
@@ -2050,7 +2090,7 @@ export default function Inventory() {
               <label className="text-xs font-semibold text-neutral-900 uppercase flex justify-between">
                 Purchase Units (Ordering)
                 <button
-                  onClick={() => setEditItem({...editItem, purchaseUnits: [...(editItem.purchaseUnits || []), { name: "", conversion: 1, isPrimary: !(editItem.purchaseUnits?.length) }]})}
+                  onClick={() => setEditItem({ ...editItem, purchaseUnits: [...(editItem.purchaseUnits || []), { name: "", conversion: 1, isPrimary: !(editItem.purchaseUnits?.length) }] })}
                   className="text-brand-600 hover:text-brand-700 font-bold flex items-center gap-1"
                 >
                   <Plus className="h-3 w-3" /> Add
@@ -2064,24 +2104,24 @@ export default function Inventory() {
                     const copy = [...editItem.purchaseUnits];
                     copy.forEach((u: any) => u.isPrimary = false);
                     copy[idx].isPrimary = true;
-                    setEditItem({...editItem, purchaseUnits: copy});
+                    setEditItem({ ...editItem, purchaseUnits: copy });
                   }} className="w-4 h-4 text-brand-600" />
                   <input type="text" value={pu.name} onChange={e => {
                     const copy = [...editItem.purchaseUnits];
                     copy[idx].name = e.target.value;
-                    setEditItem({...editItem, purchaseUnits: copy});
+                    setEditItem({ ...editItem, purchaseUnits: copy });
                   }} className="flex-1 py-1.5 px-2 border border-neutral-200 rounded text-sm outline-none focus:border-brand-500" placeholder="e.g. Case" />
                   <span className="text-xs text-neutral-500">=</span>
                   <input type="number" min="0" step="0.01" value={pu.conversion} onChange={e => {
                     const copy = [...editItem.purchaseUnits];
                     copy[idx].conversion = e.target.value;
-                    setEditItem({...editItem, purchaseUnits: copy});
+                    setEditItem({ ...editItem, purchaseUnits: copy });
                   }} className="w-20 py-1.5 px-2 border border-neutral-200 rounded text-sm outline-none focus:border-brand-500" placeholder="Qty" />
                   <span className="text-xs text-neutral-500 w-8 truncate">{editBaseUnit || "base"}</span>
                   <button onClick={() => {
                     const copy = editItem.purchaseUnits.filter((_: any, i: number) => i !== idx);
                     if (pu.isPrimary && copy.length > 0) copy[0].isPrimary = true;
-                    setEditItem({...editItem, purchaseUnits: copy});
+                    setEditItem({ ...editItem, purchaseUnits: copy });
                   }} className="p-1.5 text-neutral-400 hover:text-danger-600 hover:bg-danger-50 rounded transition-colors">
                     <Trash2 className="h-3 w-3" />
                   </button>
@@ -2098,9 +2138,8 @@ export default function Inventory() {
               return (
                 <div className="space-y-1.5">
                   <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Preferred Supplier</label>
-                  <div className={`w-full p-2 border rounded text-sm flex items-center justify-between gap-2 ${
-                    preferred ? 'border-violet-300 bg-violet-50' : 'border-neutral-200 bg-neutral-50'
-                  }`}>
+                  <div className={`w-full p-2 border rounded text-sm flex items-center justify-between gap-2 ${preferred ? 'border-violet-300 bg-violet-50' : 'border-neutral-200 bg-neutral-50'
+                    }`}>
                     <span className={preferred ? 'font-semibold text-violet-800' : 'text-neutral-400 italic'}>
                       {preferred ? preferred.supplierName : (editPurchaseOptions.length > 0 ? 'None set — click Make Preferred below' : 'No suppliers yet')}
                     </span>
@@ -2125,7 +2164,7 @@ export default function Inventory() {
                 <input
                   type="number" step="any"
                   value={editItem.inStock}
-                  onChange={e => setEditItem({...editItem, inStock: e.target.value})}
+                  onChange={e => setEditItem({ ...editItem, inStock: e.target.value })}
                   className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
                 />
               </div>
@@ -2134,7 +2173,7 @@ export default function Inventory() {
                 <input
                   type="number" step="any"
                   value={editItem.parLevel}
-                  onChange={e => setEditItem({...editItem, parLevel: e.target.value})}
+                  onChange={e => setEditItem({ ...editItem, parLevel: e.target.value })}
                   className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
                 />
               </div>
@@ -2450,260 +2489,260 @@ export default function Inventory() {
         title="Add Single Item"
         description="Manually insert a specific structural item into the inventory register."
         footer={
-           <div className="flex items-center gap-3">
-             <button onClick={() => setIsAddDrawerOpen(false)} className="px-4 py-2 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 transition-colors w-full">Cancel</button>
-             <button onClick={handleAddNewItem} className="px-4 py-2 text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors shadow-sm w-full">Save Item</button>
-           </div>
+          <div className="flex items-center gap-3">
+            <button onClick={() => setIsAddDrawerOpen(false)} className="px-4 py-2 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 transition-colors w-full">Cancel</button>
+            <button onClick={handleAddNewItem} className="px-4 py-2 text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors shadow-sm w-full">Save Item</button>
+          </div>
         }
       >
         <div className="space-y-4">
-           <div className="space-y-1.5">
-             <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Item Name</label>
-             <input type="text" value={newItem.name} onChange={e => setNewItem({...newItem, name: e.target.value})} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="e.g. Garlic Powder" />
-           </div>
-           <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-             <div className="space-y-1.5">
-               <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Node Taxonomy</label>
-               <select value={newItem.itemType} onChange={e => setNewItem({...newItem, itemType: e.target.value})} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white">
-                 <option value="Raw">Raw Asset</option>
-                 <option value="Preparation">Preparation Base</option>
-                 <option value="Finished Good">Finished Good</option>
-               </select>
-             </div>
-             <div className="space-y-1.5">
-               <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Category</label>
-               <select value={newItem.category} onChange={e => setNewItem({...newItem, category: e.target.value})} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white">
-                 {categories.map(c => <option key={c} value={c}>{c}</option>)}
-               </select>
-             </div>
-             <div className="space-y-1.5">
-               <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Base Unit (Calculations)</label>
-               <input type="text" value={newItem.unit} onChange={e => setNewItem({...newItem, unit: e.target.value})} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="kg, L, box..." />
-             </div>
-           </div>
+          <div className="space-y-1.5">
+            <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Item Name</label>
+            <input type="text" value={newItem.name} onChange={e => setNewItem({ ...newItem, name: e.target.value })} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="e.g. Garlic Powder" />
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Node Taxonomy</label>
+              <select value={newItem.itemType} onChange={e => setNewItem({ ...newItem, itemType: e.target.value })} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white">
+                <option value="Raw">Raw Asset</option>
+                <option value="Preparation">Preparation Base</option>
+                <option value="Finished Good">Finished Good</option>
+              </select>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Category</label>
+              <select value={newItem.category} onChange={e => setNewItem({ ...newItem, category: e.target.value })} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white">
+                {categories.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Base Unit (Calculations)</label>
+              <input type="text" value={newItem.unit} onChange={e => setNewItem({ ...newItem, unit: e.target.value })} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="kg, L, box..." />
+            </div>
+          </div>
 
-           <div className="space-y-2 border border-neutral-200 p-3 rounded-lg bg-neutral-50 shadow-sm">
-              <label className="text-xs font-semibold text-neutral-900 uppercase flex justify-between">
-                 Purchase Units (Ordering)
-                 <button onClick={() => setNewItem({...newItem, purchaseUnits: [...newItem.purchaseUnits, { name: "", conversion: 1, isPrimary: newItem.purchaseUnits.length === 0 }]})} className="text-brand-600 hover:text-brand-700 font-bold flex items-center gap-1"><Plus className="h-3 w-3" /> Add</button>
-              </label>
-              {newItem.purchaseUnits.length === 0 ? (
-                 <div className="text-xs text-neutral-500 italic py-2">No purchase units mapped. System will fall back to base unit for POs.</div>
-              ) : newItem.purchaseUnits.map((pu, idx) => (
-                 <div key={idx} className="flex gap-2 items-center bg-white p-2 rounded border border-neutral-200">
-                    <input type="radio" name="new_primary_unit" checked={pu.isPrimary} onChange={() => {
-                       const copy = [...newItem.purchaseUnits];
-                       copy.forEach(u => u.isPrimary = false);
-                       copy[idx].isPrimary = true;
-                       setNewItem({...newItem, purchaseUnits: copy});
-                    }} className="w-4 h-4 text-brand-600" title="Set as Primary for Auto-PO" />
-                    <input type="text" value={pu.name} onChange={(e) => {
-                       const copy = [...newItem.purchaseUnits];
-                       copy[idx].name = e.target.value;
-                       setNewItem({...newItem, purchaseUnits: copy});
-                    }} className="flex-1 py-1.5 px-2 border border-neutral-200 rounded text-sm outline-none focus:border-brand-500" placeholder="Name (e.g. Case)" />
-                    <span className="text-xs text-neutral-500">=</span>
-                    <input type="number" min="0" step="0.01" value={pu.conversion} onChange={(e) => {
-                       const copy = [...newItem.purchaseUnits];
-                       copy[idx].conversion = e.target.value;
-                       setNewItem({...newItem, purchaseUnits: copy});
-                    }} className="w-20 py-1.5 px-2 border border-neutral-200 rounded text-sm outline-none focus:border-brand-500" placeholder="Qty" />
-                    <span className="text-xs text-neutral-500 truncate w-8">{newItem.unit || 'base'}</span>
-                    <button onClick={() => {
-                       const copy = newItem.purchaseUnits.filter((_, i) => i !== idx);
-                       if (pu.isPrimary && copy.length > 0) copy[0].isPrimary = true;
-                       setNewItem({...newItem, purchaseUnits: copy});
-                    }} className="p-1.5 text-neutral-400 hover:text-danger-600 hover:bg-danger-50 rounded transition-colors"><Trash2 className="h-3 w-3" /></button>
-                 </div>
-              ))}
-           </div>
-           {/* ── Phase 2: Structured Packaging (Optional) ────────────────────── */}
-           <details className="group border border-neutral-200 rounded-lg bg-neutral-50 shadow-sm">
-             <summary className="flex items-center justify-between px-3 py-2.5 cursor-pointer select-none list-none">
-               <span className="text-xs font-semibold text-neutral-700 uppercase tracking-wider">
-                 Structured Packaging
-               </span>
-               <span className="text-[10px] text-neutral-400 font-medium group-open:hidden">Optional — for precise costing</span>
-               <span className="text-[10px] text-brand-600 font-medium hidden group-open:inline">Hide</span>
-             </summary>
-             <div className="px-3 pb-3 pt-1 space-y-3">
-               <p className="text-[11px] text-neutral-500 leading-relaxed">
-                 Fill these fields to enable pack-based recipe costing. Leave blank to keep legacy behaviour.
-               </p>
+          <div className="space-y-2 border border-neutral-200 p-3 rounded-lg bg-neutral-50 shadow-sm">
+            <label className="text-xs font-semibold text-neutral-900 uppercase flex justify-between">
+              Purchase Units (Ordering)
+              <button onClick={() => setNewItem({ ...newItem, purchaseUnits: [...newItem.purchaseUnits, { name: "", conversion: 1, isPrimary: newItem.purchaseUnits.length === 0 }] })} className="text-brand-600 hover:text-brand-700 font-bold flex items-center gap-1"><Plus className="h-3 w-3" /> Add</button>
+            </label>
+            {newItem.purchaseUnits.length === 0 ? (
+              <div className="text-xs text-neutral-500 italic py-2">No purchase units mapped. System will fall back to base unit for POs.</div>
+            ) : newItem.purchaseUnits.map((pu, idx) => (
+              <div key={idx} className="flex gap-2 items-center bg-white p-2 rounded border border-neutral-200">
+                <input type="radio" name="new_primary_unit" checked={pu.isPrimary} onChange={() => {
+                  const copy = [...newItem.purchaseUnits];
+                  copy.forEach(u => u.isPrimary = false);
+                  copy[idx].isPrimary = true;
+                  setNewItem({ ...newItem, purchaseUnits: copy });
+                }} className="w-4 h-4 text-brand-600" title="Set as Primary for Auto-PO" />
+                <input type="text" value={pu.name} onChange={(e) => {
+                  const copy = [...newItem.purchaseUnits];
+                  copy[idx].name = e.target.value;
+                  setNewItem({ ...newItem, purchaseUnits: copy });
+                }} className="flex-1 py-1.5 px-2 border border-neutral-200 rounded text-sm outline-none focus:border-brand-500" placeholder="Name (e.g. Case)" />
+                <span className="text-xs text-neutral-500">=</span>
+                <input type="number" min="0" step="0.01" value={pu.conversion} onChange={(e) => {
+                  const copy = [...newItem.purchaseUnits];
+                  copy[idx].conversion = e.target.value;
+                  setNewItem({ ...newItem, purchaseUnits: copy });
+                }} className="w-20 py-1.5 px-2 border border-neutral-200 rounded text-sm outline-none focus:border-brand-500" placeholder="Qty" />
+                <span className="text-xs text-neutral-500 truncate w-8">{newItem.unit || 'base'}</span>
+                <button onClick={() => {
+                  const copy = newItem.purchaseUnits.filter((_, i) => i !== idx);
+                  if (pu.isPrimary && copy.length > 0) copy[0].isPrimary = true;
+                  setNewItem({ ...newItem, purchaseUnits: copy });
+                }} className="p-1.5 text-neutral-400 hover:text-danger-600 hover:bg-danger-50 rounded transition-colors"><Trash2 className="h-3 w-3" /></button>
+              </div>
+            ))}
+          </div>
+          {/* ── Phase 2: Structured Packaging (Optional) ────────────────────── */}
+          <details className="group border border-neutral-200 rounded-lg bg-neutral-50 shadow-sm">
+            <summary className="flex items-center justify-between px-3 py-2.5 cursor-pointer select-none list-none">
+              <span className="text-xs font-semibold text-neutral-700 uppercase tracking-wider">
+                Structured Packaging
+              </span>
+              <span className="text-[10px] text-neutral-400 font-medium group-open:hidden">Optional — for precise costing</span>
+              <span className="text-[10px] text-brand-600 font-medium hidden group-open:inline">Hide</span>
+            </summary>
+            <div className="px-3 pb-3 pt-1 space-y-3">
+              <p className="text-[11px] text-neutral-500 leading-relaxed">
+                Fill these fields to enable pack-based recipe costing. Leave blank to keep legacy behaviour.
+              </p>
 
-               {/* Row 1: Purchase UOM + Pack Qty */}
-               <div className="grid grid-cols-2 gap-3">
-                 <div className="space-y-1">
-                   <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Purchase UOM</label>
-                   <select
-                     value={newItem.purchaseUom}
-                     onChange={e => setNewItem({...newItem, purchaseUom: e.target.value})}
-                     className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
-                   >
-                     <option value="">— not set —</option>
-                     <option>case</option>
-                     <option>bag</option>
-                     <option>box</option>
-                     <option>bottle</option>
-                     <option>can</option>
-                     <option>pack</option>
-                     <option>ea</option>
-                   </select>
-                 </div>
-                 <div className="space-y-1">
-                   <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Pack Qty</label>
-                   <input
-                     type="number" min="0" step="1"
-                     value={newItem.packQty}
-                     onChange={e => setNewItem({...newItem, packQty: e.target.value})}
-                     className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
-                     placeholder="e.g. 12"
-                   />
-                   <p className="text-[10px] text-neutral-400">Inner units per purchase pack</p>
-                 </div>
-               </div>
+              {/* Row 1: Purchase UOM + Pack Qty */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Purchase UOM</label>
+                  <select
+                    value={newItem.purchaseUom}
+                    onChange={e => setNewItem({ ...newItem, purchaseUom: e.target.value })}
+                    className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
+                  >
+                    <option value="">— not set —</option>
+                    <option>case</option>
+                    <option>bag</option>
+                    <option>box</option>
+                    <option>bottle</option>
+                    <option>can</option>
+                    <option>pack</option>
+                    <option>ea</option>
+                  </select>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Pack Qty</label>
+                  <input
+                    type="number" min="0" step="1"
+                    value={newItem.packQty}
+                    onChange={e => setNewItem({ ...newItem, packQty: e.target.value })}
+                    className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
+                    placeholder="e.g. 12"
+                  />
+                  <p className="text-[10px] text-neutral-400">Inner units per purchase pack</p>
+                </div>
+              </div>
 
-               {/* Row 2: Inner Unit Type + Inner Unit Size + Inner Unit UOM */}
-               <div className="grid grid-cols-3 gap-3">
-                 <div className="space-y-1">
-                   <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Inner Type</label>
-                   <select
-                     value={newItem.innerUnitType}
-                     onChange={e => setNewItem({...newItem, innerUnitType: e.target.value})}
-                     className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
-                   >
-                     <option value="">— not set —</option>
-                     <option>can</option>
-                     <option>bottle</option>
-                     <option>bag</option>
-                     <option>ea</option>
-                     <option>portion</option>
-                   </select>
-                 </div>
-                 <div className="space-y-1">
-                   <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Inner Size</label>
-                   <input
-                     type="number" min="0" step="any"
-                     value={newItem.innerUnitSize}
-                     onChange={e => setNewItem({...newItem, innerUnitSize: e.target.value})}
-                     className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
-                     placeholder="e.g. 330"
-                   />
-                 </div>
-                 <div className="space-y-1">
-                   <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Inner UOM</label>
-                   <select
-                     value={newItem.innerUnitUom}
-                     onChange={e => setNewItem({...newItem, innerUnitUom: e.target.value})}
-                     className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
-                   >
-                     <option value="">— not set —</option>
-                     <option value="ml">ml</option>
-                     <option value="l">l</option>
-                     <option value="g">g</option>
-                     <option value="kg">kg</option>
-                     <option value="oz">oz</option>
-                     <option value="lb">lb</option>
-                     <option value="fl oz">fl oz</option>
-                     <option value="ea">ea</option>
-                   </select>
-                 </div>
-               </div>
+              {/* Row 2: Inner Unit Type + Inner Unit Size + Inner Unit UOM */}
+              <div className="grid grid-cols-3 gap-3">
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Inner Type</label>
+                  <select
+                    value={newItem.innerUnitType}
+                    onChange={e => setNewItem({ ...newItem, innerUnitType: e.target.value })}
+                    className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
+                  >
+                    <option value="">— not set —</option>
+                    <option>can</option>
+                    <option>bottle</option>
+                    <option>bag</option>
+                    <option>ea</option>
+                    <option>portion</option>
+                  </select>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Inner Size</label>
+                  <input
+                    type="number" min="0" step="any"
+                    value={newItem.innerUnitSize}
+                    onChange={e => setNewItem({ ...newItem, innerUnitSize: e.target.value })}
+                    className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
+                    placeholder="e.g. 330"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Inner UOM</label>
+                  <select
+                    value={newItem.innerUnitUom}
+                    onChange={e => setNewItem({ ...newItem, innerUnitUom: e.target.value })}
+                    className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
+                  >
+                    <option value="">— not set —</option>
+                    <option value="ml">ml</option>
+                    <option value="l">l</option>
+                    <option value="g">g</option>
+                    <option value="kg">kg</option>
+                    <option value="oz">oz</option>
+                    <option value="lb">lb</option>
+                    <option value="fl oz">fl oz</option>
+                    <option value="ea">ea</option>
+                  </select>
+                </div>
+              </div>
 
-               {/* Row 3: Base UOM */}
-               <div className="space-y-1">
-                 <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Base UOM (Costing)</label>
-                 <select
-                   value={newItem.baseUomNew}
-                   onChange={e => setNewItem({...newItem, baseUomNew: e.target.value})}
-                   className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
-                 >
-                   <option value="">— same as Base Unit above —</option>
-                   <option value="ml">ml</option>
-                   <option value="l">l</option>
-                   <option value="g">g</option>
-                   <option value="kg">kg</option>
-                   <option value="oz">oz</option>
-                   <option value="lb">lb</option>
-                   <option value="fl oz">fl oz</option>
-                   <option value="ea">ea</option>
-                 </select>
-                 <p className="text-[10px] text-neutral-400">
-                   Preferred unit for recipe costing. Overrides Base Unit above when set.
-                   Backfills Base Unit only if Base Unit is currently blank.
-                 </p>
-               </div>
+              {/* Row 3: Base UOM */}
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Base UOM (Costing)</label>
+                <select
+                  value={newItem.baseUomNew}
+                  onChange={e => setNewItem({ ...newItem, baseUomNew: e.target.value })}
+                  className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
+                >
+                  <option value="">— same as Base Unit above —</option>
+                  <option value="ml">ml</option>
+                  <option value="l">l</option>
+                  <option value="g">g</option>
+                  <option value="kg">kg</option>
+                  <option value="oz">oz</option>
+                  <option value="lb">lb</option>
+                  <option value="fl oz">fl oz</option>
+                  <option value="ea">ea</option>
+                </select>
+                <p className="text-[10px] text-neutral-400">
+                  Preferred unit for recipe costing. Overrides Base Unit above when set.
+                  Backfills Base Unit only if Base Unit is currently blank.
+                </p>
+              </div>
 
-               {/* Row 4: Allowed Recipe UOMs */}
-               <div className="space-y-1">
-                 <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Allowed Recipe UOMs</label>
-                 <input
-                   type="text"
-                   value={newItem.allowedRecipeUoms}
-                   onChange={e => setNewItem({...newItem, allowedRecipeUoms: e.target.value})}
-                   className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
-                   placeholder="ml, l, fl oz  (comma-separated, optional)"
-                 />
-                 <p className="text-[10px] text-neutral-400">
-                   If set, recipe builder shows a soft warning when a different unit is used. Does not block saving.
-                 </p>
-               </div>
+              {/* Row 4: Allowed Recipe UOMs */}
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Allowed Recipe UOMs</label>
+                <input
+                  type="text"
+                  value={newItem.allowedRecipeUoms}
+                  onChange={e => setNewItem({ ...newItem, allowedRecipeUoms: e.target.value })}
+                  className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
+                  placeholder="ml, l, fl oz  (comma-separated, optional)"
+                />
+                <p className="text-[10px] text-neutral-400">
+                  If set, recipe builder shows a soft warning when a different unit is used. Does not block saving.
+                </p>
+              </div>
 
-               {/* Live preview of pack cost computation */}
-               {newItem.packQty && newItem.innerUnitSize && newItem.innerUnitUom && newItem.cost && (() => {
-                 try {
-                   const totalQty = Number(newItem.packQty) * Number(newItem.innerUnitSize);
-                   const cost = parseFloat(newItem.cost as string);
-                   if (!isNaN(totalQty) && totalQty > 0 && !isNaN(cost) && cost > 0) {
-                     const estimatedPerUnit = cost / totalQty;
-                     return (
-                       <div className="bg-brand-50 border border-brand-100 rounded-lg px-3 py-2 text-[11px] text-brand-700 font-medium">
-                         Estimated: ${estimatedPerUnit.toFixed(4)} / {newItem.innerUnitUom || 'unit'} at recipe time
-                       </div>
-                     );
-                   }
-                 } catch { return null; }
-                 return null;
-               })()}
-             </div>
-           </details>
+              {/* Live preview of pack cost computation */}
+              {newItem.packQty && newItem.innerUnitSize && newItem.innerUnitUom && newItem.cost && (() => {
+                try {
+                  const totalQty = Number(newItem.packQty) * Number(newItem.innerUnitSize);
+                  const cost = parseFloat(newItem.cost as string);
+                  if (!isNaN(totalQty) && totalQty > 0 && !isNaN(cost) && cost > 0) {
+                    const estimatedPerUnit = cost / totalQty;
+                    return (
+                      <div className="bg-brand-50 border border-brand-100 rounded-lg px-3 py-2 text-[11px] text-brand-700 font-medium">
+                        Estimated: ${estimatedPerUnit.toFixed(4)} / {newItem.innerUnitUom || 'unit'} at recipe time
+                      </div>
+                    );
+                  }
+                } catch { return null; }
+                return null;
+              })()}
+            </div>
+          </details>
 
-           {/* Supplier */}
-           <div className="space-y-1.5">
-             <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Preferred Supplier</label>
-               <input list="supplier-options" type="text" value={newItem.supplier} onChange={e => setNewItem({...newItem, supplier: e.target.value})} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="Select or type new supplier..." />
-               <datalist id="supplier-options">
-                 {suppliersData.map(s => <option key={s.id} value={s.name} />)}
-               </datalist>
-           </div>
-           <div className="grid grid-cols-3 gap-4">
-             <div className="space-y-1.5">
-               <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Current Stock</label>
-               <input type="number" step="1" value={newItem.inStock} onChange={e => setNewItem({...newItem, inStock: e.target.value})} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="0" />
-             </div>
-             <div className="space-y-1.5">
-               <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Par Level</label>
-               <input type="number" step="1" value={newItem.parLevel} onChange={e => setNewItem({...newItem, parLevel: e.target.value})} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="0" />
-             </div>
-             {(() => {
-                const pu = newItem.purchaseUnits.find((u: any) => u.isPrimary) || newItem.purchaseUnits[0];
-                const hasValidPrimary = pu && pu.name && parseFloat(pu.conversion) > 0;
-                
-                return (
-                  <div className="space-y-1.5 focus-within:z-10">
-                    <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">
-                      {hasValidPrimary ? `Cost (per ${pu.name})` : 'Cost / Base Unit'}
-                    </label>
-                    <input type="number" step="0.1" value={newItem.cost} onChange={e => setNewItem({...newItem, cost: e.target.value})} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="$0.00" />
-                    {hasValidPrimary && newItem.cost && !isNaN(parseFloat(newItem.cost)) && (
-                       <p className="text-[10px] text-brand-600 font-medium mt-1">
-                         Automatically yields core base cost: ${(parseFloat(newItem.cost) / parseFloat(pu.conversion)).toFixed(2)} / {newItem.unit || 'base'}
-                       </p>
-                    )}
-                  </div>
-                );
-             })()}
-           </div>
+          {/* Supplier */}
+          <div className="space-y-1.5">
+            <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Preferred Supplier</label>
+            <input list="supplier-options" type="text" value={newItem.supplier} onChange={e => setNewItem({ ...newItem, supplier: e.target.value })} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="Select or type new supplier..." />
+            <datalist id="supplier-options">
+              {suppliersData.map(s => <option key={s.id} value={s.name} />)}
+            </datalist>
+          </div>
+          <div className="grid grid-cols-3 gap-4">
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Current Stock</label>
+              <input type="number" step="1" value={newItem.inStock} onChange={e => setNewItem({ ...newItem, inStock: e.target.value })} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="0" />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Par Level</label>
+              <input type="number" step="1" value={newItem.parLevel} onChange={e => setNewItem({ ...newItem, parLevel: e.target.value })} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="0" />
+            </div>
+            {(() => {
+              const pu = newItem.purchaseUnits.find((u: any) => u.isPrimary) || newItem.purchaseUnits[0];
+              const hasValidPrimary = pu && pu.name && parseFloat(pu.conversion) > 0;
+
+              return (
+                <div className="space-y-1.5 focus-within:z-10">
+                  <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">
+                    {hasValidPrimary ? `Cost (per ${pu.name})` : 'Cost / Base Unit'}
+                  </label>
+                  <input type="number" step="0.1" value={newItem.cost} onChange={e => setNewItem({ ...newItem, cost: e.target.value })} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="$0.00" />
+                  {hasValidPrimary && newItem.cost && !isNaN(parseFloat(newItem.cost)) && (
+                    <p className="text-[10px] text-brand-600 font-medium mt-1">
+                      Automatically yields core base cost: ${(parseFloat(newItem.cost) / parseFloat(pu.conversion)).toFixed(2)} / {newItem.unit || 'base'}
+                    </p>
+                  )}
+                </div>
+              );
+            })()}
+          </div>
         </div>
       </Drawer>
 
@@ -2714,83 +2753,83 @@ export default function Inventory() {
         title="Bulk Import Inventory"
         description="Upload a CSV file to rapidly ingest hundreds of item bounds simultaneously."
         footer={
-           <div className="flex items-center gap-3">
-             <button onClick={downloadTemplate} className="px-4 py-2 text-sm font-medium bg-neutral-100 text-neutral-700 border border-neutral-200 rounded-lg hover:bg-neutral-200 transition-colors w-full flex items-center justify-center gap-2"><Download className="h-4 w-4" /> Template.csv</button>
-             <button onClick={commitImport} disabled={importPreview.length === 0 || isCommitting} className="px-4 py-2 text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors shadow-sm w-full disabled:opacity-50 flex items-center justify-center gap-2">
-               {isCommitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-               {isCommitting ? "Committing..." : "Commit Import"}
-             </button>
-           </div>
+          <div className="flex items-center gap-3">
+            <button onClick={downloadTemplate} className="px-4 py-2 text-sm font-medium bg-neutral-100 text-neutral-700 border border-neutral-200 rounded-lg hover:bg-neutral-200 transition-colors w-full flex items-center justify-center gap-2"><Download className="h-4 w-4" /> Template.csv</button>
+            <button onClick={commitImport} disabled={importPreview.length === 0 || isCommitting} className="px-4 py-2 text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors shadow-sm w-full disabled:opacity-50 flex items-center justify-center gap-2">
+              {isCommitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+              {isCommitting ? "Committing..." : "Commit Import"}
+            </button>
+          </div>
         }
       >
         <div className="space-y-6">
-           <div 
-             onClick={() => fileInputRef.current?.click()}
-             className="border-2 border-dashed border-neutral-300 rounded-xl bg-neutral-50 p-8 text-center cursor-pointer hover:bg-neutral-100 hover:border-brand-400 transition-colors flex flex-col items-center justify-center gap-3"
-           >
-             <div className="p-3 bg-white border border-neutral-200 rounded-full shadow-sm text-neutral-600">
-                <Upload className="h-6 w-6" />
-             </div>
-             <div>
-                <p className="font-semibold text-neutral-900 text-sm">Click to select CSV File</p>
-                <p className="text-xs text-neutral-500 mt-1">Columns must natively match the template.</p>
-             </div>
-             <input type="file" accept=".csv" className="hidden" ref={fileInputRef} onChange={handleCSVUpload} />
-           </div>
+          <div
+            onClick={() => fileInputRef.current?.click()}
+            className="border-2 border-dashed border-neutral-300 rounded-xl bg-neutral-50 p-8 text-center cursor-pointer hover:bg-neutral-100 hover:border-brand-400 transition-colors flex flex-col items-center justify-center gap-3"
+          >
+            <div className="p-3 bg-white border border-neutral-200 rounded-full shadow-sm text-neutral-600">
+              <Upload className="h-6 w-6" />
+            </div>
+            <div>
+              <p className="font-semibold text-neutral-900 text-sm">Click to select CSV File</p>
+              <p className="text-xs text-neutral-500 mt-1">Columns must natively match the template.</p>
+            </div>
+            <input type="file" accept=".csv" className="hidden" ref={fileInputRef} onChange={handleCSVUpload} />
+          </div>
 
-           {importErrors.length > 0 && (
-             <div className="bg-danger-50 border border-danger-200 rounded-lg p-4">
-               <h4 className="text-sm font-bold text-danger-800 flex items-center gap-2 mb-2"><AlertTriangle className="h-4 w-4" /> Critical File Errors</h4>
-               <ul className="list-disc list-inside text-xs text-danger-700 space-y-1">
-                 {importErrors.map((err, idx) => <li key={idx}>{err}</li>)}
-               </ul>
-             </div>
-           )}
+          {importErrors.length > 0 && (
+            <div className="bg-danger-50 border border-danger-200 rounded-lg p-4">
+              <h4 className="text-sm font-bold text-danger-800 flex items-center gap-2 mb-2"><AlertTriangle className="h-4 w-4" /> Critical File Errors</h4>
+              <ul className="list-disc list-inside text-xs text-danger-700 space-y-1">
+                {importErrors.map((err, idx) => <li key={idx}>{err}</li>)}
+              </ul>
+            </div>
+          )}
 
-           {importPreview.length > 0 && (
-             <div className="border border-neutral-200 rounded-lg overflow-hidden flex flex-col h-[280px]">
-                <div className="bg-neutral-50 border-b border-neutral-200 p-3 flex justify-between items-center text-xs">
-                  <span className="font-semibold text-neutral-700 uppercase tracking-wider">Preview Buffer</span>
-                  <span className="font-medium text-brand-600">{importPreview.length} objects queued</span>
-                </div>
-                <div className="flex-1 overflow-y-auto">
-                  <Table>
-                    <TableHeader className="bg-white sticky top-0 border-b border-neutral-100 shadow-sm z-10 text-[10px] uppercase text-neutral-500">
-                      <TableRow>
-                        <TableHead className="py-2">Item Struct</TableHead>
-                        <TableHead className="py-2">Stock Bound</TableHead>
-                        <TableHead className="py-2 text-right">Flags</TableHead>
+          {importPreview.length > 0 && (
+            <div className="border border-neutral-200 rounded-lg overflow-hidden flex flex-col h-[280px]">
+              <div className="bg-neutral-50 border-b border-neutral-200 p-3 flex justify-between items-center text-xs">
+                <span className="font-semibold text-neutral-700 uppercase tracking-wider">Preview Buffer</span>
+                <span className="font-medium text-brand-600">{importPreview.length} objects queued</span>
+              </div>
+              <div className="flex-1 overflow-y-auto">
+                <Table>
+                  <TableHeader className="bg-white sticky top-0 border-b border-neutral-100 shadow-sm z-10 text-[10px] uppercase text-neutral-500">
+                    <TableRow>
+                      <TableHead className="py-2">Item Struct</TableHead>
+                      <TableHead className="py-2">Stock Bound</TableHead>
+                      <TableHead className="py-2 text-right">Flags</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {importPreview.map((row, idx) => (
+                      <TableRow key={idx} className={row.isDuplicate ? "bg-warning-50" : "bg-white"}>
+                        <TableCell className="py-2.5">
+                          <div className="font-semibold text-xs text-neutral-900">{row.payload.name}</div>
+                          <div className="text-[10px] text-neutral-500">{row.payload.category} • {row.payload.supplierText}</div>
+                        </TableCell>
+                        <TableCell className="py-2.5">
+                          <div className="text-xs font-medium text-neutral-700">{row.payload.inStock} / {row.payload.parLevel} {row.payload.unit}</div>
+                          <div className="text-[10px] text-brand-600 font-semibold">${row.payload.cost.toFixed(2)} cost</div>
+                        </TableCell>
+                        <TableCell className="py-2.5 text-right">
+                          {row.isDuplicate ? (
+                            overwriteExisting ? (
+                              <Badge variant="warning" className="text-[9px] bg-warning-100 text-warning-800">Update Target</Badge>
+                            ) : (
+                              <Badge variant="warning" className="text-[9px]">Collision (Skip)</Badge>
+                            )
+                          ) : (
+                            <Badge variant="success" className="text-[9px]">Valid</Badge>
+                          )}
+                        </TableCell>
                       </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {importPreview.map((row, idx) => (
-                         <TableRow key={idx} className={row.isDuplicate ? "bg-warning-50" : "bg-white"}>
-                           <TableCell className="py-2.5">
-                             <div className="font-semibold text-xs text-neutral-900">{row.payload.name}</div>
-                             <div className="text-[10px] text-neutral-500">{row.payload.category} • {row.payload.supplierText}</div>
-                           </TableCell>
-                           <TableCell className="py-2.5">
-                             <div className="text-xs font-medium text-neutral-700">{row.payload.inStock} / {row.payload.parLevel} {row.payload.unit}</div>
-                             <div className="text-[10px] text-brand-600 font-semibold">${row.payload.cost.toFixed(2)} cost</div>
-                           </TableCell>
-                           <TableCell className="py-2.5 text-right">
-                             {row.isDuplicate ? (
-                               overwriteExisting ? (
-                                 <Badge variant="warning" className="text-[9px] bg-warning-100 text-warning-800">Update Target</Badge>
-                               ) : (
-                                 <Badge variant="warning" className="text-[9px]">Collision (Skip)</Badge>
-                               )
-                             ) : (
-                               <Badge variant="success" className="text-[9px]">Valid</Badge>
-                             )}
-                           </TableCell>
-                         </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-             </div>
-           )}
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+          )}
         </div>
       </Drawer>
 
@@ -2801,62 +2840,62 @@ export default function Inventory() {
         title="Import History & Rollback"
         description="Review recent bulk operations. You can selectively roll back active batches if no subsequent modifications have occurred."
         footer={
-           <button onClick={() => setIsHistoryDrawerOpen(false)} className="w-full py-2 bg-neutral-100 text-neutral-800 rounded-lg font-medium text-sm hover:bg-neutral-200 transition-colors">
-             Close Subsystem
-           </button>
+          <button onClick={() => setIsHistoryDrawerOpen(false)} className="w-full py-2 bg-neutral-100 text-neutral-800 rounded-lg font-medium text-sm hover:bg-neutral-200 transition-colors">
+            Close Subsystem
+          </button>
         }
       >
         <div className="space-y-4">
           {importBatches.length === 0 ? (
-             <div className="text-center py-12 text-neutral-500 text-sm bg-neutral-50 border border-neutral-200 rounded-xl">
-                No past operations to map.
-             </div>
+            <div className="text-center py-12 text-neutral-500 text-sm bg-neutral-50 border border-neutral-200 rounded-xl">
+              No past operations to map.
+            </div>
           ) : (
-             <div className="space-y-4">
-               <div className="flex justify-end mb-2">
-                 <button 
-                    onClick={async () => {
-                       if (confirm("Are you sure you want to clear all history? This will NOT revert the uploads, but simply wipe this log.")) {
-                          const res = await saveImportBatches([]);
-                          if (!res?.success) alert(`Failed to wipe: ${res?.error?.message}`);
-                          else setImportBatches([]);
-                       }
-                    }}
-                    className="text-xs font-semibold text-red-600 hover:text-red-700 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded-md transition-colors"
-                 >
-                    Clear History Logs
-                 </button>
-               </div>
-               {importBatches.map((batch, idx) => (
+            <div className="space-y-4">
+              <div className="flex justify-end mb-2">
+                <button
+                  onClick={async () => {
+                    if (confirm("Are you sure you want to clear all history? This will NOT revert the uploads, but simply wipe this log.")) {
+                      const res = await saveImportBatches([]);
+                      if (!res?.success) alert(`Failed to wipe: ${res?.error?.message}`);
+                      else setImportBatches([]);
+                    }
+                  }}
+                  className="text-xs font-semibold text-red-600 hover:text-red-700 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded-md transition-colors"
+                >
+                  Clear History Logs
+                </button>
+              </div>
+              {importBatches.map((batch, idx) => (
                 <div key={idx} className={`p-4 border rounded-xl space-y-3 ${batch.status === "Reverted" ? 'bg-neutral-50 border-neutral-200 opacity-75' : 'bg-white border-neutral-200 shadow-sm'}`}>
                   <div className="flex justify-between items-start">
-                     <div>
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-sm text-neutral-900">{batch.fileName}</span>
-                          <Badge variant={batch.status === "Reverted" ? "neutral" : "success"} className="text-[10px]">{batch.status}</Badge>
-                        </div>
-                        <p className="text-xs text-neutral-500 mt-0.5">{new Date(batch.timestamp).toLocaleString()}</p>
-                     </div>
-                     <p className="text-[10px] text-neutral-400 font-mono">{batch.batchId}</p>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-sm text-neutral-900">{batch.fileName}</span>
+                        <Badge variant={batch.status === "Reverted" ? "neutral" : "success"} className="text-[10px]">{batch.status}</Badge>
+                      </div>
+                      <p className="text-xs text-neutral-500 mt-0.5">{new Date(batch.timestamp).toLocaleString()}</p>
+                    </div>
+                    <p className="text-[10px] text-neutral-400 font-mono">{batch.batchId}</p>
                   </div>
-                  
+
                   <div className="grid grid-cols-3 gap-2 py-2 border-y border-neutral-100">
                     <div className="text-center">
-                       <p className="text-xs text-neutral-500">New</p>
-                       <p className="font-bold text-neutral-900 text-sm">{batch.metrics.new}</p>
+                      <p className="text-xs text-neutral-500">New</p>
+                      <p className="font-bold text-neutral-900 text-sm">{batch.metrics.new}</p>
                     </div>
                     <div className="text-center border-x border-neutral-100">
-                       <p className="text-xs text-neutral-500">Updated</p>
-                       <p className="font-bold text-neutral-900 text-sm">{batch.metrics.updated}</p>
+                      <p className="text-xs text-neutral-500">Updated</p>
+                      <p className="font-bold text-neutral-900 text-sm">{batch.metrics.updated}</p>
                     </div>
                     <div className="text-center">
-                       <p className="text-xs text-neutral-500">Skipped</p>
-                       <p className="font-bold text-neutral-900 text-sm">{batch.metrics.skipped}</p>
+                      <p className="text-xs text-neutral-500">Skipped</p>
+                      <p className="font-bold text-neutral-900 text-sm">{batch.metrics.skipped}</p>
                     </div>
                   </div>
 
                   {batch.status !== "Reverted" && (
-                    <button 
+                    <button
                       onClick={() => revertBatch(batch.batchId)}
                       className="w-full py-1.5 flex items-center justify-center gap-1.5 text-xs font-semibold text-danger-700 bg-danger-50 hover:bg-danger-100 rounded-md transition-colors"
                     >
@@ -2864,8 +2903,8 @@ export default function Inventory() {
                     </button>
                   )}
                 </div>
-             ))}
-             </div>
+              ))}
+            </div>
           )}
         </div>
       </Drawer>
@@ -2877,60 +2916,60 @@ export default function Inventory() {
         title="Execute Bulk Purge"
         description="Permanently eradicate designated bounds from the active operational inventory."
         footer={
-           <div className="flex items-center gap-3">
-             <button onClick={() => setIsDeleteModalOpen(false)} className="px-4 py-2 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 transition-colors w-full">Abort Task</button>
-              <button
-                onClick={async () => {
-                  // Bulk delete: DELETE from both tables for every selected item
-                  const toDelete = inventoryData.filter((i: any) => selectedItemIds.includes(i.id));
-                  const errors: string[] = [];
+          <div className="flex items-center gap-3">
+            <button onClick={() => setIsDeleteModalOpen(false)} className="px-4 py-2 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 transition-colors w-full">Abort Task</button>
+            <button
+              onClick={async () => {
+                // Bulk delete: DELETE from both tables for every selected item
+                const toDelete = inventoryData.filter((i: any) => selectedItemIds.includes(i.id));
+                const errors: string[] = [];
 
-                  for (const item of toDelete) {
-                    const invRes = await deleteInventoryItem(String(item.id));
-                    if (!invRes.success) {
-                      errors.push(`inventory: ${item.name} (${invRes.error?.message ?? "err"})`);
-                      continue;
-                    }
-                    const fgRes = await deleteSaleItemByNameOrId(String(item.id), item.name);
-                    if (!fgRes.success) {
-                      errors.push(`hq_sale_items: ${item.name} (${fgRes.error?.message ?? "err"})`);
-                    }
+                for (const item of toDelete) {
+                  const invRes = await deleteInventoryItem(String(item.id));
+                  if (!invRes.success) {
+                    errors.push(`inventory: ${item.name} (${invRes.error?.message ?? "err"})`);
+                    continue;
                   }
-
-                  if (errors.length > 0) {
-                    alert(`Some items failed:\n${errors.join("\n")}\nList will refresh.`);
+                  const fgRes = await deleteSaleItemByNameOrId(String(item.id), item.name);
+                  if (!fgRes.success) {
+                    errors.push(`hq_sale_items: ${item.name} (${fgRes.error?.message ?? "err"})`);
                   }
+                }
 
-                  const freshInv = await loadInventory();
-                  const userLocationId = resolveLocationId(user);
-                  const scopedInv = isHqAdmin(user)
-                    ? freshInv
-                    : freshInv.filter((i: any) => i.locationId === userLocationId);
-                  setInventoryData(scopedInv);
-                  setSelectedItemIds([]);
-                  setIsDeleteModalOpen(false);
-                }}
-               className="px-4 py-2 text-sm font-bold bg-danger-600 text-white rounded-lg hover:bg-danger-700 transition-colors shadow-sm w-full"
-             >
-               Purge {selectedItemIds.length} Object{selectedItemIds.length !== 1 ? 's' : ''}
-             </button>
-           </div>
+                if (errors.length > 0) {
+                  alert(`Some items failed:\n${errors.join("\n")}\nList will refresh.`);
+                }
+
+                const freshInv = await loadInventory();
+                const userLocationId = resolveLocationId(user);
+                const scopedInv = isHqAdmin(user)
+                  ? freshInv
+                  : freshInv.filter((i: any) => i.locationId === userLocationId);
+                setInventoryData(scopedInv);
+                setSelectedItemIds([]);
+                setIsDeleteModalOpen(false);
+              }}
+              className="px-4 py-2 text-sm font-bold bg-danger-600 text-white rounded-lg hover:bg-danger-700 transition-colors shadow-sm w-full"
+            >
+              Purge {selectedItemIds.length} Object{selectedItemIds.length !== 1 ? 's' : ''}
+            </button>
+          </div>
         }
       >
         <div className="space-y-4">
-           {(() => {
-              const itemsWithHistory = selectedItemIds.filter(id => activityData[id] && activityData[id].length > 0);
-              return itemsWithHistory.length > 0 ? (
-                <div className="bg-warning-50 border border-warning-200 rounded-lg p-4 space-y-2">
-                  <h4 className="text-sm font-bold text-warning-800 flex items-center gap-2"><AlertTriangle className="h-4 w-4" /> System Warning: Fragment Isolation</h4>
-                  <p className="text-xs text-warning-700 leading-relaxed font-medium">
-                    <strong>{itemsWithHistory.length}</strong> of your targeted nodes are mapping persistent historical tracking structures. System overrides will terminate active structural binds, but physical reporting orphans will persist independently in cold storage matrices. 
-                  </p>
-                </div>
-              ) : (
-                <p className="text-sm text-neutral-600">The deletion pipeline is completely unchained. You are targeting {selectedItemIds.length} components. Proceed confidently?</p>
-              )
-           })()}
+          {(() => {
+            const itemsWithHistory = selectedItemIds.filter(id => activityData[id] && activityData[id].length > 0);
+            return itemsWithHistory.length > 0 ? (
+              <div className="bg-warning-50 border border-warning-200 rounded-lg p-4 space-y-2">
+                <h4 className="text-sm font-bold text-warning-800 flex items-center gap-2"><AlertTriangle className="h-4 w-4" /> System Warning: Fragment Isolation</h4>
+                <p className="text-xs text-warning-700 leading-relaxed font-medium">
+                  <strong>{itemsWithHistory.length}</strong> of your targeted nodes are mapping persistent historical tracking structures. System overrides will terminate active structural binds, but physical reporting orphans will persist independently in cold storage matrices.
+                </p>
+              </div>
+            ) : (
+              <p className="text-sm text-neutral-600">The deletion pipeline is completely unchained. You are targeting {selectedItemIds.length} components. Proceed confidently?</p>
+            )
+          })()}
         </div>
       </Drawer>
 
