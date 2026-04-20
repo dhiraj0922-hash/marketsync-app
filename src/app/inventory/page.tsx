@@ -465,9 +465,20 @@ export default function Inventory() {
 
   const deletePurchOpt = async (id: string) => {
     if (!confirm('Remove this supplier row?')) return;
+    const deletedRow = editPurchaseOptions.find((r: any) => r.id === id);
     const res = await deletePurchaseOption(id);
     if (res.success) {
-      setEditPurchaseOptions((prev: any[]) => prev.filter((r: any) => r.id !== id));
+      const remaining = editPurchaseOptions.filter((r: any) => r.id !== id);
+      setEditPurchaseOptions(remaining);
+      // If the deleted row was preferred, sync cost to new preferred or lowest
+      if (deletedRow?.isPreferred) {
+        const newPreferred = remaining.find((r: any) => r.isPreferred);
+        const lowest = remaining.length > 0
+          ? [...remaining].sort((a: any, b: any) => a.unitPrice - b.unitPrice)[0]
+          : null;
+        const fallbackPrice = newPreferred?.unitPrice ?? lowest?.unitPrice ?? null;
+        setEditPurchaseCost(fallbackPrice !== null ? String(fallbackPrice) : '');
+      }
     } else {
       alert(`Delete failed: ${(res as any).error?.message ?? 'Unknown'}`);
     }
@@ -476,6 +487,9 @@ export default function Inventory() {
   const makePreferred = async (id: string) => {
     const updated = editPurchaseOptions.map((r: any) => ({ ...r, isPreferred: r.id === id }));
     setEditPurchaseOptions(updated);
+    // Immediately sync cost to the newly preferred row's price
+    const newPreferred = updated.find((r: any) => r.id === id);
+    if (newPreferred) setEditPurchaseCost(String(newPreferred.unitPrice));
     const res = await savePurchaseOptions(updated);
     if (!res.success) alert(`Could not update preferred: ${(res as any).error?.message ?? ''}`);
   };
@@ -492,6 +506,11 @@ export default function Inventory() {
     if (!res.success) { alert(`Insert failed: ${(res as any).error?.message ?? ''}`); return; }
     const rows = await loadPurchaseOptions(String(editItem.id));
     setEditPurchaseOptions(rows);
+    // If new row is preferred, sync cost immediately
+    const preferredRow = rows.find((r: any) => r.isPreferred);
+    const lowestRow = rows.length > 0 ? [...rows].sort((a: any, b: any) => a.unitPrice - b.unitPrice)[0] : null;
+    const syncPrice = preferredRow?.unitPrice ?? lowestRow?.unitPrice ?? null;
+    if (syncPrice !== null) setEditPurchaseCost(String(syncPrice));
     setAddingPurchOpt(false);
     setNewPurchOpt({ supplierName: '', supplierProductName: '', purchaseUom: 'ea', packQty: '', packUom: '', unitPrice: '', isPreferred: false });
   };
@@ -2062,13 +2081,12 @@ export default function Inventory() {
               </div>
               <div className="space-y-1.5">
                 {(() => {
+                  // Label derives from purchase_options for context.
+                  // Value is always editPurchaseCost — kept in sync by makePreferred / deletePurchOpt / commitNewPurchOpt.
                   const preferred = editPurchaseOptions.find((p: any) => p.isPreferred);
                   const lowest = editPurchaseOptions.length > 0
-                    ? editPurchaseOptions.reduce((min: any, p: any) => p.unitPrice < min.unitPrice ? p : min)
+                    ? [...editPurchaseOptions].sort((a: any, b: any) => a.unitPrice - b.unitPrice)[0]
                     : null;
-                  // Auto-fill editPurchaseCost from preferred (or lowest) whenever it hasn't been manually overridden.
-                  // We do this as a display-time derivation so it reacts instantly to Make Preferred clicks.
-                  const autoPrice = preferred?.unitPrice ?? lowest?.unitPrice ?? null;
                   const autoLabel = preferred
                     ? `Cost — from ${preferred.supplierName}`
                     : lowest
@@ -2081,19 +2099,13 @@ export default function Inventory() {
                       <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">{autoLabel}</label>
                       <input
                         type="number" step="0.01"
-                        value={autoPrice !== null && editPurchaseCost === '' ? String(autoPrice) : editPurchaseCost}
+                        value={editPurchaseCost}
                         onChange={e => setEditPurchaseCost(e.target.value)}
-                        onFocus={() => {
-                          // On focus, if field is empty, seed it from auto price so user can edit from there
-                          if (editPurchaseCost === '' && autoPrice !== null) setEditPurchaseCost(String(autoPrice));
-                        }}
-                        className={`w-full p-2 border rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 ${
-                          autoPrice !== null && editPurchaseCost === '' ? 'border-violet-200 bg-violet-50 text-violet-800' : 'border-neutral-200'
-                        }`}
+                        className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
                         placeholder="$0.00"
                       />
-                      {autoPrice !== null && editPurchaseCost === '' && (
-                        <p className="text-[10px] text-violet-500">Auto-filled from supplier. Edit to override.</p>
+                      {preferred && (
+                        <p className="text-[10px] text-violet-500">Price from preferred supplier. Edit to override.</p>
                       )}
                     </>
                   );
