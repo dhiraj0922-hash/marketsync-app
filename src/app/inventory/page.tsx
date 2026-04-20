@@ -463,6 +463,28 @@ export default function Inventory() {
     }
   };
 
+  // Patches the matching inventoryData row with supplier info derived from purchase_options.
+  // This keeps the list row in sync without an extra DB round-trip.
+  const syncInventoryRowSupplier = (rows: any[]) => {
+    if (!editItem) return;
+    const preferred = rows.find((r: any) => r.isPreferred);
+    const lowest = rows.length > 0
+      ? [...rows].sort((a: any, b: any) => a.unitPrice - b.unitPrice)[0]
+      : null;
+    const chosen = preferred ?? lowest ?? null;
+    setInventoryData((prev: any[]) =>
+      prev.map((inv: any) =>
+        String(inv.id) === String(editItem.id)
+          ? {
+              ...inv,
+              preferredSupplierName: chosen?.supplierName ?? null,
+              preferredCost: chosen?.unitPrice ?? null,
+            }
+          : inv
+      )
+    );
+  };
+
   const deletePurchOpt = async (id: string) => {
     if (!confirm('Remove this supplier row?')) return;
     const deletedRow = editPurchaseOptions.find((r: any) => r.id === id);
@@ -470,6 +492,7 @@ export default function Inventory() {
     if (res.success) {
       const remaining = editPurchaseOptions.filter((r: any) => r.id !== id);
       setEditPurchaseOptions(remaining);
+      syncInventoryRowSupplier(remaining);
       // If the deleted row was preferred, sync cost to new preferred or lowest
       if (deletedRow?.isPreferred) {
         const newPreferred = remaining.find((r: any) => r.isPreferred);
@@ -487,6 +510,7 @@ export default function Inventory() {
   const makePreferred = async (id: string) => {
     const updated = editPurchaseOptions.map((r: any) => ({ ...r, isPreferred: r.id === id }));
     setEditPurchaseOptions(updated);
+    syncInventoryRowSupplier(updated);
     // Immediately sync cost to the newly preferred row's price
     const newPreferred = updated.find((r: any) => r.id === id);
     if (newPreferred) setEditPurchaseCost(String(newPreferred.unitPrice));
@@ -506,6 +530,7 @@ export default function Inventory() {
     if (!res.success) { alert(`Insert failed: ${(res as any).error?.message ?? ''}`); return; }
     const rows = await loadPurchaseOptions(String(editItem.id));
     setEditPurchaseOptions(rows);
+    syncInventoryRowSupplier(rows);
     // If new row is preferred, sync cost immediately
     const preferredRow = rows.find((r: any) => r.isPreferred);
     const lowestRow = rows.length > 0 ? [...rows].sort((a: any, b: any) => a.unitPrice - b.unitPrice)[0] : null;
@@ -1614,7 +1639,9 @@ export default function Inventory() {
                       </div>
                     </TableCell>
                     <TableCell className="py-4">
-                      <span className="text-sm font-medium text-neutral-700">{getSupplierName(item.supplierId)}</span>
+                      <span className="text-sm font-medium text-neutral-700">
+                        {item.preferredSupplierName ?? getSupplierName(item.supplierId)}
+                      </span>
                     </TableCell>
                     <TableCell className="py-4">
                       <div className="flex flex-col gap-1">
@@ -1631,7 +1658,9 @@ export default function Inventory() {
                         })()}
                       </div>
                     </TableCell>
-                    <TableCell className="py-4 text-sm text-neutral-700">${item.cost.toFixed(2)}</TableCell>
+                    <TableCell className="py-4 text-sm text-neutral-700">
+                      ${(item.preferredCost ?? item.cost ?? 0).toFixed(2)}
+                    </TableCell>
                     <TableCell className="py-4">
                       {isCritical ? (
                         <Badge variant="danger" className="text-[10px]">Critical</Badge>
