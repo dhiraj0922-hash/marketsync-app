@@ -5,11 +5,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
-import { loadRecipes, saveRecipes, loadInventory, saveInventory, upsertRecipe, updateInventoryItemCost, loadSuppliers, deleteRecipe, loadPurchaseOptions, savePurchaseOptions, deletePurchaseOption } from "@/lib/storage";
+import { loadRecipes, saveRecipes, loadInventory, saveInventory, upsertRecipe, updateInventoryItemCost, loadSuppliers, deleteRecipe } from "@/lib/storage";
+import { InventoryEditDrawer } from "@/components/InventoryEditDrawer";
 
 import { normalizeUnit, canonicalizeUnit, resolveEffectiveBaseUom, computeBaseUnitCostFromPack, auditItemUnitAmbiguity } from "@/lib/units";
 
-import { Plus, Search, SplitSquareVertical, Calculator, Trash2, Sparkles, Pencil, X, Save } from "lucide-react";
+import { Plus, Search, SplitSquareVertical, Calculator, Trash2, Sparkles, Pencil } from "lucide-react";
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
 import { AIRecipeImport } from "@/components/AIRecipeImport";
 import { useAuth } from "@/components/AuthProvider";
@@ -113,16 +114,8 @@ function RecipesPageContent() {
   const [deleteTarget, setDeleteTarget] = useState<any | null>(null); // recipe pending deletion
   const [isDeleting, setIsDeleting]     = useState(false);
 
-  // ── Inventory Quick-Edit state (inline edit from recipe map) ──────────────────
-  const [invEditItem,            setInvEditItem]            = useState<any>(null);
-  const [invEditOpen,            setInvEditOpen]            = useState(false);
-  const [invEditName,            setInvEditName]            = useState("");
-  const [invEditCategory,        setInvEditCategory]        = useState("");
-  const [invEditBaseUnit,        setInvEditBaseUnit]        = useState("");
-  const [invEditCost,            setInvEditCost]            = useState("");
-  const [invEditPurchaseOptions, setInvEditPurchaseOptions] = useState<any[]>([]);
-  const [invEditLoading,         setInvEditLoading]         = useState(false);
-  const [invEditSaving,          setInvEditSaving]          = useState(false);
+  // ── Inventory inline edit (recipe map → InventoryEditDrawer) ─────────────────
+  const [invEditItem, setInvEditItem] = useState<any>(null);
 
   useEffect(() => {
     async function fetchData() {
@@ -187,72 +180,6 @@ function RecipesPageContent() {
     }
   };
 
-  // ── Inventory Quick-Edit handlers ─────────────────────────────────────────────
-  const openInvEdit = async (invItem: any) => {
-    setInvEditItem(invItem);
-    setInvEditName(invItem.name || "");
-    setInvEditCategory(invItem.category || "");
-    setInvEditBaseUnit(invItem.baseUnit || invItem.unit || "");
-    setInvEditCost(invItem.cost !== undefined ? String(invItem.cost) : "");
-    setInvEditPurchaseOptions([]);
-    setInvEditOpen(true);
-    setInvEditLoading(true);
-    try {
-      const opts = await loadPurchaseOptions(String(invItem.id));
-      setInvEditPurchaseOptions(opts);
-      const preferred = opts.find((r: any) => r.isPreferred);
-      const lowest    = opts.length > 0 ? [...opts].sort((a: any, b: any) => a.unitPrice - b.unitPrice)[0] : null;
-      const chosen    = preferred ?? lowest ?? null;
-      if (chosen) setInvEditCost(String(chosen.unitPrice));
-    } finally {
-      setInvEditLoading(false);
-    }
-  };
-
-  const makeInvEditPreferred = async (optId: string) => {
-    const updated = invEditPurchaseOptions.map((r: any) => ({ ...r, isPreferred: r.id === optId }));
-    setInvEditPurchaseOptions(updated);
-    const chosen = updated.find((r: any) => r.id === optId);
-    if (chosen) setInvEditCost(String(chosen.unitPrice));
-    await savePurchaseOptions(updated);
-  };
-
-  const deleteInvEditOption = async (optId: string) => {
-    if (!confirm("Remove this supplier row?")) return;
-    await deletePurchaseOption(optId);
-    const remaining = invEditPurchaseOptions.filter((r: any) => r.id !== optId);
-    setInvEditPurchaseOptions(remaining);
-    const pref = remaining.find((r: any) => r.isPreferred);
-    const low  = remaining.length > 0 ? [...remaining].sort((a: any, b: any) => a.unitPrice - b.unitPrice)[0] : null;
-    const c    = pref ?? low ?? null;
-    if (c) setInvEditCost(String(c.unitPrice));
-  };
-
-  const saveInvEdit = async () => {
-    if (!invEditItem) return;
-    setInvEditSaving(true);
-    try {
-      const parsedCost = parseFloat(invEditCost);
-      const updatedItem = {
-        ...invEditItem,
-        name:     invEditName.trim() || invEditItem.name,
-        category: invEditCategory.trim() || invEditItem.category,
-        baseUnit: invEditBaseUnit.trim() || invEditItem.baseUnit,
-        unit:     invEditBaseUnit.trim() || invEditItem.unit,
-        cost:     isNaN(parsedCost) ? invEditItem.cost : parsedCost,
-      };
-      // Patch local inventory[] so calculateCost() immediately uses new pricing
-      setInventory((prev: any[]) => prev.map((i: any) => i.id === updatedItem.id ? updatedItem : i));
-      // Persist to DB (non-blocking save of full array)
-      const allInv = inventory.map((i: any) => i.id === updatedItem.id ? updatedItem : i);
-      await saveInventory(allInv);
-      setInvEditOpen(false);
-    } catch (err: any) {
-      alert(`Save failed: ${err?.message ?? "Unknown error"}`);
-    } finally {
-      setInvEditSaving(false);
-    }
-  };
 
   const openBuilder = (recipe: any = null) => {
     if (recipe) {
@@ -898,7 +825,7 @@ function RecipesPageContent() {
                            {invItem && (
                              <button
                                type="button"
-                               onClick={e => { e.stopPropagation(); openInvEdit(invItem); }}
+                               onClick={e => { e.stopPropagation(); setInvEditItem(invItem); }}
                                title="Quick-edit this inventory item"
                                className="p-0.5 text-neutral-300 hover:text-violet-600 hover:bg-violet-50 rounded transition-colors"
                              >
@@ -1163,173 +1090,17 @@ function RecipesPageContent() {
         onConfirm={handleAIImportConfirm}
       />
 
-      {/* ── Inventory Quick-Edit panel (fixed slide-in, z above recipe builder) ── */}
-      {invEditOpen && invEditItem && (
-        <div className="fixed inset-0 z-[70] flex">
-          {/* Backdrop */}
-          <div
-            className="absolute inset-0 bg-black/30 backdrop-blur-[2px]"
-            onClick={() => !invEditSaving && setInvEditOpen(false)}
-          />
-          {/* Right panel */}
-          <div className="relative ml-auto w-full max-w-md bg-white h-full flex flex-col shadow-2xl border-l border-neutral-200">
-            {/* Header */}
-            <div className="flex items-center justify-between px-5 py-4 border-b border-neutral-200 bg-gradient-to-r from-violet-50 to-white">
-              <div>
-                <p className="text-[10px] uppercase font-bold text-violet-600 tracking-wider">Quick Edit — Inventory Item</p>
-                <h3 className="text-base font-bold text-neutral-900 mt-0.5 truncate max-w-[280px]">{invEditItem.name}</h3>
-              </div>
-              <button
-                onClick={() => setInvEditOpen(false)}
-                className="p-2 text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100 rounded-lg transition-colors"
-              >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
+      {/* ── Inventory Edit Drawer — reuses full existing inventory edit UI ─── */}
+      {/* invEditItem is set by clicking the ✏ pencil next to an ingredient name */}
+      {/* onSaved patches inventory[] so ingredient line costs recompute instantly */}
+      <InventoryEditDrawer
+        item={invEditItem}
+        onClose={() => setInvEditItem(null)}
+        onSaved={(updated: any) => {
+          setInventory((prev: any[]) => prev.map((i: any) => i.id === updated.id ? updated : i));
+        }}
+      />
 
-            {/* Body */}
-            <div className="flex-1 overflow-y-auto p-5 space-y-5">
-              {/* Name */}
-              <div className="space-y-1.5">
-                <label className="text-[11px] font-semibold text-neutral-500 uppercase tracking-wider">Item Name</label>
-                <input
-                  type="text"
-                  value={invEditName}
-                  onChange={e => setInvEditName(e.target.value)}
-                  className="w-full p-2.5 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
-                />
-              </div>
-
-              {/* Category + Base Unit */}
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <label className="text-[11px] font-semibold text-neutral-500 uppercase tracking-wider">Category</label>
-                  <input
-                    type="text"
-                    value={invEditCategory}
-                    onChange={e => setInvEditCategory(e.target.value)}
-                    className="w-full p-2.5 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <label className="text-[11px] font-semibold text-neutral-500 uppercase tracking-wider">Base Unit</label>
-                  <input
-                    type="text"
-                    value={invEditBaseUnit}
-                    onChange={e => setInvEditBaseUnit(e.target.value)}
-                    className="w-full p-2.5 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
-                  />
-                </div>
-              </div>
-
-              {/* Cost */}
-              <div className="space-y-1.5">
-                <label className="text-[11px] font-semibold text-neutral-500 uppercase tracking-wider">Cost / Base Unit ($)</label>
-                <input
-                  type="number" step="0.01"
-                  value={invEditCost}
-                  onChange={e => setInvEditCost(e.target.value)}
-                  className="w-full p-2.5 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
-                  placeholder="$0.00"
-                />
-                <p className="text-[10px] text-violet-500">Saving this updates ingredient line cost and recipe total instantly.</p>
-              </div>
-
-              {/* Supplier Purchase Options */}
-              <div className="space-y-2">
-                <label className="text-[11px] font-semibold text-neutral-500 uppercase tracking-wider">
-                  Supplier Options ({invEditPurchaseOptions.length})
-                </label>
-                {invEditLoading ? (
-                  <div className="flex items-center gap-2 text-[11px] text-neutral-400 py-3">
-                    <div className="h-3 w-3 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" />
-                    Loading purchase options…
-                  </div>
-                ) : invEditPurchaseOptions.length === 0 ? (
-                  <p className="text-[11px] text-neutral-400 italic py-2 border border-dashed border-neutral-200 rounded-lg text-center">
-                    No supplier options linked to this item.
-                  </p>
-                ) : (
-                  <div className="space-y-2">
-                    {invEditPurchaseOptions.map((opt: any) => (
-                      <div
-                        key={opt.id}
-                        className={`p-3 rounded-lg border text-sm flex items-start justify-between gap-3 transition-colors ${
-                          opt.isPreferred
-                            ? 'border-violet-300 bg-violet-50'
-                            : 'border-neutral-200 bg-white'
-                        }`}
-                      >
-                        <div className="space-y-0.5 flex-1 min-w-0">
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            {opt.isPreferred && (
-                              <span className="text-[9px] font-bold uppercase text-violet-600 bg-violet-100 border border-violet-300 px-1.5 py-0.5 rounded">★ Preferred</span>
-                            )}
-                            <span className={`font-semibold truncate ${opt.isPreferred ? 'text-violet-800' : 'text-neutral-800'}`}>
-                              {opt.supplierName}
-                            </span>
-                          </div>
-                          {opt.supplierProductName && (
-                            <p className="text-[10px] text-neutral-500 truncate">{opt.supplierProductName}</p>
-                          )}
-                          <p className="text-[11px] text-neutral-600 font-medium">
-                            ${opt.unitPrice.toFixed(2)} · {opt.purchaseUom}
-                            {opt.packQty ? ` · ${opt.packQty}${opt.packUom ? ' ' + opt.packUom : ''}` : ''}
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          {!opt.isPreferred && (
-                            <button
-                              type="button"
-                              onClick={() => makeInvEditPreferred(opt.id)}
-                              className="text-[10px] font-semibold px-2 py-1 border border-violet-300 text-violet-600 rounded hover:bg-violet-50 transition-colors whitespace-nowrap"
-                            >
-                              Make Preferred
-                            </button>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => deleteInvEditOption(opt.id)}
-                            className="p-1 text-neutral-300 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Footer */}
-            <div className="border-t border-neutral-200 px-5 py-4 flex items-center justify-between gap-3 bg-neutral-50">
-              <p className="text-[10px] text-neutral-400 leading-relaxed">
-                Recipe totals update on save.<br />No page navigation required.
-              </p>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setInvEditOpen(false)}
-                  disabled={invEditSaving}
-                  className="px-4 py-2 text-sm font-semibold bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 transition-colors disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={saveInvEdit}
-                  disabled={invEditSaving}
-                  className="px-4 py-2 text-sm font-semibold bg-violet-600 text-white rounded-lg hover:bg-violet-700 transition-colors disabled:opacity-50 flex items-center gap-2"
-                >
-                  {invEditSaving
-                    ? <><div className="h-3.5 w-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" /> Saving…</>
-                    : <><Save className="h-3.5 w-3.5" /> Save &amp; Recompute</>
-                  }
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
