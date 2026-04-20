@@ -2134,6 +2134,209 @@ export default function Inventory() {
                 </div>
               </div>
             </details>
+
+            {/* ── SUPPLIERS / PURCHASE OPTIONS ─────────────────────────────── */}
+            {console.log("editPurchaseOptions:", editPurchaseOptions) as any}
+            <div className="space-y-1 border border-neutral-200 rounded-lg overflow-hidden">
+
+              {/* Section header */}
+              <div className="flex items-center justify-between px-3 py-2 bg-neutral-50 border-b border-neutral-200">
+                <span className="text-xs font-semibold text-neutral-700 uppercase tracking-wider">
+                  Suppliers ({editPurchaseOptions.length})
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setAddingPurchOpt(true)}
+                  className="flex items-center gap-1 text-xs font-semibold text-violet-600 hover:text-violet-800"
+                >
+                  <Plus className="h-3 w-3" /> Add Supplier
+                </button>
+              </div>
+
+              {/* Loading */}
+              {isLoadingPurchOpts && (
+                <div className="flex items-center gap-2 px-3 py-3 text-xs text-neutral-400">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading suppliers…
+                </div>
+              )}
+
+              {/* Empty */}
+              {!isLoadingPurchOpts && editPurchaseOptions.length === 0 && (
+                <p className="text-xs text-neutral-400 italic px-3 py-3">No suppliers yet. Click "+ Add Supplier" to add one.</p>
+              )}
+
+              {/* Rows — always rendered when data exists */}
+              {editPurchaseOptions.map((row: any) => (
+                <div
+                  key={row.id}
+                  className={`px-3 py-2.5 border-b border-neutral-100 last:border-b-0 ${row.isPreferred ? 'bg-violet-50' : 'bg-white'}`}
+                >
+                  {/* Row header: name + badges + actions */}
+                  <div className="flex items-center justify-between gap-2 mb-1.5">
+                    <div className="flex items-center gap-2 min-w-0">
+                      {row.isPreferred && (
+                        <span className="text-[10px] font-bold uppercase text-violet-700 bg-violet-100 border border-violet-300 px-1.5 py-0.5 rounded whitespace-nowrap">★ Preferred</span>
+                      )}
+                      <span className="text-xs font-semibold text-neutral-800 truncate">{row.supplierName || '—'}</span>
+                      {row.supplierProductName && (
+                        <span className="text-xs text-neutral-400 truncate">({row.supplierProductName})</span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1 flex-shrink-0">
+                      {!row.isPreferred && (
+                        <button
+                          type="button"
+                          onClick={() => makePreferred(row.id)}
+                          className="text-[10px] px-2 py-0.5 rounded border border-violet-200 text-violet-600 hover:bg-violet-50 whitespace-nowrap"
+                        >
+                          Make Preferred
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => savePurchOpt(row)}
+                        disabled={isSavingPurchOpt === row.id}
+                        title="Save changes to this row"
+                        className="p-1 text-brand-600 hover:bg-brand-50 rounded disabled:opacity-40"
+                      >
+                        {isSavingPurchOpt === row.id
+                          ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          : <Save className="h-3.5 w-3.5" />}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => deletePurchOpt(row.id)}
+                        title="Delete this supplier row"
+                        className="p-1 text-neutral-400 hover:text-red-600 hover:bg-red-50 rounded"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Editable fields */}
+                  <div className="grid grid-cols-2 gap-2 mb-1.5">
+                    <div>
+                      <label className="text-[10px] text-neutral-400 font-semibold uppercase block mb-0.5">Supplier Name</label>
+                      <input
+                        type="text"
+                        value={row.supplierName}
+                        onChange={e => updatePurchOptField(row.id, 'supplierName', e.target.value)}
+                        className="w-full px-2 py-1 border border-neutral-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-brand-400"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-neutral-400 font-semibold uppercase block mb-0.5">Supplier Product Name</label>
+                      <input
+                        type="text"
+                        value={row.supplierProductName ?? ''}
+                        onChange={e => updatePurchOptField(row.id, 'supplierProductName', e.target.value || null)}
+                        className="w-full px-2 py-1 border border-neutral-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-brand-400"
+                        placeholder="Optional"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-4 gap-2">
+                    <div>
+                      <label className="text-[10px] text-neutral-400 font-semibold uppercase block mb-0.5">Purchase UOM</label>
+                      <input
+                        type="text"
+                        value={row.purchaseUom}
+                        onChange={e => updatePurchOptField(row.id, 'purchaseUom', e.target.value)}
+                        className="w-full px-2 py-1 border border-neutral-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-brand-400"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-neutral-400 font-semibold uppercase block mb-0.5">Pack Qty</label>
+                      <input
+                        type="number" min="0" step="any"
+                        value={row.packQty ?? ''}
+                        onChange={e => updatePurchOptField(row.id, 'packQty', e.target.value !== '' ? Number(e.target.value) : null)}
+                        className="w-full px-2 py-1 border border-neutral-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-brand-400"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-neutral-400 font-semibold uppercase block mb-0.5">Pack UOM</label>
+                      <input
+                        type="text"
+                        value={row.packUom ?? ''}
+                        onChange={e => updatePurchOptField(row.id, 'packUom', e.target.value || null)}
+                        className="w-full px-2 py-1 border border-neutral-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-brand-400"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-neutral-400 font-semibold uppercase block mb-0.5">Unit Price ($)</label>
+                      <input
+                        type="number" min="0" step="0.01"
+                        value={row.unitPrice}
+                        onChange={e => updatePurchOptField(row.id, 'unitPrice', parseFloat(e.target.value) || 0)}
+                        className="w-full px-2 py-1 border border-neutral-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-brand-400"
+                      />
+                    </div>
+                  </div>
+                </div>
+              ))}
+
+              {/* Add new supplier inline form */}
+              {addingPurchOpt && (
+                <div className="px-3 py-3 space-y-2 bg-violet-50 border-t border-violet-200">
+                  <p className="text-xs font-semibold text-violet-700">New Supplier Row</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-[10px] text-neutral-500 font-semibold uppercase block mb-0.5">Supplier Name *</label>
+                      <input
+                        autoFocus
+                        type="text"
+                        value={newPurchOpt.supplierName}
+                        onChange={e => setNewPurchOpt((p: any) => ({ ...p, supplierName: e.target.value }))}
+                        className="w-full px-2 py-1 border border-neutral-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-violet-400"
+                        placeholder="Supplier Co."
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-neutral-500 font-semibold uppercase block mb-0.5">Supplier Product Name</label>
+                      <input
+                        type="text"
+                        value={newPurchOpt.supplierProductName}
+                        onChange={e => setNewPurchOpt((p: any) => ({ ...p, supplierProductName: e.target.value }))}
+                        className="w-full px-2 py-1 border border-neutral-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-violet-400"
+                        placeholder="Optional"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-4 gap-2">
+                    <div>
+                      <label className="text-[10px] text-neutral-500 font-semibold uppercase block mb-0.5">Purchase UOM</label>
+                      <input type="text" value={newPurchOpt.purchaseUom} onChange={e => setNewPurchOpt((p: any) => ({ ...p, purchaseUom: e.target.value }))} className="w-full px-2 py-1 border border-neutral-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-violet-400" placeholder="case" />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-neutral-500 font-semibold uppercase block mb-0.5">Pack Qty</label>
+                      <input type="number" min="0" step="any" value={newPurchOpt.packQty} onChange={e => setNewPurchOpt((p: any) => ({ ...p, packQty: e.target.value }))} className="w-full px-2 py-1 border border-neutral-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-violet-400" placeholder="12" />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-neutral-500 font-semibold uppercase block mb-0.5">Pack UOM</label>
+                      <input type="text" value={newPurchOpt.packUom} onChange={e => setNewPurchOpt((p: any) => ({ ...p, packUom: e.target.value }))} className="w-full px-2 py-1 border border-neutral-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-violet-400" placeholder="ea" />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-neutral-500 font-semibold uppercase block mb-0.5">Unit Price ($)</label>
+                      <input type="number" min="0" step="0.01" value={newPurchOpt.unitPrice} onChange={e => setNewPurchOpt((p: any) => ({ ...p, unitPrice: e.target.value }))} className="w-full px-2 py-1 border border-neutral-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-violet-400" placeholder="0.00" />
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <label className="flex items-center gap-1.5 text-xs text-neutral-600 cursor-pointer">
+                      <input type="checkbox" checked={newPurchOpt.isPreferred} onChange={e => setNewPurchOpt((p: any) => ({ ...p, isPreferred: e.target.checked }))} className="rounded" />
+                      Set as preferred
+                    </label>
+                    <div className="flex-1" />
+                    <button type="button" onClick={() => setAddingPurchOpt(false)} className="px-3 py-1 text-xs font-medium bg-neutral-100 text-neutral-600 rounded hover:bg-neutral-200">Cancel</button>
+                    <button type="button" onClick={commitNewPurchOpt} className="px-3 py-1 text-xs font-bold bg-violet-600 text-white rounded hover:bg-violet-700">Add Row</button>
+                  </div>
+                </div>
+              )}
+            </div>
+            {/* ── end SUPPLIERS ─────────────────────────────────────────────── */}
+
           </div>
         )}
       </Drawer>
