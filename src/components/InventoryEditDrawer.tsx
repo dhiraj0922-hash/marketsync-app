@@ -122,9 +122,11 @@ export function InventoryEditDrawer({
     });
 
     // Load purchase_options fresh from DB
+    console.log('[InventoryEditDrawer] opening item — id:', item.id, '| typeof id:', typeof item.id);
     setIsLoadingOpts(true);
     loadPurchaseOptions(String(item.id))
       .then((rows: any[]) => {
+        console.log('[InventoryEditDrawer] loadPurchaseOptions returned', rows.length, 'rows for id:', String(item.id), rows);
         setPurchaseOptions(rows);
         // Seed cost from preferred ?? lowest if available
         const preferred = rows.find((r: any) => r.isPreferred);
@@ -134,7 +136,11 @@ export function InventoryEditDrawer({
         const chosen    = preferred ?? lowest ?? null;
         if (chosen) setEditPurchaseCost(String(chosen.unitPrice));
       })
-      .catch(() => setPurchaseOptions([]))
+      .catch((err: any) => {
+        console.error('[InventoryEditDrawer] loadPurchaseOptions THREW:', err);
+        alert(`[Bug 1] Failed to load suppliers: ${err?.message ?? String(err)}`);
+        setPurchaseOptions([]);
+      })
       .finally(() => setIsLoadingOpts(false));
   }, [item?.id]); // re-run only when the selected item changes
 
@@ -186,24 +192,47 @@ export function InventoryEditDrawer({
   const commitNewPurchOpt = async () => {
     if (!editItem) return;
     if (!newPurchOpt.supplierName.trim()) { alert("Supplier name is required."); return; }
-    const res = await insertPurchaseOptions([{
+
+    const payload = {
       ...newPurchOpt,
       inventoryItemId: String(editItem.id),
       packQty:   newPurchOpt.packQty   !== "" ? Number(newPurchOpt.packQty)   : null,
       unitPrice: newPurchOpt.unitPrice !== "" ? Number(newPurchOpt.unitPrice) : 0,
-    }]);
-    if (!res.success) { alert(`Insert failed: ${(res as any).error?.message ?? ""}`); return; }
-    const rows = await loadPurchaseOptions(String(editItem.id));
-    setPurchaseOptions(rows);
-    const preferred = rows.find((r: any) => r.isPreferred);
-    const lowest    = rows.length > 0 ? [...rows].sort((a: any, b: any) => a.unitPrice - b.unitPrice)[0] : null;
-    const syncPrice = preferred?.unitPrice ?? lowest?.unitPrice ?? null;
-    if (syncPrice !== null) setEditPurchaseCost(String(syncPrice));
-    setAddingPurchOpt(false);
-    setNewPurchOpt({
-      supplierName: "", supplierProductName: "", purchaseUom: "ea",
-      packQty: "", packUom: "", unitPrice: "", isPreferred: false,
-    });
+    };
+    console.log('[InventoryEditDrawer] commitNewPurchOpt — insert payload:', payload);
+
+    try {
+      const res = await insertPurchaseOptions([payload]);
+      console.log('[InventoryEditDrawer] insertPurchaseOptions result:', res);
+      if (!res.success) {
+        const msg = (res as any).error?.message ?? JSON.stringify((res as any).error);
+        console.error('[InventoryEditDrawer] insert FAILED:', msg);
+        alert(`[Bug 2] Insert failed: ${msg}`);
+        return;
+      }
+
+      // Re-fetch to pick up DB-generated id + any server-side defaults
+      const rows = await loadPurchaseOptions(String(editItem.id));
+      console.log('[InventoryEditDrawer] post-insert re-fetch:', rows.length, 'rows:', rows);
+      if (rows.length === 0) {
+        // Re-fetch returned empty — expose this so we can diagnose further
+        console.warn('[InventoryEditDrawer] re-fetch returned 0 rows after successful insert — possible type mismatch on inventory_item_id');
+        alert(`[Bug 2] Insert succeeded but re-fetch returned 0 rows. Check console for details.`);
+      }
+      setPurchaseOptions(rows);
+      const preferred = rows.find((r: any) => r.isPreferred);
+      const lowest    = rows.length > 0 ? [...rows].sort((a: any, b: any) => a.unitPrice - b.unitPrice)[0] : null;
+      const syncPrice = preferred?.unitPrice ?? lowest?.unitPrice ?? null;
+      if (syncPrice !== null) setEditPurchaseCost(String(syncPrice));
+      setAddingPurchOpt(false);
+      setNewPurchOpt({
+        supplierName: "", supplierProductName: "", purchaseUom: "ea",
+        packQty: "", packUom: "", unitPrice: "", isPreferred: false,
+      });
+    } catch (err: any) {
+      console.error('[InventoryEditDrawer] commitNewPurchOpt threw:', err);
+      alert(`[Bug 2] Unexpected error: ${err?.message ?? String(err)}`);
+    }
   };
 
   // ── Save handler ────────────────────────────────────────────────────────

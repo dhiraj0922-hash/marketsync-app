@@ -2556,6 +2556,7 @@ const mapPurchaseOptionToDB = (opt: any) => ({
  *                         When omitted, returns all rows (e.g. bulk import audit).
  */
 export async function loadPurchaseOptions(inventoryItemId?: string | null) {
+  console.log('[storage.loadPurchaseOptions] querying with inventoryItemId:', inventoryItemId, '| typeof:', typeof inventoryItemId);
   let query = supabase
     .from('purchase_options')
     .select('*')
@@ -2565,10 +2566,13 @@ export async function loadPurchaseOptions(inventoryItemId?: string | null) {
   if (inventoryItemId) query = query.eq('inventory_item_id', inventoryItemId);
   const { data, error } = await query;
   if (error) {
-    console.error('[loadPurchaseOptions] error:', error);
+    console.error('[storage.loadPurchaseOptions] DB error:', error);
     return [];
   }
-  return Array.isArray(data) ? data.map(mapPurchaseOptionToFrontend) : [];
+  console.log('[storage.loadPurchaseOptions] raw DB rows returned:', data?.length ?? 0, data);
+  const mapped = Array.isArray(data) ? data.map(mapPurchaseOptionToFrontend) : [];
+  console.log('[storage.loadPurchaseOptions] mapped rows:', mapped);
+  return mapped;
 }
 
 /**
@@ -2600,12 +2604,14 @@ export async function insertPurchaseOptions(options: any[]) {
     const { id: _id, ...rest } = mapped as any;
     return rest;
   });
-  const { error } = await supabase.from('purchase_options').insert(rows);
+  console.log('[storage.insertPurchaseOptions] rows to insert:', rows);
+  const { data, error } = await supabase.from('purchase_options').insert(rows).select();
+  console.log('[storage.insertPurchaseOptions] insert result — data:', data, '| error:', error);
   if (error) {
-    console.error('[insertPurchaseOptions] error:', error);
+    console.error('[storage.insertPurchaseOptions] error detail:', JSON.stringify(error));
     return { success: false, error };
   }
-  return { success: true };
+  return { success: true, data };
 }
 
 /**
