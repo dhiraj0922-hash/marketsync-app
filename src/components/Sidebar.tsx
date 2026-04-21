@@ -93,25 +93,26 @@ export function Sidebar() {
       : "Staff";
 
   return (
-    <div className="flex flex-col w-64 bg-white border-r border-neutral-200 min-h-screen">
+    <div className="flex flex-col w-14 sm:w-56 bg-white border-r border-neutral-200 min-h-screen shrink-0">
       {/* Logo */}
-      <div className="flex items-center justify-center h-16 border-b border-neutral-200 px-6">
-        <div className="flex items-center gap-2 font-bold text-xl text-neutral-900 w-full">
-          <ChefHat className="h-6 w-6 text-brand-600" />
-          <span>MarketSync</span>
+      <div className="flex items-center justify-center sm:justify-start h-14 sm:h-16 border-b border-neutral-200 px-0 sm:px-5">
+        <div className="flex items-center gap-2 font-bold text-xl text-neutral-900">
+          <ChefHat className="h-6 w-6 text-brand-600 shrink-0" />
+          <span className="hidden sm:inline">MarketSync</span>
         </div>
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 overflow-y-auto py-4 px-3 space-y-1">
+      <nav className="flex-1 overflow-y-auto py-3 px-1.5 sm:px-2.5 space-y-0.5">
         {visibleNav.map((item) => {
           const isActive = pathname === item.href;
           return (
             <Link
               key={item.name}
               href={item.href}
+              title={item.name}
               className={cn(
-                "group flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-colors",
+                "group flex items-center justify-center sm:justify-start px-2 py-2 sm:px-3 sm:py-2.5 text-sm font-medium rounded-lg transition-colors",
                 isActive
                   ? "bg-brand-50 text-brand-700"
                   : "text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900"
@@ -119,19 +120,19 @@ export function Sidebar() {
             >
               <item.icon
                 className={cn(
-                  "mr-3 flex-shrink-0 h-5 w-5 transition-colors",
+                  "flex-shrink-0 h-5 w-5 transition-colors sm:mr-3",
                   isActive ? "text-brand-600" : "text-neutral-400 group-hover:text-neutral-600"
                 )}
                 aria-hidden="true"
               />
-              {item.name}
+              <span className="hidden sm:inline">{item.name}</span>
             </Link>
           );
         })}
       </nav>
 
-      {/* User pill — real data from auth context */}
-      <div className="p-4 border-t border-neutral-200">
+      {/* User pill — hidden on mobile */}
+      <div className="hidden sm:block p-3 border-t border-neutral-200">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-full bg-brand-100 text-brand-700 flex items-center justify-center font-bold text-sm shrink-0">
             {initials}

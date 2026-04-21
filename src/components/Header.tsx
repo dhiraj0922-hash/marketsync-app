@@ -63,9 +63,9 @@ export function Header() {
   );
 
   return (
-    <header className="h-16 flex items-center justify-between px-6 lg:px-8 border-b border-neutral-200 bg-white sticky top-0 z-10 w-full shadow-sm">
-      <div className="flex items-center gap-6">
-        <h1 className="text-xl font-semibold text-neutral-800 tracking-tight">{title}</h1>
+    <header className="h-12 sm:h-16 flex items-center justify-between px-3 sm:px-6 lg:px-8 border-b border-neutral-200 bg-white sticky top-0 z-10 w-full shadow-sm">
+      <div className="flex items-center gap-2 sm:gap-6">
+        <h1 className="text-base sm:text-xl font-semibold text-neutral-800 tracking-tight">{title}</h1>
         <div className="h-6 w-px bg-neutral-200 hidden md:block" />
 
         {/* ── Location selector ─────────────────────────────────────────── */}
@@ -147,8 +147,8 @@ export function Header() {
         )}
       </div>
 
-      <div className="flex items-center gap-3">
-        <div className="relative hidden lg:block">
+      <div className="flex items-center gap-1.5 sm:gap-3">
+          <div className="relative hidden lg:block">
           <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
             <Search className="h-4 w-4 text-neutral-400" />
           </div>
@@ -159,18 +159,18 @@ export function Header() {
           />
         </div>
 
-        <button className="relative p-2 text-neutral-500 hover:text-neutral-700 hover:bg-neutral-100 rounded-full transition-colors mr-2">
+        <button className="relative p-1.5 sm:p-2 text-neutral-500 hover:text-neutral-700 hover:bg-neutral-100 rounded-full transition-colors">
           <Bell className="h-5 w-5" />
-          <span className="absolute top-1.5 right-1.5 h-2 w-2 rounded-full bg-danger-500 border-2 border-white" />
+          <span className="absolute top-1 right-1 sm:top-1.5 sm:right-1.5 h-2 w-2 rounded-full bg-danger-500 border-2 border-white" />
         </button>
 
         {/* Profile menu */}
         <div className="relative">
           <button
             onClick={() => setProfileOpen(!profileOpen)}
-            className="flex items-center gap-2 pl-2 pr-1 h-9 bg-neutral-50 hover:bg-neutral-100 border border-neutral-200 rounded-full transition-colors"
+            className="flex items-center gap-2 pl-2 pr-1 h-8 sm:h-9 bg-neutral-50 hover:bg-neutral-100 border border-neutral-200 rounded-full transition-colors"
           >
-            <div className="h-7 w-7 bg-brand-100 text-brand-700 flex items-center justify-center rounded-full text-xs font-bold shrink-0">
+            <div className="h-6 w-6 sm:h-7 sm:w-7 bg-brand-100 text-brand-700 flex items-center justify-center rounded-full text-xs font-bold shrink-0">
               {user?.name ? user.name.substring(0, 2).toUpperCase() : <User className="h-4 w-4" />}
             </div>
             <div className="hidden sm:flex flex-col items-start pr-1 max-w-[100px]">

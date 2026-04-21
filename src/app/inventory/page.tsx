@@ -1527,18 +1527,19 @@ export default function Inventory() {
   if (isLoading) return <div className="animate-pulse flex items-center justify-center p-12 text-neutral-400">Loading Inventory Module...</div>;
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+    <div className="space-y-4 sm:space-y-6">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
         <div>
-          <h2 className="text-2xl font-bold tracking-tight">Inventory Items</h2>
-          <p className="text-neutral-500 text-sm mt-1">Manage your ingredient list and maintain optimal par levels.</p>
+          <h2 className="text-xl sm:text-2xl font-bold tracking-tight">Inventory Items</h2>
+          <p className="text-neutral-500 text-xs sm:text-sm mt-0.5">Manage your ingredient list and maintain optimal par levels.</p>
         </div>
-        <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto">
+        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
           <button
             onClick={() => setIsHistoryDrawerOpen(true)}
-            className="flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium bg-neutral-100 border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-200 w-full sm:w-auto shadow-sm"
+            className="flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs sm:text-sm font-medium bg-neutral-100 border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-200 shadow-sm"
           >
-            <History className="h-4 w-4" /> History
+            <History className="h-3.5 w-3.5" />
+            <span className="hidden xs:inline sm:inline">History</span>
           </button>
           <button
             onClick={() => {
@@ -1546,9 +1547,11 @@ export default function Inventory() {
               setImportErrors([]);
               setIsImportDrawerOpen(true);
             }}
-            className="flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 w-full sm:w-auto shadow-sm"
+            className="flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs sm:text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 shadow-sm"
           >
-            <Upload className="h-4 w-4" /> Import Inventory
+            <Upload className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Import Inventory</span>
+            <span className="sm:hidden">Import Inv</span>
           </button>
           <button
             onClick={() => {
@@ -1558,36 +1561,38 @@ export default function Inventory() {
               setSupplierImportSummary(null);
               setIsSupplierImportDrawerOpen(true);
             }}
-            className="flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium bg-violet-600 text-white rounded-lg hover:bg-violet-700 w-full sm:w-auto shadow-sm transition-colors"
+            className="flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs sm:text-sm font-medium bg-violet-600 text-white rounded-lg hover:bg-violet-700 shadow-sm transition-colors"
           >
-            <Upload className="h-4 w-4" /> Import Suppliers
+            <Upload className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Import Suppliers</span>
+            <span className="sm:hidden">Import Sup</span>
           </button>
           <button
             onClick={() => setIsAddDrawerOpen(true)}
-            className="flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 shadow-sm w-full sm:w-auto transition-colors"
+            className="flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs sm:text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 shadow-sm transition-colors"
           >
-            <Plus className="h-4 w-4" /> Add Item
+            <Plus className="h-3.5 w-3.5" /> Add Item
           </button>
         </div>
       </div>
 
-      <Card className="shadow-sm border-neutral-200">
-        <CardHeader className="flex flex-col sm:flex-row space-y-4 sm:space-y-0 sm:items-center justify-between pb-4 border-b border-neutral-100 bg-white">
-          <div className="relative w-full sm:w-[400px]">
-            <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-              <Search className="h-4 w-4 text-neutral-400" />
+      <Card className="shadow-sm border-neutral-200 overflow-hidden">
+        <CardHeader className="flex flex-col space-y-2 sm:space-y-0 sm:flex-row sm:items-center justify-between py-3 sm:py-4 px-3 sm:px-4 border-b border-neutral-100 bg-white">
+          <div className="relative w-full sm:w-[360px]">
+            <div className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none">
+              <Search className="h-3.5 w-3.5 text-neutral-400" />
             </div>
             <input
               type="text"
-              placeholder="Search items by name, category, or supplier..."
+              placeholder="Search items…"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9 pr-4 py-1.5 border border-neutral-200 rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 focus:border-brand-500 w-full bg-neutral-50 hover:bg-white transition-colors"
+              className="pl-8 pr-3 py-1.5 border border-neutral-200 rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 focus:border-brand-500 w-full bg-neutral-50 hover:bg-white transition-colors"
             />
           </div>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-1.5">
             <select
-              className="px-3 py-1.5 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm transition-colors"
+              className="px-2 py-1.5 text-xs sm:text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm"
               value={filterStatus}
               onChange={(e) => setFilterStatus(e.target.value)}
             >
@@ -1597,7 +1602,7 @@ export default function Inventory() {
               <option value="Critical">Critical</option>
             </select>
             <select
-              className="px-3 py-1.5 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm transition-colors"
+              className="px-2 py-1.5 text-xs sm:text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm"
               value={filterCategory}
               onChange={(e) => setFilterCategory(e.target.value)}
             >
@@ -1605,7 +1610,7 @@ export default function Inventory() {
               {uniqueCategories.map(c => <option key={c as string} value={c as string}>{c as string}</option>)}
             </select>
             <select
-              className="px-3 py-1.5 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm transition-colors"
+              className="px-2 py-1.5 text-xs sm:text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm"
               value={filterSupplier}
               onChange={(e) => setFilterSupplier(e.target.value)}
             >
@@ -1616,9 +1621,9 @@ export default function Inventory() {
             {(searchQuery || filterStatus !== 'All' || filterCategory !== 'All' || filterSupplier !== 'All') && (
               <button
                 onClick={clearFilters}
-                className="text-xs font-semibold text-brand-600 hover:text-brand-700 hover:bg-brand-50 rounded-lg px-2 transition-colors ml-1"
+                className="text-xs font-semibold text-brand-600 hover:text-brand-700 hover:bg-brand-50 rounded-lg px-2 transition-colors"
               >
-                Clear Filters
+                Clear
               </button>
             )}
           </div>
@@ -1638,13 +1643,14 @@ export default function Inventory() {
               </div>
             </div>
           )}
-          <Table>
+          <div className="overflow-x-auto">
+          <Table className="text-xs sm:text-sm">
             <TableHeader className="bg-neutral-50/80 text-xs text-neutral-500 uppercase tracking-wider border-b border-neutral-200">
               <TableRow>
-                <TableHead className="w-[50px] pl-6 pr-2 py-3">
+                <TableHead className="w-[36px] pl-3 sm:pl-6 pr-1 py-2 sm:py-3">
                   <input
                     type="checkbox"
-                    className="h-4 w-4 rounded border-neutral-300 text-brand-600 focus:ring-brand-500 cursor-pointer"
+                    className="h-3.5 w-3.5 sm:h-4 sm:w-4 rounded border-neutral-300 text-brand-600 focus:ring-brand-500 cursor-pointer"
                     checked={filteredInventory.length > 0 && selectedItemIds.length === filteredInventory.length}
                     onChange={(e) => {
                       if (e.target.checked) setSelectedItemIds(filteredInventory.map(i => i.id));
@@ -1652,14 +1658,14 @@ export default function Inventory() {
                     }}
                   />
                 </TableHead>
-                <TableHead className="px-3 py-3 font-semibold cursor-pointer select-none hover:text-brand-600 transition-colors" onClick={() => { setSortDirection(sortKey === 'name' && sortDirection === 'asc' ? 'desc' : 'asc'); setSortKey('name') }}>Item Name</TableHead>
-                <TableHead className="px-3 py-3 font-semibold cursor-pointer select-none hover:text-brand-600 transition-colors" onClick={() => { setSortDirection(sortKey === 'category' && sortDirection === 'asc' ? 'desc' : 'asc'); setSortKey('category') }}>Category</TableHead>
-                <TableHead className="py-3 font-semibold text-neutral-500">Unit</TableHead>
-                <TableHead className="py-3 font-semibold cursor-pointer select-none hover:text-brand-600 transition-colors" onClick={() => { setSortDirection(sortKey === 'supplier' && sortDirection === 'asc' ? 'desc' : 'asc'); setSortKey('supplier') }}>Preferred Supplier</TableHead>
-                <TableHead className="py-3 font-semibold text-neutral-500">Stock & Par</TableHead>
-                <TableHead className="py-3 font-semibold text-neutral-500">Cost / Unit</TableHead>
-                <TableHead className="py-3 font-semibold text-neutral-500">Status</TableHead>
-                <TableHead className="px-6 py-3 text-right">Actions</TableHead>
+                <TableHead className="px-2 sm:px-3 py-2 sm:py-3 font-semibold cursor-pointer select-none hover:text-brand-600 transition-colors" onClick={() => { setSortDirection(sortKey === 'name' && sortDirection === 'asc' ? 'desc' : 'asc'); setSortKey('name') }}>Item Name</TableHead>
+                <TableHead className="px-2 sm:px-3 py-2 sm:py-3 font-semibold cursor-pointer select-none hover:text-brand-600 transition-colors hidden sm:table-cell" onClick={() => { setSortDirection(sortKey === 'category' && sortDirection === 'asc' ? 'desc' : 'asc'); setSortKey('category') }}>Category</TableHead>
+                <TableHead className="py-2 sm:py-3 font-semibold text-neutral-500 hidden md:table-cell">Unit</TableHead>
+                <TableHead className="py-2 sm:py-3 font-semibold cursor-pointer select-none hover:text-brand-600 transition-colors hidden lg:table-cell" onClick={() => { setSortDirection(sortKey === 'supplier' && sortDirection === 'asc' ? 'desc' : 'asc'); setSortKey('supplier') }}>Preferred Supplier</TableHead>
+                <TableHead className="py-2 sm:py-3 font-semibold text-neutral-500">Stock &amp; Par</TableHead>
+                <TableHead className="py-2 sm:py-3 font-semibold text-neutral-500 hidden sm:table-cell">Cost / Unit</TableHead>
+                <TableHead className="py-2 sm:py-3 font-semibold text-neutral-500">Status</TableHead>
+                <TableHead className="px-2 sm:px-4 py-2 sm:py-3 text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -1674,11 +1680,11 @@ export default function Inventory() {
                     className={`hover:bg-neutral-50/50 cursor-pointer transition-colors ${selectedItemIds.includes(item.id) ? 'bg-brand-50/30' : ''}`}
                     onClick={() => openItemDrawer(item)}
                   >
-                    <TableCell className="pl-6 pr-2 py-4">
+                    <TableCell className="pl-3 sm:pl-6 pr-1 py-2.5 sm:py-4">
                       <div onClick={e => e.stopPropagation()}>
                         <input
                           type="checkbox"
-                          className="h-4 w-4 rounded border-neutral-300 text-brand-600 focus:ring-brand-500 cursor-pointer"
+                          className="h-3.5 w-3.5 rounded border-neutral-300 text-brand-600 focus:ring-brand-500 cursor-pointer"
                           checked={selectedItemIds.includes(item.id)}
                           onChange={(e) => {
                             if (e.target.checked) setSelectedItemIds([...selectedItemIds, item.id]);
@@ -1687,17 +1693,17 @@ export default function Inventory() {
                         />
                       </div>
                     </TableCell>
-                    <TableCell className="px-3 py-4">
-                      <div className="flex items-center gap-2">
-                        <span className="font-semibold text-neutral-900 group-hover:text-brand-600 transition-colors">{item.name}</span>
-                        {item.itemType === 'Preparation' && <Badge variant="warning" className="text-[9px] px-1.5 py-0 border-none bg-orange-100 text-orange-700">PREP</Badge>}
-                        {item.itemType === 'Finished Good' && <Badge variant="success" className="text-[9px] px-1.5 py-0 border-none bg-emerald-100 text-emerald-700">FG</Badge>}
+                    <TableCell className="px-2 sm:px-3 py-2.5 sm:py-4">
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-semibold text-neutral-900 text-xs sm:text-sm leading-tight">{item.name}</span>
+                        {item.itemType === 'Preparation' && <Badge variant="warning" className="text-[9px] px-1 py-0 border-none bg-orange-100 text-orange-700">PREP</Badge>}
+                        {item.itemType === 'Finished Good' && <Badge variant="success" className="text-[9px] px-1 py-0 border-none bg-emerald-100 text-emerald-700">FG</Badge>}
                       </div>
                     </TableCell>
-                    <TableCell className="px-3 py-4">
-                      <span className="text-xs font-semibold px-2 py-1 bg-neutral-100 text-neutral-600 border border-neutral-200 rounded-md whitespace-nowrap">{item.category}</span>
+                    <TableCell className="px-2 sm:px-3 py-2.5 sm:py-4 hidden sm:table-cell">
+                      <span className="text-[10px] sm:text-xs font-semibold px-1.5 sm:px-2 py-0.5 sm:py-1 bg-neutral-100 text-neutral-600 border border-neutral-200 rounded-md whitespace-nowrap">{item.category}</span>
                     </TableCell>
-                    <TableCell className="py-4">
+                    <TableCell className="py-2.5 sm:py-4 hidden md:table-cell">
                       <div className="flex flex-col gap-0.5">
                         <span className="text-xs font-semibold text-neutral-500 uppercase tracking-wider">{item.baseUnit || item.unit}</span>
                         {item.purchaseUnits && item.purchaseUnits.length > 0 && (
@@ -1707,20 +1713,20 @@ export default function Inventory() {
                         )}
                       </div>
                     </TableCell>
-                    <TableCell className="py-4">
+                    <TableCell className="py-2.5 sm:py-4 hidden lg:table-cell">
                       {(() => {
                         const displayName = item.preferredSupplierName ?? getSupplierName(item.supplierId);
                         console.log('[ListRow supplier]', { id: item.id, name: item.name, preferredSupplierName: item.preferredSupplierName, supplierId: item.supplierId, displayed: displayName });
-                        return <span className="text-sm font-medium text-neutral-700">{displayName}</span>;
+                        return <span className="text-xs sm:text-sm font-medium text-neutral-700 truncate max-w-[120px] block">{displayName}</span>;
                       })()}
                     </TableCell>
-                    <TableCell className="py-4">
-                      <div className="flex flex-col gap-1">
-                        <div className="flex items-baseline gap-1">
-                          <span className={`text-sm font-bold ${isCritical ? "text-danger-600" : isLowStock ? "text-warning-600" : "text-neutral-900"}`}>
+                    <TableCell className="py-2.5 sm:py-4">
+                      <div className="flex flex-col gap-0.5">
+                        <div className="flex items-baseline gap-0.5">
+                          <span className={`text-xs sm:text-sm font-bold ${isCritical ? "text-danger-600" : isLowStock ? "text-warning-600" : "text-neutral-900"}`}>
                             {item.inStock}
                           </span>
-                          <span className="text-xs text-neutral-500">/ {item.parLevel} {item.baseUnit || item.unit}</span>
+                          <span className="text-[10px] text-neutral-500">/ {item.parLevel} {item.baseUnit || item.unit}</span>
                         </div>
                         {item.purchaseUnits && item.purchaseUnits.length > 0 && (() => {
                           const pUnit = item.purchaseUnits.find((u: any) => u.isPrimary) || item.purchaseUnits[0];
@@ -1729,10 +1735,10 @@ export default function Inventory() {
                         })()}
                       </div>
                     </TableCell>
-                    <TableCell className="py-4 text-sm text-neutral-700">
+                    <TableCell className="py-2.5 sm:py-4 text-xs sm:text-sm text-neutral-700 hidden sm:table-cell">
                       ${(item.preferredCost ?? item.cost ?? 0).toFixed(2)}
                     </TableCell>
-                    <TableCell className="py-4">
+                    <TableCell className="py-2.5 sm:py-4">
                       {isCritical ? (
                         <Badge variant="danger" className="text-[10px]">Critical</Badge>
                       ) : isLowStock ? (
@@ -1741,17 +1747,18 @@ export default function Inventory() {
                         <Badge variant="success" className="text-[10px]">Healthy</Badge>
                       )}
                     </TableCell>
-                    <TableCell className="px-6 py-4 text-right">
+                    <TableCell className="px-2 sm:px-4 py-2.5 sm:py-4 text-right">
                       <div
-                        className="flex items-center justify-end gap-2"
+                        className="flex items-center justify-end gap-1.5"
                         onClick={e => e.stopPropagation()}
                       >
                         {(isLowStock || isCritical) && (
                           <button
                             onClick={(e) => handleQuickReorder(item, e)}
-                            className="flex items-center gap-1.5 px-3 py-1.5 bg-brand-50 hover:bg-brand-100 text-brand-700 text-xs font-semibold rounded-md transition-colors shadow-sm border border-brand-200"
+                            className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 bg-brand-50 hover:bg-brand-100 text-brand-700 text-xs font-semibold rounded-md transition-colors shadow-sm border border-brand-200"
                           >
-                            <ShoppingCart className="h-3 w-3" /> Quick Reorder
+                            <ShoppingCart className="h-3 w-3" />
+                            <span className="hidden md:inline">Quick Reorder</span>
                           </button>
                         )}
                         {/* Three-dot action menu */}
@@ -1807,6 +1814,7 @@ export default function Inventory() {
               )}
             </TableBody>
           </Table>
+          </div>{/* /overflow-x-auto */}
         </CardContent>
       </Card>
 

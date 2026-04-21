@@ -23,15 +23,15 @@ export function Drawer({ isOpen, onClose, title, description, children, footer }
       {/* Panel: stop click propagation so interactions inside never hit the backdrop */}
       <div
         className={cn(
-          "bg-white w-full max-w-2xl h-full shadow-2xl border-l border-neutral-200 flex flex-col",
+          "bg-white w-full sm:max-w-xl lg:max-w-2xl h-full shadow-2xl border-l border-neutral-200 flex flex-col",
           "animate-in slide-in-from-right duration-300"
         )}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between px-6 py-4 border-b border-neutral-100 bg-white z-10 shrink-0">
-          <div>
-            <h2 className="text-xl font-semibold text-neutral-900">{title}</h2>
-            {description && <p className="text-sm text-neutral-500 mt-0.5">{description}</p>}
+        <div className="flex items-center justify-between px-4 sm:px-6 py-3 sm:py-4 border-b border-neutral-100 bg-white z-10 shrink-0">
+          <div className="min-w-0 flex-1 pr-2">
+            <h2 className="text-lg sm:text-xl font-semibold text-neutral-900 truncate">{title}</h2>
+            {description && <p className="text-xs sm:text-sm text-neutral-500 mt-0.5 truncate">{description}</p>}
           </div>
           <button
             onClick={onClose}
@@ -41,7 +41,7 @@ export function Drawer({ isOpen, onClose, title, description, children, footer }
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto bg-neutral-50 p-6 text-neutral-600">
+        <div className="flex-1 overflow-y-auto bg-neutral-50 p-4 sm:p-6 text-neutral-600">
           {children}
         </div>
 
@@ -49,7 +49,7 @@ export function Drawer({ isOpen, onClose, title, description, children, footer }
           // IMPORTANT: do NOT add justify-end or gap here.
           // Callers own the footer layout (e.g. justify-between for left + right button groups).
           // The only container responsibility is: full width, padding, border, background.
-          <div className="px-6 py-4 border-t border-neutral-100 bg-white shrink-0 w-full">
+          <div className="px-4 sm:px-6 py-3 sm:py-4 border-t border-neutral-100 bg-white shrink-0 w-full">
             {footer}
           </div>
         )}

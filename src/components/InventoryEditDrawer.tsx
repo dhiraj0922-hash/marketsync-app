@@ -340,7 +340,7 @@ export function InventoryEditDrawer({
           </div>
 
           {/* ── Type / Category / Base Unit ───────────────────────────── */}
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-3">
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Type</label>
               <select
@@ -483,7 +483,7 @@ export function InventoryEditDrawer({
           </div>
 
           {/* ── Stock / Par / Cost ────────────────────────────────────── */}
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-3">
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Current Stock</label>
               <input
@@ -669,7 +669,7 @@ export function InventoryEditDrawer({
                     <input type="text" value={row.supplierProductName ?? ""} onChange={e => updatePurchOptField(row.id, "supplierProductName", e.target.value || null)} className="w-full px-2 py-1 border border-neutral-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-brand-400" placeholder="Optional" />
                   </div>
                 </div>
-                <div className="grid grid-cols-4 gap-2">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                   <div>
                     <label className="text-[10px] text-neutral-400 font-semibold uppercase block mb-0.5">Purchase UOM</label>
                     <input type="text" value={row.purchaseUom} onChange={e => updatePurchOptField(row.id, "purchaseUom", e.target.value)} className="w-full px-2 py-1 border border-neutral-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-brand-400" />
@@ -704,7 +704,7 @@ export function InventoryEditDrawer({
                     <input type="text" value={newPurchOpt.supplierProductName} onChange={e => setNewPurchOpt((p: any) => ({ ...p, supplierProductName: e.target.value }))} className="w-full px-2 py-1 border border-neutral-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-violet-400" placeholder="Optional" />
                   </div>
                 </div>
-                <div className="grid grid-cols-4 gap-2">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                   <div>
                     <label className="text-[10px] text-neutral-500 font-semibold uppercase block mb-0.5">Purchase UOM</label>
                     <input type="text" value={newPurchOpt.purchaseUom} onChange={e => setNewPurchOpt((p: any) => ({ ...p, purchaseUom: e.target.value }))} className="w-full px-2 py-1 border border-neutral-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-violet-400" placeholder="case" />
