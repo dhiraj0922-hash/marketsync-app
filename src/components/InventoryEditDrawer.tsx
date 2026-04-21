@@ -26,7 +26,7 @@
  *       - add new supplier row
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Drawer } from "@/components/ui/drawer";
 import {
   saveInventory,
@@ -34,6 +34,7 @@ import {
   savePurchaseOptions,
   insertPurchaseOptions,
   deletePurchaseOption,
+  loadSuppliers,
 } from "@/lib/storage";
 import { Plus, Save, Trash2, Loader2 } from "lucide-react";
 
@@ -53,6 +54,132 @@ interface InventoryEditDrawerProps {
   onSaved: (updatedItem: any) => void;
   /** Optional list of category strings for the category <select>. */
   categories?: string[];
+}
+
+// ─── SupplierCombobox ─────────────────────────────────────────────────────────
+// Searchable combobox for picking an existing supplier name or typing a new one.
+// - suggestions: deduplicated alphabetical list (from suppliers master + purchase_options)
+// - value / onChange: controlled by parent
+// - Normalization: name.trim().replace(/\s+/g, ' ') on selection
+// - Free-text fallback: any typed value that doesn't match a suggestion is accepted as-is
+
+interface SupplierComboboxProps {
+  value: string;
+  suggestions: string[];
+  onChange: (name: string) => void;
+}
+
+function SupplierCombobox({ value, suggestions, onChange }: SupplierComboboxProps) {
+  const [query,   setQuery]   = useState(value);
+  const [open,    setOpen]    = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  // Keep internal query in sync when parent resets the form
+  useEffect(() => { setQuery(value); }, [value]);
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+        // Commit whatever is typed as free-text when the user clicks away
+        const normalized = query.trim().replace(/\s+/g, ' ');
+        if (normalized !== value) onChange(normalized);
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open, query, value, onChange]);
+
+  const normalize = (s: string) => s.trim().replace(/\s+/g, ' ');
+
+  const filtered = suggestions.filter(s =>
+    s.toLowerCase().includes(query.toLowerCase())
+  );
+
+  const select = (name: string) => {
+    const n = normalize(name);
+    setQuery(n);
+    onChange(n);
+    setOpen(false);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (filtered.length > 0 && filtered[0].toLowerCase() === query.toLowerCase()) {
+        select(filtered[0]);
+      } else {
+        // Free-text confirmation
+        select(query);
+      }
+    } else if (e.key === 'Escape') {
+      setOpen(false);
+    }
+  };
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <div className="flex items-center gap-1">
+        <input
+          autoFocus
+          type="text"
+          value={query}
+          placeholder="Supplier Co."
+          onFocus={() => setOpen(true)}
+          onChange={e => {
+            setQuery(e.target.value);
+            setOpen(true);
+          }}
+          onKeyDown={handleKeyDown}
+          className="w-full px-2 py-1 border border-violet-300 rounded text-xs focus:outline-none focus:ring-1 focus:ring-violet-500 bg-white"
+        />
+        {query && (
+          <button
+            type="button"
+            onClick={() => { setQuery(''); onChange(''); setOpen(true); }}
+            className="text-neutral-400 hover:text-neutral-700 shrink-0 text-[10px] font-bold leading-none px-1"
+            tabIndex={-1}
+            title="Clear"
+          >✕</button>
+        )}
+      </div>
+
+      {open && (
+        <div className="absolute left-0 right-0 top-full mt-0.5 z-[80] bg-white border border-violet-200 rounded shadow-lg max-h-44 overflow-y-auto">
+          {filtered.length === 0 ? (
+            <div className="px-3 py-2 text-[11px] text-neutral-400 italic">
+              No match — press Enter to use "{query}"
+            </div>
+          ) : (
+            filtered.map(name => (
+              <button
+                key={name}
+                type="button"
+                onMouseDown={e => { e.preventDefault(); select(name); }}
+                className={`w-full text-left px-3 py-1.5 text-xs transition-colors hover:bg-violet-50 ${
+                  normalize(name) === normalize(query) ? 'bg-violet-50 font-semibold text-violet-800' : 'text-neutral-800'
+                }`}
+              >
+                {name}
+              </button>
+            ))
+          )}
+          {/* Always show a "use exactly what I typed" option when query doesn't exactly match */}
+          {query.trim() && !filtered.some(s => normalize(s) === normalize(query)) && (
+            <button
+              type="button"
+              onMouseDown={e => { e.preventDefault(); select(query); }}
+              className="w-full text-left px-3 py-1.5 text-[11px] text-violet-600 font-semibold border-t border-violet-100 hover:bg-violet-50"
+            >
+              + Add "{normalize(query)}"
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -88,10 +215,26 @@ export function InventoryEditDrawer({
     unitPrice: "", isPreferred: false,
   });
 
+  // Supplier name suggestions (for the combobox)
+  const [supplierSuggestions, setSupplierSuggestions] = useState<string[]>([]);
+
   // Save state
   const [isSaving, setIsSaving] = useState(false);
 
   // ── Seed state whenever a new item is passed ─────────────────────────────
+  // Load supplier suggestions once when the drawer first opens
+  useEffect(() => {
+    loadSuppliers()
+      .then((suppliers: any[]) => {
+        setSupplierSuggestions(prev => {
+          const fromMaster = suppliers.map((s: any) => (s.name ?? '').trim()).filter(Boolean);
+          const merged = Array.from(new Set([...fromMaster, ...prev])).sort((a, b) => a.localeCompare(b));
+          return merged;
+        });
+      })
+      .catch(() => { /* non-fatal — free-text still works */ });
+  }, []); // once on mount
+
   useEffect(() => {
     if (!item) {
       setEditItem(null);
@@ -128,6 +271,14 @@ export function InventoryEditDrawer({
       .then((rows: any[]) => {
         console.log('[InventoryEditDrawer] loadPurchaseOptions returned', rows.length, 'rows for id:', String(item.id), rows);
         setPurchaseOptions(rows);
+        // Also add any supplier names from purchase_options to suggestions
+        const fromOpts = rows.map((r: any) => (r.supplierName ?? '').trim()).filter(Boolean);
+        if (fromOpts.length > 0) {
+          setSupplierSuggestions(prev => {
+            const merged = Array.from(new Set([...prev, ...fromOpts])).sort((a, b) => a.localeCompare(b));
+            return merged;
+          });
+        }
         // Seed cost from preferred ?? lowest if available
         const preferred = rows.find((r: any) => r.isPreferred);
         const lowest    = rows.length > 0
@@ -726,7 +877,11 @@ export function InventoryEditDrawer({
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="text-[10px] text-neutral-500 font-semibold uppercase block mb-0.5">Supplier Name *</label>
-                    <input autoFocus type="text" value={newPurchOpt.supplierName} onChange={e => setNewPurchOpt((p: any) => ({ ...p, supplierName: e.target.value }))} className="w-full px-2 py-1 border border-neutral-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-violet-400" placeholder="Supplier Co." />
+                    <SupplierCombobox
+                      value={newPurchOpt.supplierName}
+                      suggestions={supplierSuggestions}
+                      onChange={name => setNewPurchOpt((p: any) => ({ ...p, supplierName: name }))}
+                    />
                   </div>
                   <div>
                     <label className="text-[10px] text-neutral-500 font-semibold uppercase block mb-0.5">Product Name</label>
