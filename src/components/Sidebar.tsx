@@ -54,7 +54,7 @@ interface NavItem {
 
 const navigation: NavItem[] = [
   { name: "Dashboard",     href: "/",              icon: LayoutDashboard },
-  { name: "Approvals",     href: "/approvals",     icon: CheckSquare },
+  { name: "Approvals",     href: "/approvals",     icon: CheckSquare,    hqOnly: true },
   { name: "Inventory",     href: "/inventory",     icon: Package },
   { name: "Counts",        href: "/counts",        icon: ClipboardList },
   { name: "Orders",        href: "/orders",        icon: ShoppingCart },
