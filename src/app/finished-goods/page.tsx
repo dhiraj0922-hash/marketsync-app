@@ -329,6 +329,12 @@ export default function FinishedGoods() {
       );
       const inStock = rawItem ? rawItem.inStock : 0;
 
+      // Labour items (LABOUR*/LABOR* by name) are available on demand.
+      // Their instock is always 0 and should never block production or
+      // reduce maxBatches — they still appear in the check table for visibility.
+      const itemNameUpper = (rawItem?.name ?? ing.name ?? "").toUpperCase();
+      const isLabour = itemNameUpper.includes("LABOUR") || itemNameUpper.includes("LABOR");
+
       let requiredTotal = 0;
       let short = false;
       let possibleCount = 0;
@@ -341,14 +347,18 @@ export default function FinishedGoods() {
           rawItem ? rawItem.unit : ing.unit
         );
         requiredTotal = normalizedQty * batches;
-        short = requiredTotal > inStock;
-        if (short) valid = false;
-        possibleCount = inStock > 0 ? Math.floor(inStock / normalizedQty) : 0;
-        if (possibleCount < maxBatches) maxBatches = possibleCount;
+        if (!isLabour) {
+          short = requiredTotal > inStock;
+          if (short) valid = false;
+          possibleCount = inStock > 0 ? Math.floor(inStock / normalizedQty) : 0;
+          if (possibleCount < maxBatches) maxBatches = possibleCount;
+        }
       } catch (e: any) {
-        valid = false;
         conversionError = e.message;
-        maxBatches = 0;
+        if (!isLabour) {
+          valid = false;
+          maxBatches = 0;
+        }
       }
 
       if (short || conversionError) {
