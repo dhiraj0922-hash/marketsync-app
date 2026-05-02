@@ -240,7 +240,63 @@ export async function getFulfillmentProfitReport(
   return { data: { rows, totalRevenue, totalCogs, totalProfit, avgMarginPct }, error: null };
 }
 
+
+// ─── Margin Insights (derived, no extra RPC) ──────────────────────────────────
+// Aggregates ProfitReport rows client-side — no additional network call.
+// Groups by item_name, computes per-item totals + weighted margin_pct, then
+// returns sorted slices for the Top/Worst cards in ProfitView.
+
+export interface MarginInsightRow {
+  item_name:     string;
+  total_revenue: number;
+  total_cogs:    number;
+  total_profit:  number;
+  margin_pct:    number | null;  // null if total_revenue = 0
+}
+
+export interface MarginInsights {
+  top:   MarginInsightRow[];  // highest margin first, up to 5
+  worst: MarginInsightRow[];  // lowest margin first, up to 5 (excludes null-margin rows)
+}
+
+/** Pure function — derives margin rankings from an existing ProfitReport. */
+export function deriveMarginInsights(report: ProfitReport, n = 5): MarginInsights {
+  // Aggregate all fulfillment rows by item_name
+  const byItem = new Map<string, { rev: number; cogs: number; profit: number }>();
+
+  for (const r of report.rows) {
+    const key = r.item_name ?? "Unknown";
+    const cur = byItem.get(key) ?? { rev: 0, cogs: 0, profit: 0 };
+    byItem.set(key, {
+      rev:    cur.rev    + r.revenue,
+      cogs:   cur.cogs   + r.cogs,
+      profit: cur.profit + r.profit,
+    });
+  }
+
+  const aggregated: MarginInsightRow[] = Array.from(byItem.entries()).map(([name, v]) => ({
+    item_name:     name,
+    total_revenue: v.rev,
+    total_cogs:    v.cogs,
+    total_profit:  v.profit,
+    // Weighted margin: derived from aggregated totals, not row averages
+    margin_pct: v.rev > 0
+      ? Math.round((v.profit / v.rev) * 100 * 100) / 100  // 2dp
+      : null,
+  }));
+
+  // Rows with a known margin_pct, sorted for ranking
+  const withMargin = aggregated.filter(r => r.margin_pct !== null);
+  withMargin.sort((a, b) => (b.margin_pct ?? 0) - (a.margin_pct ?? 0));
+
+  return {
+    top:   withMargin.slice(0, n),
+    worst: [...withMargin].reverse().slice(0, n),
+  };
+}
+
 // ─── Utilities ────────────────────────────────────────────────────────────────
+
 
 function daysAgo(n: number): Date {
   const d = new Date();

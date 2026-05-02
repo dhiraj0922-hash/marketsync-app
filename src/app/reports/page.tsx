@@ -8,9 +8,11 @@ import {
   getCogsReport,
   getInventoryMovementReport,
   getFulfillmentProfitReport,
+  deriveMarginInsights,
   type CogsReport,
   type MovementReport,
   type ProfitReport,
+  type MarginInsights,
   type ReportBucket,
 } from "@/lib/reports";
 import {
@@ -405,6 +407,9 @@ function ProfitView({ report, locName }: { report: ProfitReport; locName: (id: s
     ? `${fmt(report.avgMarginPct)}%`
     : "—";
 
+  // Derive top / worst items from already-fetched rows — no extra RPC
+  const insights: MarginInsights = deriveMarginInsights(report);
+
   return (
     <div className="space-y-4">
       {/* Summary cards */}
@@ -427,6 +432,77 @@ function ProfitView({ report, locName }: { report: ProfitReport; locName: (id: s
           label="Avg Margin"     value={avgDisplay}
           sub="weighted by revenue"                        accent="neutral" />
       </div>
+
+      {/* Top & Worst margin items — shown only when enough distinct items exist */}
+      {(insights.top.length > 0 || insights.worst.length > 0) && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+
+          {/* Top margin items */}
+          <Card className="shadow-sm">
+            <CardHeader className="pb-2">
+              <p className="text-sm font-semibold text-neutral-700 flex items-center gap-2">
+                <TrendingUp className="h-4 w-4 text-green-600" />
+                Top Margin Items
+              </p>
+            </CardHeader>
+            <CardContent className="p-0">
+              <ul className="divide-y divide-neutral-50">
+                {insights.top.map((item, i) => (
+                  <li key={item.item_name} className="flex items-center justify-between px-4 py-2.5 hover:bg-neutral-50/50">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-xs font-bold text-neutral-400 w-4 shrink-0">{i + 1}</span>
+                      <span className="text-sm font-medium text-neutral-900 truncate">{item.item_name}</span>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0 ml-2">
+                      <span className="text-xs tabular-nums text-neutral-500">{$(item.total_profit)}</span>
+                      <span className={`inline-flex px-2 py-0.5 rounded text-[10px] font-semibold border ${
+                        (item.margin_pct ?? 0) >= 20
+                          ? "bg-green-50 text-green-700 border-green-200"
+                          : "bg-yellow-50 text-yellow-700 border-yellow-200"
+                      }`}>
+                        {item.margin_pct != null ? `${fmt(item.margin_pct)}%` : "—"}
+                      </span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </CardContent>
+          </Card>
+
+          {/* Worst margin items */}
+          <Card className="shadow-sm">
+            <CardHeader className="pb-2">
+              <p className="text-sm font-semibold text-neutral-700 flex items-center gap-2">
+                <TrendingDown className="h-4 w-4 text-red-500" />
+                Worst Margin Items
+              </p>
+            </CardHeader>
+            <CardContent className="p-0">
+              <ul className="divide-y divide-neutral-50">
+                {insights.worst.map((item, i) => (
+                  <li key={item.item_name} className="flex items-center justify-between px-4 py-2.5 hover:bg-neutral-50/50">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-xs font-bold text-neutral-400 w-4 shrink-0">{i + 1}</span>
+                      <span className="text-sm font-medium text-neutral-900 truncate">{item.item_name}</span>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0 ml-2">
+                      <span className="text-xs tabular-nums text-neutral-500">{$(item.total_profit)}</span>
+                      <span className={`inline-flex px-2 py-0.5 rounded text-[10px] font-semibold border ${
+                        (item.margin_pct ?? 0) < 0
+                          ? "bg-red-50 text-red-700 border-red-200"
+                          : "bg-yellow-50 text-yellow-700 border-yellow-200"
+                      }`}>
+                        {item.margin_pct != null ? `${fmt(item.margin_pct)}%` : "—"}
+                      </span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </CardContent>
+          </Card>
+
+        </div>
+      )}
 
       {/* Detail table */}
       <Card className="shadow-sm">
