@@ -235,9 +235,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // ── Redirect effect ───────────────────────────────────────────────────────
   useEffect(() => {
     if (loading) return;
-    if (!user && pathname !== "/login") {
+    // Block unauthenticated users AND explicitly deactivated users.
+    // user.isActive === false (strict) avoids blocking during cold-start
+    // when isActive is undefined (profile not yet resolved).
+    if ((!user || user.isActive === false) && pathname !== "/login") {
       router.push("/login");
-    } else if (user && pathname === "/login") {
+    } else if (user && user.isActive !== false && pathname === "/login") {
       router.push("/");
     }
   }, [user, loading, pathname, router]);
