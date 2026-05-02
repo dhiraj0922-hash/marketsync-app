@@ -7,13 +7,15 @@ import { loadLocations } from "@/lib/storage";
 import {
   getCogsReport,
   getInventoryMovementReport,
+  getFulfillmentProfitReport,
   type CogsReport,
   type MovementReport,
+  type ProfitReport,
   type ReportBucket,
 } from "@/lib/reports";
 import {
   TrendingDown, TrendingUp, ArrowLeftRight, AlertTriangle,
-  BarChart3, Loader2, RefreshCw, ChevronDown, Filter,
+  BarChart3, Loader2, RefreshCw, ChevronDown, Filter, DollarSign,
 } from "lucide-react";
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -71,7 +73,7 @@ export default function ReportsPage() {
   );
 }
 
-type Tab = "cogs" | "movement";
+type Tab = "cogs" | "movement" | "profit";
 
 function ReportsContent() {
   const [tab, setTab]               = useState<Tab>("cogs");
@@ -81,10 +83,11 @@ function ReportsContent() {
   const [dateTo, setDateTo]         = useState(today);
   const [movBucket, setMovBucket]   = useState<ReportBucket | "">("");
 
-  const [cogsReport, setCogsReport] = useState<CogsReport     | null>(null);
-  const [movReport,  setMovReport]  = useState<MovementReport | null>(null);
-  const [loading,    setLoading]    = useState(false);
-  const [error,      setError]      = useState<string | null>(null);
+  const [cogsReport,    setCogsReport]    = useState<CogsReport    | null>(null);
+  const [movReport,     setMovReport]     = useState<MovementReport | null>(null);
+  const [profitReport,  setProfitReport]  = useState<ProfitReport  | null>(null);
+  const [loading,       setLoading]       = useState(false);
+  const [error,         setError]         = useState<string | null>(null);
 
   useEffect(() => {
     loadLocations().then(locs => setLocations(Array.isArray(locs) ? locs : []));
@@ -98,12 +101,15 @@ function ReportsContent() {
     if (tab === "cogs") {
       const { data, error: e } = await getCogsReport(f);
       if (e) setError(e); else setCogsReport(data);
-    } else {
+    } else if (tab === "movement") {
       const { data, error: e } = await getInventoryMovementReport({
         ...f,
         bucket: (movBucket as ReportBucket) || null,
       });
       if (e) setError(e); else setMovReport(data);
+    } else {
+      const { data, error: e } = await getFulfillmentProfitReport(f);
+      if (e) setError(e); else setProfitReport(data);
     }
     setLoading(false);
   }, [tab, locationId, dateFrom, dateTo, movBucket]);
@@ -117,8 +123,9 @@ function ReportsContent() {
   };
 
   const empty =
-    (tab === "cogs"     && cogsReport && cogsReport.rows.length === 0) ||
-    (tab === "movement" && movReport  && movReport.rows.length  === 0);
+    (tab === "cogs"     && cogsReport    && cogsReport.rows.length    === 0) ||
+    (tab === "movement" && movReport     && movReport.rows.length     === 0) ||
+    (tab === "profit"   && profitReport  && profitReport.rows.length  === 0);
 
   return (
     <div className="space-y-6">
@@ -130,7 +137,7 @@ function ReportsContent() {
 
       {/* ── Tabs */}
       <div className="flex gap-1 bg-neutral-100 p-1 rounded-xl w-fit">
-        {(["cogs", "movement"] as Tab[]).map(t => (
+        {(["cogs", "movement", "profit"] as Tab[]).map(t => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -138,7 +145,7 @@ function ReportsContent() {
               tab === t ? "bg-white text-brand-700 shadow-sm" : "text-neutral-500 hover:text-neutral-800"
             }`}
           >
-            {t === "cogs" ? "COGS" : "Movement Ledger"}
+            {t === "cogs" ? "COGS" : t === "movement" ? "Movement Ledger" : "Profit"}
           </button>
         ))}
       </div>
@@ -244,6 +251,11 @@ function ReportsContent() {
       {/* ── Movement tab */}
       {!loading && tab === "movement" && movReport && movReport.rows.length > 0 && (
         <MovementView report={movReport} locName={locName} />
+      )}
+
+      {/* ── Profit tab */}
+      {!loading && tab === "profit" && profitReport && profitReport.rows.length > 0 && (
+        <ProfitView report={profitReport} locName={locName} />
       )}
 
       {/* ── Empty state */}
@@ -379,6 +391,102 @@ function MovementView({ report, locName }: { report: MovementReport; locName: (i
                 </tr>
               ))}
             </tbody>
+          </table>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// ─── Profit view ──────────────────────────────────────────────────────────────
+
+function ProfitView({ report, locName }: { report: ProfitReport; locName: (id: string | null) => string }) {
+  const avgDisplay = report.avgMarginPct != null
+    ? `${fmt(report.avgMarginPct)}%`
+    : "—";
+
+  return (
+    <div className="space-y-4">
+      {/* Summary cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <SummaryCard
+          icon={<DollarSign className="h-5 w-5 text-green-600" />}
+          label="Total Revenue"  value={$(report.totalRevenue)}
+          sub={`${report.rows.length} fulfillment lines`}  accent="green" />
+        <SummaryCard
+          icon={<TrendingDown className="h-5 w-5 text-red-500" />}
+          label="Total COGS"     value={$(report.totalCogs)}
+          sub="production cost"                            accent="red" />
+        <SummaryCard
+          icon={<TrendingUp className="h-5 w-5 text-brand-500" />}
+          label="Gross Profit"   value={$(report.totalProfit)}
+          sub={report.totalProfit >= 0 ? "net gain" : "net loss"}
+          accent={report.totalProfit >= 0 ? "green" : "red"} />
+        <SummaryCard
+          icon={<BarChart3 className="h-5 w-5 text-neutral-500" />}
+          label="Avg Margin"     value={avgDisplay}
+          sub="weighted by revenue"                        accent="neutral" />
+      </div>
+
+      {/* Detail table */}
+      <Card className="shadow-sm">
+        <CardHeader className="pb-3">
+          <p className="text-sm font-semibold text-neutral-700">Profit Detail — Fulfilled Requisitions</p>
+        </CardHeader>
+        <CardContent className="p-0 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-neutral-50 border-b border-neutral-100">
+              <tr>
+                {["Date", "Location", "Item", "Qty", "Unit Price", "Revenue", "COGS", "Profit", "Margin %"].map(h => (
+                  <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-neutral-500 uppercase tracking-wider whitespace-nowrap">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-neutral-50">
+              {report.rows.map((r, i) => {
+                const isPos = r.profit >= 0;
+                return (
+                  <tr key={i} className="hover:bg-neutral-50/50">
+                    <td className="px-4 py-2.5 font-mono text-xs text-neutral-700 whitespace-nowrap">{r.movement_date}</td>
+                    <td className="px-4 py-2.5 text-neutral-600 whitespace-nowrap">{locName(r.location_id)}</td>
+                    <td className="px-4 py-2.5 font-medium text-neutral-900">{r.item_name ?? "—"}</td>
+                    <td className="px-4 py-2.5 tabular-nums text-neutral-700">{qty(r.qty)}</td>
+                    <td className="px-4 py-2.5 tabular-nums text-neutral-500">{$(r.unit_price)}</td>
+                    <td className="px-4 py-2.5 tabular-nums font-semibold text-green-700">{$(r.revenue)}</td>
+                    <td className="px-4 py-2.5 tabular-nums text-red-600">{$(r.cogs)}</td>
+                    <td className={`px-4 py-2.5 tabular-nums font-semibold ${isPos ? "text-green-700" : "text-red-700"}`}>
+                      {isPos ? "+" : ""}{$(r.profit)}
+                    </td>
+                    <td className="px-4 py-2.5 tabular-nums">
+                      {r.margin_pct != null ? (
+                        <span className={`inline-flex px-2 py-0.5 rounded text-[10px] font-semibold border ${
+                          r.margin_pct >= 20
+                            ? "bg-green-50 text-green-700 border-green-200"
+                            : r.margin_pct >= 0
+                            ? "bg-yellow-50 text-yellow-700 border-yellow-200"
+                            : "bg-red-50 text-red-700 border-red-200"
+                        }`}>
+                          {fmt(r.margin_pct)}%
+                        </span>
+                      ) : "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot className="bg-neutral-50 border-t border-neutral-200">
+              <tr>
+                <td colSpan={5} className="px-4 py-2.5 text-xs font-bold text-neutral-600 uppercase tracking-wider">Total</td>
+                <td className="px-4 py-2.5 font-bold text-green-700 tabular-nums">{$(report.totalRevenue)}</td>
+                <td className="px-4 py-2.5 font-bold text-red-600 tabular-nums">{$(report.totalCogs)}</td>
+                <td className={`px-4 py-2.5 font-bold tabular-nums ${report.totalProfit >= 0 ? "text-green-700" : "text-red-700"}`}>
+                  {report.totalProfit >= 0 ? "+" : ""}{$(report.totalProfit)}
+                </td>
+                <td className="px-4 py-2.5 font-bold text-neutral-700 tabular-nums">
+                  {report.avgMarginPct != null ? `${fmt(report.avgMarginPct)}%` : "—"}
+                </td>
+              </tr>
+            </tfoot>
           </table>
         </CardContent>
       </Card>

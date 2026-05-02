@@ -178,6 +178,68 @@ export async function getInventoryMovementReport(
   };
 }
 
+// ─── Fulfillment Profit ───────────────────────────────────────────────────────
+
+export interface ProfitRow {
+  movement_date: string;
+  location_id:   string | null;
+  item_name:     string | null;
+  qty:           number;
+  unit_price:    number;
+  revenue:       number;
+  making_cost:   number;
+  cogs:          number;
+  profit:        number;
+  margin_pct:    number | null;   // null when revenue = 0 (DB returns NULL)
+}
+
+export interface ProfitReport {
+  rows:         ProfitRow[];
+  totalRevenue: number;
+  totalCogs:    number;
+  totalProfit:  number;
+  avgMarginPct: number | null;   // null when no revenue rows
+}
+
+export async function getFulfillmentProfitReport(
+  filters: ReportFilters,
+): Promise<{ data: ProfitReport | null; error: string | null }> {
+  const { data, error } = await supabase.rpc("get_fulfillment_profit_report", {
+    p_location_id: filters.locationId ?? null,
+    p_date_from:   filters.dateFrom   ?? isoDate(daysAgo(30)),
+    p_date_to:     filters.dateTo     ?? isoDate(new Date()),
+  });
+
+  if (error) {
+    console.error("[reports] getFulfillmentProfitReport:", error.message);
+    return { data: null, error: error.message };
+  }
+
+  const rows: ProfitRow[] = (data ?? []).map((r: any): ProfitRow => ({
+    movement_date: r.movement_date ?? "",
+    location_id:   r.location_id   ?? null,
+    item_name:     r.item_name     ?? null,
+    qty:           Number(r.qty          ?? 0),
+    unit_price:    Number(r.unit_price   ?? 0),
+    revenue:       Number(r.revenue      ?? 0),
+    making_cost:   Number(r.making_cost  ?? 0),
+    cogs:          Number(r.cogs         ?? 0),
+    profit:        Number(r.profit       ?? 0),
+    margin_pct:    r.margin_pct != null ? Number(r.margin_pct) : null,
+  }));
+
+  const totalRevenue = rows.reduce((s, r) => s + r.revenue, 0);
+  const totalCogs    = rows.reduce((s, r) => s + r.cogs,    0);
+  const totalProfit  = rows.reduce((s, r) => s + r.profit,  0);
+
+  // Average margin: weighted by revenue (not simple row average)
+  const avgMarginPct = totalRevenue > 0
+    ? (totalProfit / totalRevenue) * 100
+    : null;
+
+  return { data: { rows, totalRevenue, totalCogs, totalProfit, avgMarginPct }, error: null };
+}
+
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
 function daysAgo(n: number): Date {
