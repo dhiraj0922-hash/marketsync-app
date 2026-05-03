@@ -840,37 +840,55 @@ export async function syncLinkedFgCost(recipe: {
   id:              string;
   theoreticalCost: number;
   yieldQty:        number;
-}): Promise<{ updated: number; errors: number; ids: string[] }> {
+}): Promise<{ updated: number; errors: number; ids: string[]; newCostPerUnit: number }> {
   const safeYield = recipe.yieldQty > 0 ? recipe.yieldQty : 1;
-  const makingCostPerUnit = recipe.theoreticalCost / safeYield;
+  const newCostPerUnit = Number((recipe.theoreticalCost / safeYield).toFixed(4));
 
-  // 1. Find all linked sale items
+  // 1. Find all linked sale items — fetch current making_cost for before/after logging
   const { data: linked, error: fetchErr } = await supabase
     .from('hq_sale_items')
-    .select('id')
+    .select('id, making_cost')
     .eq('source_recipe_id', recipe.id);
 
   if (fetchErr || !linked || linked.length === 0) {
-    if (fetchErr) console.warn('[syncLinkedFgCost] lookup error', fetchErr);
-    return { updated: 0, errors: fetchErr ? 1 : 0, ids: [] };
+    if (fetchErr) console.warn('[Recipe Sync] lookup error', fetchErr);
+    else          console.debug('[Recipe Sync] no linked FGs for recipe', recipe.id);
+    return { updated: 0, errors: fetchErr ? 1 : 0, ids: [], newCostPerUnit };
   }
 
-  // 2. Patch each linked sale item in parallel
+  // 2. Patch each linked sale item in parallel + emit per-item [Recipe Sync] log
   const results = await Promise.all(
-    linked.map(row => updateSaleItemCost(row.id, makingCostPerUnit, safeYield))
+    linked.map(async row => {
+      const oldCost = Number(row.making_cost ?? 0);
+      const res = await updateSaleItemCost(row.id, newCostPerUnit, safeYield);
+      if (res.success) {
+        // Required audit log: recipeId, saleItemId, old cost → new cost
+        console.log(
+          `[Recipe Sync] Updated linked FG cost` +
+          ` | recipeId=${recipe.id}` +
+          ` | saleItemId=${row.id}` +
+          ` | oldCost=$${oldCost.toFixed(4)}` +
+          ` | newCost=$${newCostPerUnit.toFixed(4)}` +
+          ` | yieldQty=${safeYield}`
+        );
+      } else {
+        console.error(
+          `[Recipe Sync] FAILED to update FG cost` +
+          ` | recipeId=${recipe.id}` +
+          ` | saleItemId=${row.id}` +
+          ` | attempted newCost=$${newCostPerUnit.toFixed(4)}`,
+          res.error
+        );
+      }
+      return res;
+    })
   );
 
   const ids     = linked.map(r => r.id);
   const errors  = results.filter(r => !r.success).length;
   const updated = results.filter(r =>  r.success).length;
 
-  if (errors > 0) {
-    console.warn('[syncLinkedFgCost] partial failure', { updated, errors, ids });
-  } else {
-    console.debug('[syncLinkedFgCost] synced', { updated, ids, makingCostPerUnit });
-  }
-
-  return { updated, errors, ids };
+  return { updated, errors, ids, newCostPerUnit };
 }
 
 /**

@@ -448,38 +448,52 @@ function RecipesPageContent() {
         }
       }
 
-      // ── Step 2b (non-blocking): sync making_cost on linked hq_sale_items ─────
+      // ── Step 2b (awaited): sync making_cost on linked hq_sale_items ──────────
       // Finds all hq_sale_items where source_recipe_id = recipeData.id and
       // patches making_cost = theoreticalCost / yieldQty.
+      //
+      // Awaited so failure surfaces as a builder warning (non-fatal — recipe is
+      // already saved and drawer still closes after the warning is set).
       //
       // Guarantees:
       //   • manual_price is NEVER overwritten (enforced inside syncLinkedFgCost)
       //   • suggested_price auto-updates in Postgres (it's a GENERATED column)
       //   • instock is never touched
-      //   • Failures are logged but never surface as user-visible errors
-      withTimeout(
-        syncLinkedFgCost({
-          id:              recipeData.id,
-          theoreticalCost: cost,
-          yieldQty,
-        }),
-        15_000,
-        "FG cost sync timed out"
-      ).then(syncRes => {
-        if (syncRes.updated > 0) {
-          console.debug(
-            `[saveRecipe] step 2b (bg): synced making_cost on ${syncRes.updated} FG(s)`,
-            syncRes.ids
+      try {
+        console.debug(
+          '[saveRecipe] step 2b: syncing FG cost' +
+          ` | recipeId=${recipeData.id}` +
+          ` | theoreticalCost=${cost}` +
+          ` | yieldQty=${yieldQty}`
+        );
+        const syncRes = await withTimeout(
+          syncLinkedFgCost({
+            id:              recipeData.id,
+            theoreticalCost: cost,
+            yieldQty,
+          }),
+          15_000,
+          'FG cost sync timed out after 15s'
+        );
+        if (syncRes.errors > 0) {
+          // Non-fatal: warn in UI but still close drawer below
+          console.warn('[saveRecipe] step 2b: partial FG cost sync failure', syncRes);
+          setBuilderError(
+            `Recipe saved, but cost sync failed for ${syncRes.errors} linked finished good(s). ` +
+            `Please refresh the HQ Finished Goods page and verify making cost is correct.`
           );
-        } else if (syncRes.errors > 0) {
-          console.warn('[saveRecipe] step 2b (bg): FG cost sync had errors', syncRes);
         } else {
-          // No linked FGs — that's fine, recipe may not be linked to any sale item yet
-          console.debug('[saveRecipe] step 2b (bg): no linked FGs for this recipe');
+          console.debug(
+            `[saveRecipe] step 2b done: ${syncRes.updated} FG(s) synced in ${Date.now() - t0}ms`
+          );
         }
-      }).catch(err => {
-        console.warn('[saveRecipe] step 2b (bg): FG cost sync exception', err?.message);
-      });
+      } catch (syncErr: any) {
+        // Timeout or network failure — warn but do not block drawer close
+        console.warn('[saveRecipe] step 2b: FG cost sync exception', syncErr?.message);
+        setBuilderError(
+          `Recipe saved. Cost sync timed out — please refresh HQ Finished Goods to verify making cost.`
+        );
+      }
 
       console.debug(`[saveRecipe] COMPLETE in ${Date.now() - t0}ms (drawer closing)`);
       setIsBuilderOpen(false);
