@@ -59,6 +59,9 @@ interface CountRow {
 const fmt = (n: number) =>
   n.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
 
+const $fmt = (n: number) =>
+  n.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
 function varianceLabel(v: number | null) {
   if (v === null) return null;
   if (v === 0) return { label: "No change", color: "text-neutral-400", icon: <Minus className="h-3.5 w-3.5" /> };
@@ -122,6 +125,18 @@ function FgCountContent() {
   const varianceItems  = visible.filter(r => r.variance !== null && r.variance !== 0).length;
   const gainItems      = visible.filter(r => r.variance !== null && r.variance > 0).length;
   const lossItems      = visible.filter(r => r.variance !== null && r.variance < 0).length;
+
+  // ── Value totals (making_cost based) ──────────────────────────────────────
+  const systemFgValue = visible.reduce(
+    (s, r) => s + r.item.instock * r.item.makingCost, 0
+  );
+  const physicalFgValue = visible.reduce((s, r) => {
+    const num = parseFloat(r.countInput);
+    return s + (r.countInput !== "" && !isNaN(num) ? num * r.item.makingCost : 0);
+  }, 0);
+  const varianceValue = visible.reduce((s, r) => {
+    return s + (r.variance !== null ? r.variance * r.item.makingCost : 0);
+  }, 0);
 
   // ── Input change ───────────────────────────────────────────────────────────
   const handleInput = (itemId: string, val: string) => {
@@ -272,7 +287,7 @@ function FgCountContent() {
         </div>
       </div>
 
-      {/* ── Summary cards ──────────────────────────────────────────────── */}
+      {/* ── Count summary cards ─────────────────────────────────────────── */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         {[
           { label: "Items Entered",    value: enteredCount,   color: "text-brand-600",   bg: "bg-brand-50   border-brand-100"   },
@@ -285,6 +300,43 @@ function FgCountContent() {
             <p className={`text-2xl font-bold mt-1 ${s.color}`}>{s.value}</p>
           </div>
         ))}
+      </div>
+
+      {/* ── Value cards (making_cost based) ─────────────────────────────── */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="rounded-xl border p-4 bg-neutral-50 border-neutral-200">
+          <p className="text-xs font-semibold text-neutral-500 uppercase tracking-wider">System FG Value</p>
+          <p className="text-2xl font-bold mt-1 text-neutral-800 tabular-nums">{$fmt(systemFgValue)}</p>
+          <p className="text-[10px] text-neutral-400 mt-0.5">Σ (system stock × making cost)</p>
+        </div>
+        <div className="rounded-xl border p-4 bg-blue-50 border-blue-100">
+          <p className="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Physical FG Value</p>
+          <p className="text-2xl font-bold mt-1 text-blue-800 tabular-nums">
+            {enteredCount > 0 ? $fmt(physicalFgValue) : <span className="text-neutral-400">—</span>}
+          </p>
+          <p className="text-[10px] text-neutral-400 mt-0.5">Σ (physical count × making cost)</p>
+        </div>
+        <div className={`rounded-xl border p-4 ${
+          varianceValue === 0 || enteredCount === 0
+            ? "bg-neutral-50 border-neutral-200"
+            : varianceValue > 0
+            ? "bg-green-50 border-green-100"
+            : "bg-red-50 border-red-100"
+        }`}>
+          <p className="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Variance Value</p>
+          <p className={`text-2xl font-bold mt-1 tabular-nums ${
+            enteredCount === 0 || varianceValue === 0
+              ? "text-neutral-400"
+              : varianceValue > 0
+              ? "text-green-700"
+              : "text-red-600"
+          }`}>
+            {enteredCount > 0
+              ? <>{varianceValue > 0 ? "+" : ""}{$fmt(varianceValue)}</>
+              : "—"}
+          </p>
+          <p className="text-[10px] text-neutral-400 mt-0.5">Σ (variance qty × making cost)</p>
+        </div>
       </div>
 
       {/* ── Filters ────────────────────────────────────────────────────── */}
@@ -326,7 +378,7 @@ function FgCountContent() {
           <table className="w-full text-sm">
             <thead className="bg-neutral-50 border-b border-neutral-100">
               <tr>
-                {["Item", "Category", "System Stock", "Physical Count", "Variance", "Status"].map(h => (
+                {["Item", "Category", "Making Cost", "System Stock", "System Value", "Physical Count", "Physical Value", "Variance", "Variance Value", "Status"].map(h => (
                   <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-neutral-500 uppercase tracking-wider whitespace-nowrap">
                     {h}
                   </th>
@@ -336,7 +388,7 @@ function FgCountContent() {
             <tbody className="divide-y divide-neutral-50">
               {visible.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-10 text-center text-neutral-400 text-sm">
+                  <td colSpan={10} className="px-4 py-10 text-center text-neutral-400 text-sm">
                     No items match your filters.
                   </td>
                 </tr>
@@ -364,12 +416,33 @@ function FgCountContent() {
                       <span className="text-xs text-neutral-500">{row.item.category ?? "—"}</span>
                     </td>
 
+                    {/* Making Cost */}
+                    <td className="px-4 py-2.5">
+                      {row.item.makingCost > 0 ? (
+                        <span className="font-mono tabular-nums text-neutral-700 text-xs">
+                          {$fmt(row.item.makingCost)}
+                          <span className="text-neutral-400">/{row.item.baseUnit}</span>
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-50 text-amber-600 border border-amber-200">
+                          No cost
+                        </span>
+                      )}
+                    </td>
+
                     {/* System stock */}
                     <td className="px-4 py-2.5">
                       <span className="font-mono font-semibold text-neutral-700 tabular-nums">
                         {fmt(row.item.instock)}
                       </span>
                       <span className="text-neutral-400 text-xs ml-1">{row.item.baseUnit}</span>
+                    </td>
+
+                    {/* System Value */}
+                    <td className="px-4 py-2.5">
+                      <span className="font-mono tabular-nums text-neutral-600 text-xs">
+                        {$fmt(row.item.instock * row.item.makingCost)}
+                      </span>
                     </td>
 
                     {/* Count input */}
@@ -411,11 +484,39 @@ function FgCountContent() {
                       )}
                     </td>
 
-                    {/* Variance */}
+                    {/* Physical Value */}
+                    <td className="px-4 py-2.5">
+                      {row.countInput !== "" && !isNaN(parseFloat(row.countInput)) ? (
+                        <span className="font-mono tabular-nums text-blue-700 text-xs font-semibold">
+                          {$fmt(parseFloat(row.countInput) * row.item.makingCost)}
+                        </span>
+                      ) : (
+                        <span className="text-neutral-300 text-xs">—</span>
+                      )}
+                    </td>
+
+                    {/* Variance qty */}
                     <td className="px-4 py-2.5">
                       {vLabel ? (
                         <span className={`inline-flex items-center gap-1 text-xs font-semibold tabular-nums ${vLabel.color}`}>
                           {vLabel.icon} {vLabel.label}
+                        </span>
+                      ) : (
+                        <span className="text-neutral-300 text-xs">—</span>
+                      )}
+                    </td>
+
+                    {/* Variance Value */}
+                    <td className="px-4 py-2.5">
+                      {row.variance !== null ? (
+                        <span className={`font-mono tabular-nums text-xs font-semibold ${
+                          row.variance === 0
+                            ? "text-neutral-400"
+                            : row.variance > 0
+                            ? "text-green-700"
+                            : "text-red-600"
+                        }`}>
+                          {row.variance > 0 ? "+" : ""}{$fmt(row.variance * row.item.makingCost)}
                         </span>
                       ) : (
                         <span className="text-neutral-300 text-xs">—</span>
