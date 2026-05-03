@@ -80,34 +80,66 @@ const mapInventoryToDB = (item: any) => {
   };
 };
 
+// ─── Pagination helper ──────────────────────────────────────────────────────────────────────────────
+//
+// Supabase PostgREST silently caps results at its server-side max_rows (default
+// 1000). Without explicit pagination, tables larger than that limit return only
+// the first N rows — no error, no warning.
+//
+// fetchAllRows pages through the table in chunks of `pageSize` (default 1000)
+// until a page returns fewer rows than the size, signalling the last page.
+// Existing filters, ordering, and RLS all apply normally on each page.
+//
+// Usage:
+//   const rows = await fetchAllRows(
+//     q => q.from("inventory_items").select("*").eq("location_id", id).order("name"),
+//     1000
+//   );
+//
+export async function fetchAllRows<T = any>(
+  buildQuery: (client: typeof supabase) => {
+    range: (from: number, to: number) => Promise<{ data: T[] | null; error: any }>;
+  },
+  pageSize = 1000,
+): Promise<T[]> {
+  const all: T[] = [];
+  let from = 0;
+  while (true) {
+    const to = from + pageSize - 1;
+    const { data, error } = await buildQuery(supabase).range(from, to);
+    if (error) throw error;   // never return partial data — let the caller handle it
+    const page = data ?? [];
+    all.push(...page);
+    if (page.length < pageSize) break; // last page
+    from += pageSize;
+  }
+  return all;
+}
+
+
 /**
- * Load inventory items.
+ * Load all inventory items.
  *
- * IMPORTANT: Supabase PostgREST has a default row-return cap (typically 1000).
- * Without an explicit .range(), any table with >1000 rows silently returns only
- * the first N rows — no error, no warning. Rows beyond the cap simply disappear
- * from the UI (classic symptom: specific items missing despite existing in DB).
- *
- * Fix: always call .range(0, 9999) so up to 10 000 rows are fetched.
- * For production scale beyond 10k rows, switch to cursor-based pagination.
+ * Uses fetchAllRows to page through inventory_items in 1000-row chunks so the
+ * full table is always returned regardless of size.
  *
  * - Pass locationId to scope to a specific location (HQ cross-location review).
  * - Pass null/undefined for the current user's default scoped view.
  */
 export async function loadInventory(locationId?: string | null) {
-  let query = supabase
-    .from('inventory_items')
-    .select('*')
-    .order('name', { ascending: true })  // stable ordering so results are deterministic
-    .range(0, 9999);                     // bypass the 1000-row PostgREST default cap
-  if (locationId) query = query.eq('location_id', locationId);
-  const { data, error } = await query;
-  if (error) {
-    console.error('[loadInventory] error:', error);
-    return [];
-  }
-  console.log(`[loadInventory] fetched ${data?.length ?? 0} rows`);
-  return Array.isArray(data) ? data.map(mapInventoryToFrontend) : [];
+  const data = await fetchAllRows(
+    (sb) => {
+      let q = sb
+        .from('inventory_items')
+        .select('*')
+        .order('name', { ascending: true }) as any;
+      if (locationId) q = q.eq('location_id', locationId);
+      return q;
+    },
+    1000,
+  );
+  console.log(`[loadInventory] fetched ${data.length} rows${locationId ? ` for location ${locationId}` : ''}`);
+  return data.map(mapInventoryToFrontend);
 }
 
 export async function saveInventory(data: any[]) {
@@ -448,6 +480,7 @@ export interface SaleItem {
   manualPrice:          number | null;   // HQ override
   effectivePrice:       number;          // COALESCE(manualPrice, suggestedPrice)
   stockStatus:          'in_stock' | 'low_stock' | 'out_of_stock';
+  packQty:              number;          // how many base units make up one sellable pack/case; default 1
   createdAt:            string | null;
   updatedAt:            string | null;
 }
@@ -477,6 +510,7 @@ const mapSaleItemToFrontend = (db: any): SaleItem => ({
                           Number(db.instock ?? 0) <= Number(db.par_level ?? 0) ? 'low_stock' :
                           'in_stock'
                         )) as SaleItem['stockStatus'],
+  packQty:              Number(db.pack_qty ?? 1) || 1,  // default 1 if null/0
   createdAt:            db.created_at ?? null,
   updatedAt:            db.updated_at ?? null,
 });
@@ -496,6 +530,9 @@ const mapSaleItemToDB = (item: Partial<SaleItem> & { id: string }) => ({
   source_recipe_yield_qty: isNaN(Number(item.sourceRecipeYieldQty)) ? 1 : Number(item.sourceRecipeYieldQty),
   making_cost:             isNaN(Number(item.makingCost)) ? 0 : Number(item.makingCost),
   manual_price:            item.manualPrice != null ? Number(item.manualPrice) : null,
+  pack_qty:                (item.packQty != null && !isNaN(Number(item.packQty)) && Number(item.packQty) > 0)
+                             ? Number(item.packQty)
+                             : 1,
   // suggested_price is a generated column — never write it
   updated_at:              new Date().toISOString(),
 });
@@ -651,6 +688,7 @@ const SALE_ITEM_COLS = [
   'source_recipe_id', 'source_recipe_yield_qty',
   'making_cost', 'making_cost_updated_at',
   'suggested_price', 'manual_price',
+  'pack_qty',
   'created_at', 'updated_at',
 ].join(',');
 

@@ -29,6 +29,10 @@ export default function Inventory() {
   const [sortKey, setSortKey] = useState<string>("category");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
 
+  // UI-level pagination — does NOT change the Supabase query or loadInventory
+  const ITEMS_PER_PAGE = 50;
+  const [currentPage, setCurrentPage] = useState(1);
+
   // Edit Drawer States
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [selectedItem, setSelectedItem] = useState<any>(null);
@@ -232,6 +236,12 @@ export default function Inventory() {
     }
   }, [searchQuery, filterStatus, filterCategory, filterSupplier]);
 
+  // Reset to page 1 whenever filter/search/sort changes so the user always
+  // sees the first page of results after narrowing the set.
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, filterStatus, filterCategory, filterSupplier, sortKey, sortDirection]);
+
   const getSupplierName = (id: any) => {
     const s = suppliersData.find(s => s.id === id);
     return s ? s.name : "Unknown Vendor";
@@ -327,6 +337,18 @@ export default function Inventory() {
     if (valA > valB) return sortDirection === "asc" ? 1 : -1;
     return 0;
   });
+
+  // ── UI pagination slice ────────────────────────────────────────────────────
+  // filteredInventory retains the full filtered+sorted array for checkbox
+  // "select all" and count displays; only the rendered rows are paged.
+  const totalPages = Math.max(1, Math.ceil(filteredInventory.length / ITEMS_PER_PAGE));
+  const safeCurrentPage = Math.min(currentPage, totalPages);
+  const pageStart = (safeCurrentPage - 1) * ITEMS_PER_PAGE; // 0-based index
+  const pageEnd   = Math.min(pageStart + ITEMS_PER_PAGE, filteredInventory.length);
+  const pagedInventory = filteredInventory.slice(pageStart, pageEnd);
+  // Display labels (1-based)
+  const displayStart = filteredInventory.length === 0 ? 0 : pageStart + 1;
+  const displayEnd   = pageEnd;
 
   const clearFilters = () => {
     setSearchQuery("");
@@ -1669,7 +1691,7 @@ export default function Inventory() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filteredInventory.length > 0 ? filteredInventory.map((item) => {
+              {filteredInventory.length > 0 ? pagedInventory.map((item) => {
                 const stockRatio = item.inStock / item.parLevel;
                 const isCritical = stockRatio < 0.3;
                 const isLowStock = stockRatio >= 0.3 && stockRatio <= 0.7;
@@ -1815,6 +1837,36 @@ export default function Inventory() {
             </TableBody>
           </Table>
           </div>{/* /overflow-x-auto */}
+
+          {/* ── Pagination controls ─────────────────────────────────────── */}
+          <div className="flex items-center justify-between px-4 py-3 border-t border-neutral-100 bg-white">
+            <span className="text-xs text-neutral-500 select-none">
+              {filteredInventory.length === 0
+                ? "No items"
+                : `Showing ${displayStart}–${displayEnd} of ${filteredInventory.length} items`}
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                id="inventory-pagination-prev"
+                onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                disabled={safeCurrentPage <= 1}
+                className="px-3 py-1.5 text-xs font-semibold rounded-md border border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                ← Previous
+              </button>
+              <span className="text-xs text-neutral-500 select-none">
+                Page {safeCurrentPage} of {totalPages}
+              </span>
+              <button
+                id="inventory-pagination-next"
+                onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                disabled={safeCurrentPage >= totalPages}
+                className="px-3 py-1.5 text-xs font-semibold rounded-md border border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                Next →
+              </button>
+            </div>
+          </div>
         </CardContent>
       </Card>
 

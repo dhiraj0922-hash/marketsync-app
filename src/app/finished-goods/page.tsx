@@ -325,7 +325,9 @@ export default function FinishedGoods() {
 
     const ingredientsCheck = recipe.ingredients.map((ing: any) => {
       const rawItem = inventoryData.find(
-        (i: any) => i.id.toString() === ing.inventoryId.toString()
+        (i: any) =>
+          i.id.toString() === ing.inventoryId.toString() ||
+          i.itemId === ing.inventoryId  // itemId is the camelCase field from mapInventoryToFrontend
       );
       const inStock = rawItem ? rawItem.inStock : 0;
 
@@ -426,12 +428,15 @@ export default function FinishedGoods() {
       rowId:         string;
       rawItem:       any;
       normalizedQty: number;
+      isLabourItem:  boolean;  // labour items skip stock deduction but still log movement
     };
     const deductionPlan: DeductionPlan[] = [];
 
     for (const ing of recipe.ingredients) {
       const rawItem = _inv.find(
-        (i: any) => i.id.toString() === ing.inventoryId.toString()
+        (i: any) =>
+          i.id.toString() === ing.inventoryId.toString() ||
+          i.itemId === ing.inventoryId  // itemId is the camelCase field from mapInventoryToFrontend
       );
 
       if (!rawItem) {
@@ -440,6 +445,12 @@ export default function FinishedGoods() {
         );
         continue;
       }
+
+      // Detect labour items by name — they have instock=0 intentionally and
+      // must NOT reduce physical stock, but MUST still enter deductionPlan so
+      // logMovement('production_consumption') fires for them.
+      const _itemNameUpper = (rawItem.name ?? ing.name ?? "").toUpperCase();
+      const isLabourItem = _itemNameUpper.includes("LABOUR") || _itemNameUpper.includes("LABOR");
 
       let normalizedQty = 0;
       try {
@@ -452,12 +463,18 @@ export default function FinishedGoods() {
       }
       if (normalizedQty <= 0) continue;
 
-      deductionPlan.push({ rowId: String(rawItem.id), rawItem, normalizedQty });
+      // Always push into deductionPlan (including labour) so movement log fires.
+      // isLabourItem is carried in the plan entry so step 5a can skip the
+      // physical DB deduction for labour without skipping the movement log.
+      deductionPlan.push({ rowId: String(rawItem.id), rawItem, normalizedQty, isLabourItem });
 
-      // Mirror in _inv so auto-fulfill FG stock math (step 4) stays correct
-      const idx = _inv.findIndex((i: any) => i.id.toString() === rawItem.id.toString());
-      if (idx !== -1) {
-        _inv[idx].inStock = Math.max(0, _inv[idx].inStock - normalizedQty);
+      // Mirror in _inv for auto-fulfill FG stock math — skip for labour
+      // (instock is intentionally 0; mirroring a deduction is a no-op).
+      if (!isLabourItem) {
+        const idx = _inv.findIndex((i: any) => i.id.toString() === rawItem.id.toString());
+        if (idx !== -1) {
+          _inv[idx].inStock = Math.max(0, _inv[idx].inStock - normalizedQty);
+        }
       }
     }
 
@@ -553,10 +570,18 @@ export default function FinishedGoods() {
     // ── 5a. Deduct ingredients from inventory_items (BOTH paths) ────────────
     //
     // Each call is an atomic read-modify-write UPDATE on inventory_items.
-    // This is the write that was missing for isHqItem items.
+    // Labour items (isLabourItem=true) are skipped here — their instock is
+    // intentionally 0 and must not be touched. They still appear in
+    // deductionPlan so that logMovement fires for them in step 6.
     //
     const failedDeductions: string[] = [];
     for (const plan of deductionPlan) {
+      if (plan.isLabourItem) {
+        console.log(
+          `[Production] labour item "${plan.rawItem.name}" — skipping stock deduction, movement will still be logged`
+        );
+        continue;
+      }
       console.log(
         `[Production] deducting: ${plan.rawItem.name} (id=${plan.rowId}) × ${plan.normalizedQty} ${plan.rawItem.unit}`
       );

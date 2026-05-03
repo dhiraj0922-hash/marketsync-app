@@ -148,6 +148,7 @@ function HQSaleItemsContent() {
   const [formParLevel, setFormParLevel]       = useState<number>(0);
   const [formManualPrice, setFormManualPrice] = useState<string>("");
   const [formRecipeId, setFormRecipeId]       = useState<string>("");
+  const [formPackQty, setFormPackQty]         = useState<number>(1);
   const [formActive, setFormActive]           = useState(true);
   const [formRequisitionable, setFormRequisitionable] = useState(true);
 
@@ -190,7 +191,7 @@ function HQSaleItemsContent() {
   const openCreate = () => {
     setEditing(null);
     setFormName(""); setFormCategory(""); setFormCommissary("Commissary HQ"); setFormDesc(""); setFormUnit("ea");
-    setFormParLevel(0); setFormManualPrice(""); setFormRecipeId("");
+    setFormParLevel(0); setFormManualPrice(""); setFormRecipeId(""); setFormPackQty(1);
     setFormActive(true); setFormRequisitionable(true);
     setLocationPricing([]);
     setNewPricingLocId(""); setNewPricingPrice(""); setNewPricingNotes("");
@@ -208,6 +209,7 @@ function HQSaleItemsContent() {
     setFormParLevel(item.parLevel);
     setFormManualPrice(item.manualPrice != null ? String(item.manualPrice) : "");
     setFormRecipeId(item.sourceRecipeId ?? "");
+    setFormPackQty(item.packQty ?? 1);
     setFormActive(item.isActive);
     setFormRequisitionable(item.isRequisitionable);
     setNewPricingLocId(""); setNewPricingPrice(""); setNewPricingNotes("");
@@ -270,6 +272,7 @@ function HQSaleItemsContent() {
         sourceRecipeYieldQty: sourceYieldQty,
         makingCost,
         manualPrice,
+        packQty:              formPackQty > 0 ? formPackQty : 1,
         instock:              editing?.instock ?? 0,
         suggestedPrice:       0,
         effectivePrice:       0,
@@ -474,7 +477,9 @@ function HQSaleItemsContent() {
                 <TableHead className="py-3">Commissary</TableHead>
                 <TableHead className="py-3">Unit</TableHead>
                 <TableHead className="py-3">Making Cost</TableHead>
-                <TableHead className="py-3">Effective Price</TableHead>
+                <TableHead className="py-3">Unit Sale Price</TableHead>
+                <TableHead className="py-3">Pack Qty</TableHead>
+                <TableHead className="py-3">Effective Pack Price</TableHead>
                 <TableHead className="py-3">Stock</TableHead>
                 <TableHead className="py-3">Status</TableHead>
                 <TableHead className="py-3 text-right px-6">Actions</TableHead>
@@ -522,11 +527,37 @@ function HQSaleItemsContent() {
                         ? <><span className="font-medium text-neutral-800">${item.makingCost.toFixed(2)}</span><span className="text-neutral-400">/{item.baseUnit}</span></>
                         : <span className="text-neutral-300">—</span>}
                     </TableCell>
+                    {/* Unit Sale Price (per base unit) */}
                     <TableCell className="py-4">
                       <span className="font-bold text-success-700 text-sm">
                         ${item.effectivePrice.toFixed(2)}
                         <span className="text-neutral-400 font-normal">/{item.baseUnit}</span>
                       </span>
+                    </TableCell>
+                    {/* Pack Qty */}
+                    <TableCell className="py-4 text-sm text-neutral-700">
+                      {item.packQty > 1 ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200">
+                          {item.packQty} {item.baseUnit}
+                        </span>
+                      ) : (
+                        <span className="text-neutral-400 text-xs">1 (unit)</span>
+                      )}
+                    </TableCell>
+                    {/* Effective Pack Price = unitPrice × packQty */}
+                    <TableCell className="py-4">
+                      {(() => {
+                        const packQty = item.packQty > 0 ? item.packQty : 1;
+                        const packPrice = item.effectivePrice * packQty;
+                        return packQty > 1 ? (
+                          <span className="font-bold text-brand-700 text-sm">
+                            ${packPrice.toFixed(2)}
+                            <span className="text-neutral-400 font-normal">/pack</span>
+                          </span>
+                        ) : (
+                          <span className="text-neutral-400 text-xs">same as unit</span>
+                        );
+                      })()}
                     </TableCell>
                     <TableCell className="py-4">
                       <div className="flex flex-col gap-1">
@@ -563,7 +594,7 @@ function HQSaleItemsContent() {
                 );
               }) : (
                 <TableRow>
-                  <TableCell colSpan={9} className="text-center py-12 text-neutral-400 text-sm">
+                  <TableCell colSpan={11} className="text-center py-12 text-neutral-400 text-sm">
                     {search || filterCategory !== "All" || filterCommissary !== "All"
                       ? "No finished goods match your filters."
                       : "No finished goods yet. Create your first one to make it available for franchise locations to requisition."}
@@ -740,8 +771,8 @@ function HQSaleItemsContent() {
             />
           </div>
 
-          {/* Unit + Par Level */}
-          <div className="grid grid-cols-2 gap-3">
+          {/* Unit + Par Level + Pack Qty */}
+          <div className="grid grid-cols-3 gap-3">
             <div>
               <label className="block text-xs font-semibold text-neutral-600 uppercase tracking-wider mb-1.5">Base Unit</label>
               <select
@@ -764,7 +795,42 @@ function HQSaleItemsContent() {
                 className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
               />
             </div>
+            <div>
+              <label className="block text-xs font-semibold text-neutral-600 uppercase tracking-wider mb-1.5">
+                Pack Qty
+                <span className="ml-1 text-neutral-400 font-normal normal-case">({formUnit}s / pack)</span>
+              </label>
+              <input
+                type="number"
+                min={1}
+                step={1}
+                value={formPackQty}
+                onChange={e => setFormPackQty(Math.max(1, Number(e.target.value) || 1))}
+                className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
+              />
+            </div>
           </div>
+
+          {/* Pack price preview */}
+          {formPackQty > 1 && (() => {
+            const linked = recipes.find(r => r.id === formRecipeId);
+            const yieldQty = linked?.yieldQty || 1;
+            const makingCost = linked ? (linked.theoreticalCost || 0) / yieldQty : (editing?.makingCost ?? 0);
+            const manualP = formManualPrice !== "" && !isNaN(parseFloat(formManualPrice)) ? parseFloat(formManualPrice) : null;
+            const unitPrice = manualP ?? (makingCost * 1.20);
+            const packPrice = unitPrice * formPackQty;
+            if (unitPrice > 0) return (
+              <div className="flex items-center justify-between bg-blue-50 border border-blue-100 rounded-lg px-4 py-2.5 text-xs">
+                <span className="text-blue-700">
+                  <strong>${unitPrice.toFixed(2)}</strong>/{formUnit} × <strong>{formPackQty}</strong> {formUnit}s
+                </span>
+                <span className="font-bold text-blue-900 text-sm">
+                  = ${packPrice.toFixed(2)} / pack
+                </span>
+              </div>
+            );
+            return null;
+          })()}
 
           {/* Linked recipe */}
           <div>

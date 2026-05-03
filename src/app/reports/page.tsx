@@ -9,6 +9,7 @@ import {
   getInventoryMovementReport,
   getFulfillmentProfitReport,
   deriveMarginInsights,
+  isLabourItem,
   type CogsReport,
   type MovementReport,
   type ProfitReport,
@@ -18,6 +19,7 @@ import {
 import {
   TrendingDown, TrendingUp, ArrowLeftRight, AlertTriangle,
   BarChart3, Loader2, RefreshCw, ChevronDown, Filter, DollarSign,
+  HardHat, Clock,
 } from "lucide-react";
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -75,7 +77,7 @@ export default function ReportsPage() {
   );
 }
 
-type Tab = "cogs" | "movement" | "profit";
+type Tab = "cogs" | "movement" | "profit" | "labour";
 
 function ReportsContent() {
   const [tab, setTab]               = useState<Tab>("cogs");
@@ -88,6 +90,7 @@ function ReportsContent() {
   const [cogsReport,    setCogsReport]    = useState<CogsReport    | null>(null);
   const [movReport,     setMovReport]     = useState<MovementReport | null>(null);
   const [profitReport,  setProfitReport]  = useState<ProfitReport  | null>(null);
+  const [labourReport,  setLabourReport]  = useState<MovementReport | null>(null);
   const [loading,       setLoading]       = useState(false);
   const [error,         setError]         = useState<string | null>(null);
 
@@ -109,6 +112,33 @@ function ReportsContent() {
         bucket: (movBucket as ReportBucket) || null,
       });
       if (e) setError(e); else setMovReport(data);
+    } else if (tab === "labour") {
+      // Fetch the full movement ledger (no bucket filter — production_consumption
+      // maps to the 'cogs' bucket but we want to be sure we catch all rows),
+      // then filter client-side to labour items only.
+      const { data, error: e } = await getInventoryMovementReport({ ...f, bucket: null });
+      if (e) {
+        setError(e);
+      } else if (data) {
+        const labourRows = data.rows.filter(
+          r => r.movement_type === "production_consumption" && isLabourItem(r.item_name)
+        );
+        let totalInValue  = 0;
+        let totalOutValue = 0;
+        const byBucket: Partial<Record<ReportBucket, number>> = {};
+        for (const r of labourRows) {
+          if (r.signed_cost >= 0) totalInValue  += r.signed_cost;
+          else                    totalOutValue += Math.abs(r.signed_cost);
+          byBucket[r.report_bucket] = (byBucket[r.report_bucket] ?? 0) + Math.abs(r.total_cost);
+        }
+        setLabourReport({
+          rows: labourRows,
+          totalInValue,
+          totalOutValue,
+          totalNetValue: totalInValue - totalOutValue,
+          byBucket,
+        });
+      }
     } else {
       const { data, error: e } = await getFulfillmentProfitReport(f);
       if (e) setError(e); else setProfitReport(data);
@@ -127,7 +157,8 @@ function ReportsContent() {
   const empty =
     (tab === "cogs"     && cogsReport    && cogsReport.rows.length    === 0) ||
     (tab === "movement" && movReport     && movReport.rows.length     === 0) ||
-    (tab === "profit"   && profitReport  && profitReport.rows.length  === 0);
+    (tab === "profit"   && profitReport  && profitReport.rows.length  === 0) ||
+    (tab === "labour"   && labourReport  && labourReport.rows.length  === 0);
 
   return (
     <div className="space-y-6">
@@ -139,7 +170,7 @@ function ReportsContent() {
 
       {/* ── Tabs */}
       <div className="flex gap-1 bg-neutral-100 p-1 rounded-xl w-fit">
-        {(["cogs", "movement", "profit"] as Tab[]).map(t => (
+        {(["cogs", "movement", "profit", "labour"] as Tab[]).map(t => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -147,7 +178,7 @@ function ReportsContent() {
               tab === t ? "bg-white text-brand-700 shadow-sm" : "text-neutral-500 hover:text-neutral-800"
             }`}
           >
-            {t === "cogs" ? "COGS" : t === "movement" ? "Movement Ledger" : "Profit"}
+            {t === "cogs" ? "COGS" : t === "movement" ? "Movement Ledger" : t === "profit" ? "Profit" : "Labour"}
           </button>
         ))}
       </div>
@@ -260,6 +291,11 @@ function ReportsContent() {
         <ProfitView report={profitReport} locName={locName} />
       )}
 
+      {/* ── Labour tab */}
+      {!loading && tab === "labour" && labourReport && labourReport.rows.length > 0 && (
+        <LabourView report={labourReport} locName={locName} />
+      )}
+
       {/* ── Empty state */}
       {!loading && !error && empty && (
         <div className="py-16 text-center text-neutral-400 text-sm">
@@ -271,18 +307,22 @@ function ReportsContent() {
   );
 }
 
-// ─── COGS view ────────────────────────────────────────────────────────────────
+// ─── COGS view ──────────────────────────────────────────────────────────────────
 
 function CogsView({ report, locName }: { report: CogsReport; locName: (id: string | null) => string }) {
   return (
     <div className="space-y-4">
+      {/* 3-card split: Ingredient / Labour / Total */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <SummaryCard icon={<TrendingDown className="h-5 w-5 text-red-500" />}
-          label="Total COGS" value={$(report.totalCogs)} sub={`${report.rows.length} line items`} accent="red" />
-        <SummaryCard icon={<BarChart3 className="h-5 w-5 text-brand-500" />}
-          label="Total Qty Consumed" value={qty(report.totalQty)} sub="across all items" accent="brand" />
-        <SummaryCard icon={<BarChart3 className="h-5 w-5 text-neutral-500" />}
-          label="Unique Items" value={String(Object.keys(report.byItem).length)} sub="in period" accent="neutral" />
+        <SummaryCard icon={<TrendingDown className="h-5 w-5 text-orange-500" />}
+          label="Ingredient Cost" value={$(report.ingredientCogs)}
+          sub={`${report.rows.filter(r => !r.is_labour).length} ingredient lines`} accent="red" />
+        <SummaryCard icon={<TrendingDown className="h-5 w-5 text-violet-500" />}
+          label="Labour Cost" value={$(report.labourCogs)}
+          sub={report.labourCogs > 0 ? `${report.rows.filter(r => r.is_labour).length} labour lines` : "no labour rows yet"}
+          accent={report.labourCogs > 0 ? "neutral" : "neutral"} />
+        <SummaryCard icon={<BarChart3 className="h-5 w-5 text-red-600" />}
+          label="Total COGS" value={$(report.totalCogs)} sub={`${report.rows.length} total lines`} accent="red" />
       </div>
 
       <Card className="shadow-sm">
@@ -293,7 +333,7 @@ function CogsView({ report, locName }: { report: CogsReport; locName: (id: strin
           <table className="w-full text-sm">
             <thead className="bg-neutral-50 border-b border-neutral-100">
               <tr>
-                {["Date", "Location", "Item", "Qty", "COGS Value"].map(h => (
+                {["Date", "Location", "Item", "Type", "Qty", "COGS Value"].map(h => (
                   <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-neutral-500 uppercase tracking-wider">{h}</th>
                 ))}
               </tr>
@@ -304,6 +344,13 @@ function CogsView({ report, locName }: { report: CogsReport; locName: (id: strin
                   <td className="px-4 py-2.5 font-mono text-xs text-neutral-700">{r.movement_date}</td>
                   <td className="px-4 py-2.5 text-neutral-600">{locName(r.location_id)}</td>
                   <td className="px-4 py-2.5 font-medium text-neutral-900">{r.item_name ?? r.item_id ?? "—"}</td>
+                  <td className="px-4 py-2.5">
+                    {r.is_labour ? (
+                      <span className="inline-flex px-2 py-0.5 rounded text-[10px] font-semibold border bg-violet-50 text-violet-700 border-violet-200">Labour</span>
+                    ) : (
+                      <span className="inline-flex px-2 py-0.5 rounded text-[10px] font-semibold border bg-orange-50 text-orange-700 border-orange-200">Ingredient</span>
+                    )}
+                  </td>
                   <td className="px-4 py-2.5 tabular-nums text-neutral-700">{qty(r.total_qty)}</td>
                   <td className="px-4 py-2.5 tabular-nums font-semibold text-red-700">{$(r.cogs_value)}</td>
                 </tr>
@@ -311,7 +358,7 @@ function CogsView({ report, locName }: { report: CogsReport; locName: (id: strin
             </tbody>
             <tfoot className="bg-neutral-50 border-t border-neutral-200">
               <tr>
-                <td colSpan={4} className="px-4 py-2.5 text-xs font-bold text-neutral-600 uppercase tracking-wider">Total</td>
+                <td colSpan={5} className="px-4 py-2.5 text-xs font-bold text-neutral-600 uppercase tracking-wider">Total</td>
                 <td className="px-4 py-2.5 font-bold text-red-700 tabular-nums">{$(report.totalCogs)}</td>
               </tr>
             </tfoot>
@@ -322,7 +369,7 @@ function CogsView({ report, locName }: { report: CogsReport; locName: (id: strin
   );
 }
 
-// ─── Movement view ────────────────────────────────────────────────────────────
+// ─── Movement view ──────────────────────────────────────────────────────────────────
 
 function MovementView({ report, locName }: { report: MovementReport; locName: (id: string | null) => string }) {
   return (
@@ -416,21 +463,28 @@ function ProfitView({ report, locName }: { report: ProfitReport; locName: (id: s
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         <SummaryCard
           icon={<DollarSign className="h-5 w-5 text-green-600" />}
-          label="Total Revenue"  value={$(report.totalRevenue)}
-          sub={`${report.rows.length} fulfillment lines`}  accent="green" />
+          label="Total Revenue"
+          value={$(report.totalRevenue)}
+          sub={`${report.rows.length} fulfillment lines`}
+          accent="green" />
         <SummaryCard
           icon={<TrendingDown className="h-5 w-5 text-red-500" />}
-          label="Total COGS"     value={$(report.totalCogs)}
-          sub="production cost"                            accent="red" />
+          label="Total Making Cost"
+          value={$(report.totalCogs)}
+          sub="incl. labour in recipe cost"
+          accent="red" />
         <SummaryCard
           icon={<TrendingUp className="h-5 w-5 text-brand-500" />}
-          label="Gross Profit"   value={$(report.totalProfit)}
+          label="Gross Profit"
+          value={$(report.totalProfit)}
           sub={report.totalProfit >= 0 ? "net gain" : "net loss"}
           accent={report.totalProfit >= 0 ? "green" : "red"} />
         <SummaryCard
           icon={<BarChart3 className="h-5 w-5 text-neutral-500" />}
-          label="Avg Margin"     value={avgDisplay}
-          sub="weighted by revenue"                        accent="neutral" />
+          label="Avg Margin"
+          value={avgDisplay}
+          sub="weighted by revenue"
+          accent="neutral" />
       </div>
 
       {/* Top & Worst margin items — shown only when enough distinct items exist */}
@@ -561,6 +615,105 @@ function ProfitView({ report, locName }: { report: ProfitReport; locName: (id: s
                 <td className="px-4 py-2.5 font-bold text-neutral-700 tabular-nums">
                   {report.avgMarginPct != null ? `${fmt(report.avgMarginPct)}%` : "—"}
                 </td>
+              </tr>
+            </tfoot>
+          </table>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// ─── Labour view ─────────────────────────────────────────────────────────────
+// Shows only production_consumption rows for labour items (LABOUR/LABOR in name).
+// Does NOT modify COGS/profit math — purely a visibility layer over existing data.
+
+function LabourView({ report, locName }: { report: MovementReport; locName: (id: string | null) => string }) {
+  const totalLabourCost = report.rows.reduce((s, r) => s + Math.abs(r.total_cost), 0);
+  const totalLabourQty  = report.rows.reduce((s, r) => s + r.quantity, 0);
+  const avgRate         = totalLabourQty > 0 ? totalLabourCost / totalLabourQty : 0;
+
+  return (
+    <div className="space-y-4">
+      {/* ── Summary cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <SummaryCard
+          icon={<HardHat className="h-5 w-5 text-violet-500" />}
+          label="Total Labour Cost"
+          value={`$${totalLabourCost.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+          sub={`${report.rows.length} labour movement${report.rows.length !== 1 ? "s" : ""}`}
+          accent="neutral" />
+        <SummaryCard
+          icon={<Clock className="h-5 w-5 text-violet-400" />}
+          label="Total Labour Hours / Units"
+          value={totalLabourQty.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}
+          sub="sum of logged quantities"
+          accent="neutral" />
+        <SummaryCard
+          icon={<TrendingUp className="h-5 w-5 text-violet-600" />}
+          label="Avg Labour Rate"
+          value={`$${avgRate.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} / unit`}
+          sub="total cost ÷ total qty"
+          accent="neutral" />
+      </div>
+
+      {/* ── Detail table */}
+      <Card className="shadow-sm">
+        <CardHeader className="pb-3">
+          <div className="flex items-center gap-2">
+            <HardHat className="h-4 w-4 text-violet-500" />
+            <p className="text-sm font-semibold text-neutral-700">Labour Detail — Production Consumption</p>
+          </div>
+          <p className="text-xs text-neutral-400 mt-0.5">
+            Rows filtered to <span className="font-mono">movement_type = 'production_consumption'</span> where item name contains LABOUR / LABOR.
+            Existing COGS and profit figures are unchanged.
+          </p>
+        </CardHeader>
+        <CardContent className="p-0 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-neutral-50 border-b border-neutral-100">
+              <tr>
+                {["Date", "Location", "Labour Item", "Qty / Hrs", "Unit Rate", "Total Cost", "Production Ref", "Notes"].map(h => (
+                  <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-neutral-500 uppercase tracking-wider whitespace-nowrap">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-neutral-50">
+              {report.rows.map(r => (
+                <tr key={r.id} className="hover:bg-violet-50/30">
+                  <td className="px-4 py-2.5 font-mono text-xs text-neutral-700 whitespace-nowrap">{r.movement_date}</td>
+                  <td className="px-4 py-2.5 text-neutral-600 whitespace-nowrap">{locName(r.location_id)}</td>
+                  <td className="px-4 py-2.5">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-flex px-2 py-0.5 rounded text-[10px] font-semibold border bg-violet-50 text-violet-700 border-violet-200">Labour</span>
+                      <span className="font-medium text-neutral-900">{r.item_name ?? r.item_id ?? "—"}</span>
+                    </div>
+                  </td>
+                  <td className="px-4 py-2.5 tabular-nums text-neutral-700">
+                    {r.quantity.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}
+                  </td>
+                  <td className="px-4 py-2.5 tabular-nums text-neutral-500">
+                    ${r.unit_cost.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </td>
+                  <td className="px-4 py-2.5 tabular-nums font-semibold text-violet-700">
+                    ${Math.abs(r.total_cost).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </td>
+                  <td className="px-4 py-2.5 text-xs text-neutral-400 font-mono whitespace-nowrap">
+                    {r.reference_id ?? r.reference_type ?? "—"}
+                  </td>
+                  <td className="px-4 py-2.5 text-xs text-neutral-500 max-w-[200px] truncate" title={r.notes ?? ""}>
+                    {r.notes ?? "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot className="bg-neutral-50 border-t border-neutral-200">
+              <tr>
+                <td colSpan={5} className="px-4 py-2.5 text-xs font-bold text-neutral-600 uppercase tracking-wider">Total</td>
+                <td className="px-4 py-2.5 font-bold text-violet-700 tabular-nums">
+                  ${totalLabourCost.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </td>
+                <td colSpan={2} />
               </tr>
             </tfoot>
           </table>

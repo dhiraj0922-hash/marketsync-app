@@ -36,6 +36,15 @@ export type ReportBucket =
   | "return_out"
   | "other";
 
+// ─── Labour detection ─────────────────────────────────────────────────────────
+// Labour items are regular inventory_items named LABOUR*/LABOR* (case-insensitive).
+// No schema change needed — we match on item_name at report time.
+export function isLabourItem(name: string | null | undefined): boolean {
+  if (!name) return false;
+  const u = name.toUpperCase();
+  return u.includes("LABOUR") || u.includes("LABOR");
+}
+
 // ─── COGS ─────────────────────────────────────────────────────────────────────
 
 export interface CogsRow {
@@ -45,14 +54,17 @@ export interface CogsRow {
   item_name:     string | null;
   total_qty:     number;
   cogs_value:    number;
+  is_labour:     boolean;  // derived client-side
 }
 
 export interface CogsReport {
-  rows:      CogsRow[];
-  totalCogs: number;
-  totalQty:  number;
-  byDate:    Record<string, number>;   // date → cogs_value
-  byItem:    Record<string, number>;   // item_name → cogs_value
+  rows:           CogsRow[];
+  totalCogs:      number;
+  totalQty:       number;
+  labourCogs:     number;   // Σ cogs_value where item_name contains LABOUR/LABOR
+  ingredientCogs: number;   // totalCogs - labourCogs
+  byDate:         Record<string, number>;   // date → cogs_value
+  byItem:         Record<string, number>;   // item_name → cogs_value
 }
 
 export async function getCogsReport(
@@ -76,10 +88,13 @@ export async function getCogsReport(
     item_name:     r.item_name     ?? null,
     total_qty:     Number(r.total_qty  ?? 0),
     cogs_value:    Number(r.cogs_value ?? 0),
+    is_labour:     isLabourItem(r.item_name),
   }));
 
-  const totalCogs = rows.reduce((s, r) => s + r.cogs_value, 0);
-  const totalQty  = rows.reduce((s, r) => s + r.total_qty,  0);
+  const totalCogs     = rows.reduce((s, r) => s + r.cogs_value, 0);
+  const totalQty      = rows.reduce((s, r) => s + r.total_qty,  0);
+  const labourCogs    = rows.filter(r => r.is_labour).reduce((s, r) => s + r.cogs_value, 0);
+  const ingredientCogs = totalCogs - labourCogs;
   const byDate:   Record<string, number> = {};
   const byItem:   Record<string, number> = {};
   for (const r of rows) {
@@ -88,7 +103,7 @@ export async function getCogsReport(
     byItem[k] = (byItem[k] ?? 0) + r.cogs_value;
   }
 
-  return { data: { rows, totalCogs, totalQty, byDate, byItem }, error: null };
+  return { data: { rows, totalCogs, totalQty, labourCogs, ingredientCogs, byDate, byItem }, error: null };
 }
 
 // ─── Inventory Movement ───────────────────────────────────────────────────────
