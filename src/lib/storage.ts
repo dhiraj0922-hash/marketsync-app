@@ -822,6 +822,58 @@ export async function updateSaleItemCost(
 }
 
 /**
+ * syncLinkedFgCost — called after every recipe upsert.
+ *
+ * Finds all hq_sale_items rows whose source_recipe_id matches the saved recipe,
+ * then patches:
+ *   making_cost             = theoreticalCost / yieldQty   (per-unit cost)
+ *   source_recipe_yield_qty = yieldQty
+ *   making_cost_updated_at  = now()
+ *
+ * Intentionally does NOT touch manual_price, instock, or any other field.
+ * suggested_price is a GENERATED column in Postgres (making_cost * 1.20) —
+ * it auto-updates whenever making_cost changes, no extra write needed.
+ *
+ * Returns a summary so callers can log without importing Supabase directly.
+ */
+export async function syncLinkedFgCost(recipe: {
+  id:              string;
+  theoreticalCost: number;
+  yieldQty:        number;
+}): Promise<{ updated: number; errors: number; ids: string[] }> {
+  const safeYield = recipe.yieldQty > 0 ? recipe.yieldQty : 1;
+  const makingCostPerUnit = recipe.theoreticalCost / safeYield;
+
+  // 1. Find all linked sale items
+  const { data: linked, error: fetchErr } = await supabase
+    .from('hq_sale_items')
+    .select('id')
+    .eq('source_recipe_id', recipe.id);
+
+  if (fetchErr || !linked || linked.length === 0) {
+    if (fetchErr) console.warn('[syncLinkedFgCost] lookup error', fetchErr);
+    return { updated: 0, errors: fetchErr ? 1 : 0, ids: [] };
+  }
+
+  // 2. Patch each linked sale item in parallel
+  const results = await Promise.all(
+    linked.map(row => updateSaleItemCost(row.id, makingCostPerUnit, safeYield))
+  );
+
+  const ids     = linked.map(r => r.id);
+  const errors  = results.filter(r => !r.success).length;
+  const updated = results.filter(r =>  r.success).length;
+
+  if (errors > 0) {
+    console.warn('[syncLinkedFgCost] partial failure', { updated, errors, ids });
+  } else {
+    console.debug('[syncLinkedFgCost] synced', { updated, ids, makingCostPerUnit });
+  }
+
+  return { updated, errors, ids };
+}
+
+/**
  * Adjust instock on a sale item.
  * delta > 0: production adds stock
  * delta < 0: fulfillment deducts stock

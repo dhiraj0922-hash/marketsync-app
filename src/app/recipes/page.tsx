@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
-import { loadRecipes, saveRecipes, loadInventory, saveInventory, upsertRecipe, updateInventoryItemCost, loadSuppliers, deleteRecipe } from "@/lib/storage";
+import { loadRecipes, saveRecipes, loadInventory, saveInventory, upsertRecipe, updateInventoryItemCost, syncLinkedFgCost, loadSuppliers, deleteRecipe } from "@/lib/storage";
 import { InventoryEditDrawer } from "@/components/InventoryEditDrawer";
 
 import { normalizeUnit, canonicalizeUnit, resolveEffectiveBaseUom, computeBaseUnitCostFromPack, auditItemUnitAmbiguity } from "@/lib/units";
@@ -417,10 +417,9 @@ function RecipesPageContent() {
         return [recipeData, ...prev];
       });
 
-      // ── Step 2 (non-blocking): patch output inventory item cost ──────────────
-      // This runs AFTER the drawer closes — recipe is already saved above.
-      // Awaiting this was adding sequential latency to every save unnecessarily.
-      // Any failure is logged to console; user sees the recipe was saved correctly.
+      // ── Step 2a (non-blocking): patch output inventory item cost ─────────────
+      // Patches the raw inventory_items cost for any linked Physical Output Item.
+      // Does NOT affect hq_sale_items — that's Step 2b below.
       if (outputItemId) {
         const invItem = inventory.find(i =>
           (i.itemId && i.itemId.toString() === outputItemId.toString()) ||
@@ -441,13 +440,46 @@ function RecipesPageContent() {
             if (!invRes.success) {
               console.warn("[saveRecipe] inventory cost patch failed:", invRes.error);
             } else {
-              console.debug(`[saveRecipe] step 2 (bg) done in ${Date.now() - t0}ms`);
+              console.debug(`[saveRecipe] step 2a (bg) done in ${Date.now() - t0}ms`);
             }
           }).catch(err => {
             console.warn("[saveRecipe] inventory cost patch error:", err?.message);
           });
         }
       }
+
+      // ── Step 2b (non-blocking): sync making_cost on linked hq_sale_items ─────
+      // Finds all hq_sale_items where source_recipe_id = recipeData.id and
+      // patches making_cost = theoreticalCost / yieldQty.
+      //
+      // Guarantees:
+      //   • manual_price is NEVER overwritten (enforced inside syncLinkedFgCost)
+      //   • suggested_price auto-updates in Postgres (it's a GENERATED column)
+      //   • instock is never touched
+      //   • Failures are logged but never surface as user-visible errors
+      withTimeout(
+        syncLinkedFgCost({
+          id:              recipeData.id,
+          theoreticalCost: cost,
+          yieldQty,
+        }),
+        15_000,
+        "FG cost sync timed out"
+      ).then(syncRes => {
+        if (syncRes.updated > 0) {
+          console.debug(
+            `[saveRecipe] step 2b (bg): synced making_cost on ${syncRes.updated} FG(s)`,
+            syncRes.ids
+          );
+        } else if (syncRes.errors > 0) {
+          console.warn('[saveRecipe] step 2b (bg): FG cost sync had errors', syncRes);
+        } else {
+          // No linked FGs — that's fine, recipe may not be linked to any sale item yet
+          console.debug('[saveRecipe] step 2b (bg): no linked FGs for this recipe');
+        }
+      }).catch(err => {
+        console.warn('[saveRecipe] step 2b (bg): FG cost sync exception', err?.message);
+      });
 
       console.debug(`[saveRecipe] COMPLETE in ${Date.now() - t0}ms (drawer closing)`);
       setIsBuilderOpen(false);
