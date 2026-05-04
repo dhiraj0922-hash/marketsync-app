@@ -53,8 +53,9 @@ interface LineItemDraft {
   finishedGoodId:    string | null;
   itemName:          string;         // snapshot: captured at selection time
   unit:              string;         // snapshot: captured at selection time
-  unitPrice:         number;         // effective_price at selection time
-  quantityRequested: number;
+  packQty:           number;         // how many base units per pack; 1 for single-unit items
+  unitPrice:         number;         // pack price = effectivePrice * packQty (captured at selection)
+  quantityRequested: number;         // number of packs (or units when packQty=1)
   sourceCommissary:  string;         // snapshot: which commissary fulfills this line
 }
 
@@ -179,6 +180,10 @@ function LocationManagerView({
       const saleItem = saleItems.find(s => s.id === selectedItemId);
       if (!saleItem) return;
       if (lineItems.some(li => li.finishedGoodId === saleItem.id)) return; // dedupe
+      // packQty is how many base units make one sellable pack (default 1)
+      const packQty = (saleItem.packQty != null && saleItem.packQty > 0) ? saleItem.packQty : 1;
+      // Store the PACK price so requisition totals match what the location pays per pack
+      const packPrice = saleItem.effectivePrice * packQty;
       setLineItems(prev => [
         ...prev,
         {
@@ -186,8 +191,9 @@ function LocationManagerView({
           finishedGoodId:    saleItem.id,
           itemName:          saleItem.name,               // snapshot
           unit:              saleItem.baseUnit,            // snapshot
-          unitPrice:         saleItem.effectivePrice,      // price captured at selection time
-          quantityRequested: selectedQty,
+          packQty,                                         // snapshot: units-per-pack
+          unitPrice:         packPrice,                    // pack price captured at selection time
+          quantityRequested: selectedQty,                  // qty = number of packs
           sourceCommissary:  saleItem.sourceCommissary,   // commissary snapshot
         },
       ]);
@@ -203,6 +209,7 @@ function LocationManagerView({
           finishedGoodId:    null,
           itemName:          inv.name,
           unit:              inv.unit || inv.baseUnit || "",
+          packQty:           1,                           // raw items always 1 unit
           unitPrice:         Number(inv.cost ?? 0),
           quantityRequested: selectedQty,
           sourceCommissary:  "Commissary HQ",   // raw items always route to HQ
@@ -443,8 +450,8 @@ function LocationManagerView({
                   <TableHeader className="bg-neutral-50 text-[11px] uppercase text-neutral-500 tracking-wider">
                     <TableRow>
                       <TableHead className="py-2 px-4">Item</TableHead>
-                      <TableHead className="py-2">Requested</TableHead>
-                      <TableHead className="py-2">Unit Price</TableHead>
+                      <TableHead className="py-2">Qty (packs)</TableHead>
+                      <TableHead className="py-2">Unit/Pack Price</TableHead>
                       <TableHead className="py-2 text-right">Line Total</TableHead>
                       <TableHead className="py-2">Approved</TableHead>
                       <TableHead className="py-2">Fulfilled</TableHead>
@@ -588,15 +595,22 @@ function LocationManagerView({
                     {saleItems
                       .filter(s => s.isActive && s.isRequisitionable)
                       .filter(s => !lineItems.some(li => li.finishedGoodId === s.id))
-                      .map(s => (
-                        <option key={s.id} value={s.id}>
-                          {s.name} ({s.baseUnit}) — ${s.effectivePrice.toFixed(2)}/{s.baseUnit} · {(
-                            s.stockStatus === 'in_stock'     ? '✓ In Stock'    :
-                            s.stockStatus === 'low_stock'    ? '⚠ Low Stock'  :
-                                                               '✗ Out of Stock'
-                          )}
-                        </option>
-                      ))}
+                      .map(s => {
+                        const pQty = (s.packQty != null && s.packQty > 0) ? s.packQty : 1;
+                        const packPrice = s.effectivePrice * pQty;
+                        const packLabel = pQty > 1
+                          ? `${pQty} ${s.baseUnit}/pack — $${packPrice.toFixed(2)}/pack`
+                          : `$${s.effectivePrice.toFixed(2)}/${s.baseUnit}`;
+                        const stockLabel =
+                          s.stockStatus === 'in_stock'  ? '✓ In Stock'   :
+                          s.stockStatus === 'low_stock' ? '⚠ Low Stock' :
+                                                          '✗ Out of Stock';
+                        return (
+                          <option key={s.id} value={s.id}>
+                            {s.name} — {packLabel} · {stockLabel}
+                          </option>
+                        );
+                      })}
                   </>
                 ) : (
                   <>
@@ -642,8 +656,8 @@ function LocationManagerView({
                     <TableRow>
                       <TableHead className="py-2 px-4">Item</TableHead>
                       <TableHead className="py-2">Commissary</TableHead>
-                      <TableHead className="py-2">Qty</TableHead>
-                      <TableHead className="py-2 text-right">Unit Price</TableHead>
+                      <TableHead className="py-2">Qty (packs)</TableHead>
+                      <TableHead className="py-2 text-right">Pack/Unit Price</TableHead>
                       <TableHead className="py-2 text-right">Line Total</TableHead>
                       <TableHead className="py-2 w-10" />
                     </TableRow>
@@ -652,8 +666,16 @@ function LocationManagerView({
                     {lineItems.map((li) => (
                       <TableRow key={li.finishedGoodId ?? li.itemId}>
                         <TableCell className="py-2 px-4 text-sm font-medium text-neutral-800">
-                          {li.itemName}
-                          <span className="ml-1 text-xs text-neutral-400">{li.unit}</span>
+                          <div>
+                            {li.itemName}
+                            <span className="ml-1 text-xs text-neutral-400">{li.unit}</span>
+                          </div>
+                          {/* Pack size badge — only shown when packQty > 1 */}
+                          {li.packQty > 1 && (
+                            <span className="inline-flex items-center mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-50 text-blue-700 border border-blue-200">
+                              1 pack = {li.packQty} {li.unit}
+                            </span>
+                          )}
                         </TableCell>
                         <TableCell className="py-2">
                           <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold border ${COMMISSARY_COLORS[li.sourceCommissary] ?? "bg-neutral-50 text-neutral-600 border-neutral-200"}`}>
@@ -661,16 +683,30 @@ function LocationManagerView({
                           </span>
                         </TableCell>
                         <TableCell className="py-2">
-                          <input
-                            type="number"
-                            min={1}
-                            value={li.quantityRequested}
-                            onChange={(e) => updateQty(li.finishedGoodId ?? li.itemId ?? '', Number(e.target.value))}
-                            className="w-20 px-2 py-1 text-sm border border-neutral-200 rounded focus:outline-none focus:ring-1 focus:ring-brand-500"
-                          />
+                          <div>
+                            <input
+                              type="number"
+                              min={1}
+                              value={li.quantityRequested}
+                              onChange={(e) => updateQty(li.finishedGoodId ?? li.itemId ?? '', Number(e.target.value))}
+                              className="w-20 px-2 py-1 text-sm border border-neutral-200 rounded focus:outline-none focus:ring-1 focus:ring-brand-500"
+                            />
+                            {li.packQty > 1 && (
+                              <div className="text-[10px] text-neutral-400 mt-0.5">
+                                = {li.quantityRequested * li.packQty} {li.unit}
+                              </div>
+                            )}
+                          </div>
                         </TableCell>
                         <TableCell className="py-2 text-right text-sm text-neutral-500">
-                          {li.unitPrice > 0 ? `$${li.unitPrice.toFixed(2)}` : <span className="text-neutral-300">—</span>}
+                          {li.unitPrice > 0 ? (
+                            <div>
+                              <span className="font-medium text-neutral-700">${li.unitPrice.toFixed(2)}</span>
+                              {li.packQty > 1 && (
+                                <div className="text-[10px] text-neutral-400">/pack</div>
+                              )}
+                            </div>
+                          ) : <span className="text-neutral-300">—</span>}
                         </TableCell>
                         <TableCell className="py-2 text-right text-sm font-medium text-neutral-800">
                           ${(li.quantityRequested * li.unitPrice).toFixed(2)}
