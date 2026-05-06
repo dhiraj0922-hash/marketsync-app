@@ -6,8 +6,15 @@
  * Surfaces hq_sale_items with missing / zero making_cost and, where possible,
  * safely derives the correct value from the linked recipe's theoreticalCost.
  *
- * Derivation rule (identical to what the recipe builder already uses):
- *   making_cost = recipe.theoreticalCost / recipe.yieldQty   (per base unit)
+ * Derivation rule:
+ *   1. Convert recipe yield into the finished good's base unit:
+ *        yieldInBaseUnit = convertYieldToBaseUnit(yieldQty, yieldUnit, item.baseUnit)
+ *   2. Divide: making_cost = theoreticalCost / yieldInBaseUnit
+ *
+ *   If recipe yieldUnit and item.baseUnit are in the same measurement family
+ *   (e.g. both weight: kg→oz), the conversion is applied automatically.
+ *   If they are incompatible (e.g. kg vs ea), derivedCost is null and the
+ *   panel shows "Cannot derive" — no bad price is ever written.
  *
  * Source attribution displayed for every row:
  *   "recipe:<id>"           — recipe found via hq_sale_items.source_recipe_id
@@ -17,6 +24,7 @@
  * Safety constraints:
  *   - NEVER overwrites making_cost when it is already > 0
  *   - NEVER writes a cost derived from theoreticalCost ≤ 0  or yieldQty ≤ 0
+ *   - NEVER writes a cost when unit conversion is impossible
  *   - Skips inactive items from the UI (they still appear as count in header)
  *   - Uses existing updateSaleItemCost() — no new DB logic
  *   - Entirely additive — does not touch any other column
@@ -34,7 +42,7 @@ import {
   Info,
   RefreshCw,
 } from "lucide-react";
-import { updateSaleItemCost, type SaleItem } from "@/lib/storage";
+import { updateSaleItemCost, convertYieldToBaseUnit, type SaleItem } from "@/lib/storage";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -105,14 +113,23 @@ export function buildAuditRows(items: SaleItem[], recipes: any[]): AuditRow[] {
       if (recipe) source = "recipe:name-match";
     }
 
-    // 3. Derive cost only if recipe has valid numbers
+    // 3. Derive cost — convert recipe yield into FG base unit first
     let derivedCost: number | null = null;
     if (
       recipe &&
       Number(recipe.theoreticalCost) > 0 &&
       Number(recipe.yieldQty) > 0
     ) {
-      derivedCost = Number(recipe.theoreticalCost) / Number(recipe.yieldQty);
+      // Attempt unit conversion: recipe.yieldUnit → item.baseUnit
+      const conv = convertYieldToBaseUnit(
+        Number(recipe.yieldQty),
+        recipe.yieldUnit || '',
+        item.baseUnit || 'ea',
+      );
+      if (conv !== null && conv.qty > 0) {
+        derivedCost = Number(recipe.theoreticalCost) / conv.qty;
+      }
+      // If conv === null, derivedCost stays null → panel shows "Cannot derive" (unit mismatch)
     }
 
     return {
@@ -336,8 +353,9 @@ export function FgCostAuditPanel({ items, recipes, onCostApplied }: Props) {
             <span>
               <strong>Only missing costs are shown here.</strong>{" "}
               Items with an existing making_cost &gt; 0 are never modified.
-              Formula used: <code className="font-mono bg-amber-100 px-1 rounded">recipe.theoreticalCost ÷ recipe.yieldQty</code>.
-              Items with no recipe must be costed manually via the Edit drawer.
+              Formula: <code className="font-mono bg-amber-100 px-1 rounded">recipe.theoreticalCost ÷ convertYield(recipe.yieldQty, recipe.yieldUnit → item.baseUnit)</code>.
+              If yield unit and base unit differ (e.g. kg → oz), the yield is converted first.
+              Items with no recipe or an incompatible unit pair must be costed manually via the Edit drawer.
             </span>
           </div>
         </div>

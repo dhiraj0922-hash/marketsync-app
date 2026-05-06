@@ -471,6 +471,7 @@ function RecipesPageContent() {
             id:              recipeData.id,
             theoreticalCost: cost,
             yieldQty,
+            yieldUnit,          // ← pass unit so sync can convert kg→oz etc.
           }),
           15_000,
           'FG cost sync timed out after 15s'

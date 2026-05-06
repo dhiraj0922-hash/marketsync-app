@@ -12,7 +12,7 @@ import {
 import {
   loadSaleItems, upsertSaleItem, loadRecipes, loadLocations,
   loadFgLocationPricing, upsertFgLocationPricing, deleteFgLocationPricing,
-  loadCategories, addCategory,
+  loadCategories, addCategory, convertYieldToBaseUnit,
   type SaleItem, type FgLocationPricing
 } from "@/lib/storage";
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
@@ -99,6 +99,118 @@ function ActiveChip({ active }: { active: boolean }) {
   return active
     ? <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-brand-50 text-brand-700 border border-brand-200"><CheckCircle2 className="h-3 w-3" /> Active</span>
     : <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-neutral-100 text-neutral-500 border border-neutral-200"><XCircle className="h-3 w-3" /> Inactive</span>;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// computeLiveCost — single source of truth for per-unit pricing
+//
+// Priority:
+//   1. Linked recipe exists → convert recipe yield into item.baseUnit,
+//      then divide theoreticalCost by the converted yield.
+//   2. No linked recipe     → return the stored DB values as-is.
+//
+// Returns:
+//   makingCost        – cost per baseUnit (live recomputed or DB fallback)
+//   suggestedPrice    – makingCost × 1.20
+//   effectivePrice    – manualPrice if set, else suggestedPrice
+//   conversionWarning – non-null string when unit conversion is impossible
+// ─────────────────────────────────────────────────────────────────────────────
+interface LiveCost {
+  makingCost:        number;
+  suggestedPrice:    number;
+  effectivePrice:    number;
+  conversionWarning: string | null;
+}
+
+function computeLiveCost(item: SaleItem, recipes: any[]): LiveCost {
+  const norm = (u: string) => (u ?? '').trim().toLowerCase();
+
+  const fallback: LiveCost = {
+    makingCost:        item.makingCost,
+    suggestedPrice:    item.suggestedPrice,
+    effectivePrice:    item.effectivePrice,
+    conversionWarning: null,
+  };
+
+  if (!item.sourceRecipeId) return fallback;
+
+  const recipe = recipes.find(r => String(r.id) === String(item.sourceRecipeId));
+  if (!recipe) return fallback;
+
+  const totalCost  = Number(recipe.theoreticalCost);
+  const yieldQty   = Number(recipe.yieldQty);
+  if (totalCost <= 0 || yieldQty <= 0) return fallback;
+
+  // Always normalise both units to lowercase+trimmed before conversion
+  const recipeUnit = norm(recipe.yieldUnit);
+  const itemUnit   = norm(item.baseUnit);
+
+  // ── DEBUG GUARD ─────────────────────────────────────────────────────────────
+  // Log the exact inputs every time so unit mismatches are visible in DevTools.
+  // Remove or gate behind a flag once stable.
+  console.debug(
+    `[computeLiveCost] item="${item.name}" (${item.id})` +
+    ` | recipe="${recipe.name}" (${recipe.id})` +
+    ` | yieldQty=${yieldQty} yieldUnit="${recipeUnit}"` +
+    ` | item.baseUnit="${itemUnit}"` +
+    ` | totalCost=$${totalCost}`
+  );
+
+  const conv = convertYieldToBaseUnit(yieldQty, recipeUnit, itemUnit);
+
+  // ── ASSERTION: if units differ, conversion MUST have happened ───────────────
+  if (conv !== null && !conv.converted && recipeUnit !== itemUnit) {
+    // This should never happen — convertYieldToBaseUnit always converts when
+    // fromU !== toU and both are dimensional. If it fires, something is wrong
+    // in the conversion table.
+    console.error(
+      `[computeLiveCost] ASSERTION FAILED: units differ ("${recipeUnit}" vs "${itemUnit}")` +
+      ` but conv.converted=false and conv.qty=${conv.qty}.` +
+      ` Expected a real unit conversion. Check convertYieldToBaseUnit.`
+    );
+  }
+
+  // ── ASSERTION: result must differ from raw yieldQty when units differ ───────
+  if (conv !== null && recipeUnit !== itemUnit && conv.qty === yieldQty) {
+    console.error(
+      `[computeLiveCost] ASSERTION FAILED: yieldInBaseUnit === yieldQty (${yieldQty})` +
+      ` but units differ ("${recipeUnit}" → "${itemUnit}"). This means no conversion occurred.` +
+      ` makingCost would be wrong — returning conversionWarning instead.`
+    );
+    return {
+      ...fallback,
+      conversionWarning:
+        `Internal error: unit conversion produced no change for "${recipeUnit}" → "${itemUnit}". ` +
+        `Please report this bug.`,
+    };
+  }
+
+  if (conv === null || conv.qty <= 0) {
+    console.warn(
+      `[computeLiveCost] Cannot convert "${recipeUnit}" → "${itemUnit}" for item "${item.name}".` +
+      ` Incompatible unit dimensions or unknown unit.`
+    );
+    return {
+      ...fallback,
+      conversionWarning:
+        `Unit mismatch: recipe yields in "${recipeUnit || '(none)'}" but this item uses "${itemUnit || '(none)'}". ` +
+        `Both must be in the same measurement family (weight or volume). ` +
+        `Re-open Edit and correct the recipe's yield unit or the FG's base unit.`,
+    };
+  }
+
+  const makingCost     = totalCost / conv.qty;
+  const suggestedPrice = makingCost * 1.20;
+  const effectivePrice = item.manualPrice != null ? item.manualPrice : suggestedPrice;
+
+  console.debug(
+    `[computeLiveCost] result: yieldInBaseUnit=${conv.qty.toFixed(4)}${itemUnit}` +
+    ` | converted=${conv.converted}` +
+    ` | makingCost=$${makingCost.toFixed(4)}/${itemUnit}` +
+    ` | suggested=$${suggestedPrice.toFixed(4)}/${itemUnit}`
+  );
+
+  return { makingCost, suggestedPrice, effectivePrice, conversionWarning: null };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -250,7 +362,24 @@ function HQSaleItemsContent() {
       let makingCost = editing?.makingCost ?? 0;
       let sourceYieldQty = editing?.sourceRecipeYieldQty ?? 1;
       if (linkedRecipe) {
-        sourceYieldQty = linkedRecipe.yieldQty || 1;
+        // Convert recipe yield into the FG's base unit before dividing cost.
+        // e.g. recipe yields 15 kg but FG is sold in oz → yieldInBaseUnit = 529.109 oz
+        const conv = convertYieldToBaseUnit(
+          linkedRecipe.yieldQty || 0,
+          linkedRecipe.yieldUnit || '',
+          formUnit,  // FG base unit
+        );
+        if (conv === null || conv.qty <= 0) {
+          // Conversion impossible — do not write a bad price; keep current value
+          setSaveError(
+            `Cannot convert recipe yield unit "${linkedRecipe.yieldUnit}" to finished good unit "${formUnit}". ` +
+            `Please make sure the recipe yield unit and the finished good base unit are in the same measurement family (e.g. both weight or both volume), ` +
+            `or set them to the same unit.`
+          );
+          setIsSaving(false);
+          return;
+        }
+        sourceYieldQty = conv.qty;
         makingCost = (linkedRecipe.theoreticalCost || 0) / sourceYieldQty;
       }
 
@@ -522,17 +651,34 @@ function HQSaleItemsContent() {
                       </span>
                     </TableCell>
                     <TableCell className="py-4 text-sm text-neutral-700">{item.baseUnit}</TableCell>
+                    {/* Making Cost — always recomputed from linked recipe with unit conversion */}
                     <TableCell className="py-4 text-sm text-neutral-600">
-                      {item.makingCost > 0
-                        ? <><span className="font-medium text-neutral-800">${item.makingCost.toFixed(2)}</span><span className="text-neutral-400">/{item.baseUnit}</span></>
-                        : <span className="text-neutral-300">—</span>}
+                      {(() => {
+                        const lc = computeLiveCost(item, recipes);
+                        if (lc.conversionWarning) return (
+                          <span className="inline-flex items-center gap-1 text-warning-700 text-xs font-medium" title={lc.conversionWarning}>
+                            <AlertCircle className="h-3.5 w-3.5 shrink-0" /> Unit mismatch
+                          </span>
+                        );
+                        return lc.makingCost > 0
+                          ? <><span className="font-medium text-neutral-800">${lc.makingCost.toFixed(4)}</span><span className="text-neutral-400">/{item.baseUnit}</span></>
+                          : <span className="text-neutral-300">—</span>;
+                      })()}
                     </TableCell>
-                    {/* Unit Sale Price (per base unit) */}
+                    {/* Unit Sale Price — recomputed, respects manual price override */}
                     <TableCell className="py-4">
-                      <span className="font-bold text-success-700 text-sm">
-                        ${item.effectivePrice.toFixed(2)}
-                        <span className="text-neutral-400 font-normal">/{item.baseUnit}</span>
-                      </span>
+                      {(() => {
+                        const lc = computeLiveCost(item, recipes);
+                        if (lc.conversionWarning) return (
+                          <span className="text-neutral-400 text-xs">—</span>
+                        );
+                        return (
+                          <span className="font-bold text-success-700 text-sm">
+                            ${lc.effectivePrice.toFixed(4)}
+                            <span className="text-neutral-400 font-normal">/{item.baseUnit}</span>
+                          </span>
+                        );
+                      })()}
                     </TableCell>
                     {/* Pack Qty */}
                     <TableCell className="py-4 text-sm text-neutral-700">
@@ -544,18 +690,20 @@ function HQSaleItemsContent() {
                         <span className="text-neutral-400 text-xs">1 (unit)</span>
                       )}
                     </TableCell>
-                    {/* Effective Pack Price = unitPrice × packQty */}
+                    {/* Effective Pack Price = effectivePrice × packQty (recomputed) */}
                     <TableCell className="py-4">
                       {(() => {
                         const packQty = item.packQty > 0 ? item.packQty : 1;
-                        const packPrice = item.effectivePrice * packQty;
-                        return packQty > 1 ? (
+                        const lc = computeLiveCost(item, recipes);
+                        if (lc.conversionWarning || packQty <= 1) {
+                          return <span className="text-neutral-400 text-xs">{packQty > 1 ? '—' : 'same as unit'}</span>;
+                        }
+                        const packPrice = lc.effectivePrice * packQty;
+                        return (
                           <span className="font-bold text-brand-700 text-sm">
                             ${packPrice.toFixed(2)}
                             <span className="text-neutral-400 font-normal">/pack</span>
                           </span>
-                        ) : (
-                          <span className="text-neutral-400 text-xs">same as unit</span>
                         );
                       })()}
                     </TableCell>
@@ -611,10 +759,12 @@ function HQSaleItemsContent() {
         isOpen={isDrawerOpen}
         onClose={() => { setIsDrawerOpen(false); setSaveError(null); }}
         title={editing ? `Edit: ${editing.name}` : "New Finished Good"}
-        description={editing
-          ? `SKU: ${editing.id} · Making cost: $${editing.makingCost.toFixed(2)}/${editing.baseUnit}`
-          : "Create a new HQ finished good that franchise locations can requisition."
-        }
+        description={(() => {
+          if (!editing) return "Create a new HQ finished good that franchise locations can requisition.";
+          const lc = computeLiveCost(editing, recipes);
+          if (lc.conversionWarning) return `SKU: ${editing.id} · ⚠ Unit mismatch — re-save to fix cost`;
+          return `SKU: ${editing.id} · Making cost: $${lc.makingCost.toFixed(4)}/${editing.baseUnit}`;
+        })()}
         footer={
           <div className="w-full flex flex-col gap-3">
             {saveError && (
@@ -626,24 +776,53 @@ function HQSaleItemsContent() {
             {/* Pricing preview */}
             {(() => {
               const linked = recipes.find(r => r.id === formRecipeId);
-              const yieldQty = linked?.yieldQty || 1;
-              const makingCost = linked ? (linked.theoreticalCost || 0) / yieldQty : (editing?.makingCost ?? 0);
-              const suggested = makingCost * 1.20;
               const manual = formManualPrice !== "" && !isNaN(parseFloat(formManualPrice))
                 ? parseFloat(formManualPrice) : null;
-              const effective = manual ?? suggested;
-              if (makingCost > 0 || manual != null) return (
-                <div className="flex items-center justify-between bg-brand-50 border border-brand-100 rounded-lg px-4 py-3">
-                  <div className="flex flex-col gap-0.5 text-xs text-brand-700">
-                    <span>Making cost: <strong>${makingCost.toFixed(2)}/{formUnit}</strong></span>
-                    <span>Suggested (×1.20): <strong>${suggested.toFixed(2)}/{formUnit}</strong></span>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-xs text-brand-600 font-medium">Effective price</p>
-                    <p className="text-lg font-bold text-brand-900">${effective.toFixed(2)}</p>
-                  </div>
+
+              let makingCost: number | null = null;
+              let conversionWarning: string | null = null;
+
+              if (linked) {
+                // Convert recipe yield into FG base unit before computing cost
+                const conv = convertYieldToBaseUnit(
+                  linked.yieldQty || 0,
+                  linked.yieldUnit || '',
+                  formUnit,
+                );
+                if (conv === null || conv.qty <= 0) {
+                  conversionWarning =
+                    `Cannot convert recipe yield unit "${linked.yieldUnit}" to "${formUnit}". ` +
+                    `Units must be in the same measurement family.`;
+                } else {
+                  makingCost = (linked.theoreticalCost || 0) / conv.qty;
+                }
+              } else if (editing) {
+                makingCost = editing.makingCost;
+              }
+
+              if (conversionWarning) return (
+                <div className="flex items-center gap-2 bg-warning-50 border border-warning-200 rounded-lg px-4 py-3 text-xs text-warning-800">
+                  <AlertCircle className="h-4 w-4 shrink-0" />
+                  {conversionWarning}
                 </div>
               );
+
+              if (makingCost != null && (makingCost > 0 || manual != null)) {
+                const suggested = (makingCost ?? 0) * 1.20;
+                const effective = manual ?? suggested;
+                return (
+                  <div className="flex items-center justify-between bg-brand-50 border border-brand-100 rounded-lg px-4 py-3">
+                    <div className="flex flex-col gap-0.5 text-xs text-brand-700">
+                      <span>Making cost: <strong>${(makingCost ?? 0).toFixed(4)}/{formUnit}</strong></span>
+                      <span>Suggested (×1.20): <strong>${suggested.toFixed(4)}/{formUnit}</strong></span>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-xs text-brand-600 font-medium">Effective price</p>
+                      <p className="text-lg font-bold text-brand-900">${effective.toFixed(4)}</p>
+                    </div>
+                  </div>
+                );
+              }
               return null;
             })()}
 
@@ -814,22 +993,47 @@ function HQSaleItemsContent() {
           {/* Pack price preview */}
           {formPackQty > 1 && (() => {
             const linked = recipes.find(r => r.id === formRecipeId);
-            const yieldQty = linked?.yieldQty || 1;
-            const makingCost = linked ? (linked.theoreticalCost || 0) / yieldQty : (editing?.makingCost ?? 0);
             const manualP = formManualPrice !== "" && !isNaN(parseFloat(formManualPrice)) ? parseFloat(formManualPrice) : null;
-            const unitPrice = manualP ?? (makingCost * 1.20);
-            const packPrice = unitPrice * formPackQty;
-            if (unitPrice > 0) return (
-              <div className="flex items-center justify-between bg-blue-50 border border-blue-100 rounded-lg px-4 py-2.5 text-xs">
-                <span className="text-blue-700">
-                  <strong>${unitPrice.toFixed(2)}</strong>/{formUnit} × <strong>{formPackQty}</strong> {formUnit}s
-                </span>
-                <span className="font-bold text-blue-900 text-sm">
-                  = ${packPrice.toFixed(2)} / pack
-                </span>
+
+            let makingCost: number | null = null;
+            if (linked) {
+              const conv = convertYieldToBaseUnit(
+                linked.yieldQty || 0,
+                linked.yieldUnit || '',
+                formUnit,
+              );
+              if (conv !== null && conv.qty > 0) {
+                makingCost = (linked.theoreticalCost || 0) / conv.qty;
+              }
+            } else if (editing) {
+              makingCost = editing.makingCost;
+            }
+
+            const unitPrice = manualP ?? (makingCost != null ? makingCost * 1.20 : null);
+            if (unitPrice == null || unitPrice <= 0) return null;
+
+            const packCostPerUnit = makingCost ?? 0;
+            const packCost       = packCostPerUnit * formPackQty;
+            const packPrice      = unitPrice * formPackQty;
+
+            return (
+              <div className="bg-blue-50 border border-blue-100 rounded-lg px-4 py-2.5 text-xs space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-blue-700">
+                    Cost: <strong>${packCostPerUnit.toFixed(4)}</strong>/{formUnit} × <strong>{formPackQty}</strong> {formUnit}s
+                    {" = "}<strong>${packCost.toFixed(2)}</strong> cost/pack
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-blue-700">
+                    Price: <strong>${unitPrice.toFixed(4)}</strong>/{formUnit} × <strong>{formPackQty}</strong> {formUnit}s
+                  </span>
+                  <span className="font-bold text-blue-900 text-sm">
+                    = ${packPrice.toFixed(2)} / pack
+                  </span>
+                </div>
               </div>
             );
-            return null;
           })()}
 
           {/* Linked recipe */}
@@ -899,29 +1103,58 @@ function HQSaleItemsContent() {
             </label>
           </div>
 
-          {/* Pricing info box for existing items */}
-          {editing && (
-            <div className="bg-neutral-50 border border-neutral-200 rounded-lg p-4 space-y-2 text-sm">
-              <p className="text-xs font-semibold text-neutral-600 uppercase tracking-wider mb-2">Current Pricing</p>
-              <div className="flex justify-between">
-                <span className="text-neutral-500">Making cost</span>
-                <span className="font-medium">${editing.makingCost.toFixed(2)}/{editing.baseUnit}</span>
+          {/* Pricing info box for existing items — always recomputed from linked recipe */}
+          {editing && (() => {
+            const lc = computeLiveCost(editing, recipes);
+            return (
+              <div className="bg-neutral-50 border border-neutral-200 rounded-lg p-4 space-y-2 text-sm">
+                <p className="text-xs font-semibold text-neutral-600 uppercase tracking-wider mb-2">Current Pricing</p>
+
+                {lc.conversionWarning ? (
+                  <div className="flex items-start gap-2 text-xs text-warning-700 bg-warning-50 border border-warning-200 rounded-lg p-2">
+                    <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                    <span>{lc.conversionWarning}</span>
+                  </div>
+                ) : (
+                  <>
+                    <div className="flex justify-between">
+                      <span className="text-neutral-500">Making cost</span>
+                      <span className="font-medium">${lc.makingCost.toFixed(4)}/{editing.baseUnit}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-neutral-500">Suggested (×1.20)</span>
+                      <span className="font-medium">${lc.suggestedPrice.toFixed(4)}/{editing.baseUnit}</span>
+                    </div>
+                    {editing.packQty > 1 && (
+                      <div className="flex justify-between text-xs text-neutral-500">
+                        <span>Pack cost ({editing.packQty} {editing.baseUnit})</span>
+                        <span>${(lc.makingCost * editing.packQty).toFixed(2)}/pack</span>
+                      </div>
+                    )}
+                    <div className="flex justify-between border-t border-neutral-200 pt-2">
+                      <span className="font-semibold text-neutral-700">Effective price</span>
+                      <span className="font-bold text-success-700">${lc.effectivePrice.toFixed(4)}/{editing.baseUnit}</span>
+                    </div>
+                    {editing.packQty > 1 && (
+                      <div className="flex justify-between">
+                        <span className="font-semibold text-neutral-700">Pack price ({editing.packQty} {editing.baseUnit})</span>
+                        <span className="font-bold text-brand-700">${(lc.effectivePrice * editing.packQty).toFixed(2)}/pack</span>
+                      </div>
+                    )}
+                    {editing.manualPrice != null && (
+                      <p className="text-xs text-neutral-400">Manual price override active — suggested price ignored.</p>
+                    )}
+                  </>
+                )}
+
+                {editing.makingCostUpdatedAt && (
+                  <p className="text-xs text-neutral-400">
+                    Cost last synced: {new Date(editing.makingCostUpdatedAt).toLocaleDateString()}
+                  </p>
+                )}
               </div>
-              <div className="flex justify-between">
-                <span className="text-neutral-500">Suggested (×1.20)</span>
-                <span className="font-medium">${editing.suggestedPrice.toFixed(2)}</span>
-              </div>
-              <div className="flex justify-between border-t border-neutral-200 pt-2">
-                <span className="font-semibold text-neutral-700">Effective price</span>
-                <span className="font-bold text-success-700">${editing.effectivePrice.toFixed(2)}</span>
-              </div>
-              {editing.makingCostUpdatedAt && (
-                <p className="text-xs text-neutral-400">
-                  Cost last updated: {new Date(editing.makingCostUpdatedAt).toLocaleDateString()}
-                </p>
-              )}
-            </div>
-          )}
+            );
+          })()}
 
           {/* ── Location Pricing Section ───────────────────────────────────────── */}
           {editing && (
@@ -953,7 +1186,8 @@ function HQSaleItemsContent() {
                         </thead>
                         <tbody className="divide-y divide-neutral-100">
                           {locationPricing.map(row => {
-                            const pct = foodCostPct(editing.makingCost, row.salesPrice);
+                            const lc  = computeLiveCost(editing, recipes);
+                            const pct = lc.conversionWarning ? '—' : foodCostPct(lc.makingCost, row.salesPrice);
                             return (
                               <tr key={row.id} className="hover:bg-neutral-50/50">
                                 <td className="px-3 py-2.5 font-medium text-neutral-800">
@@ -963,7 +1197,10 @@ function HQSaleItemsContent() {
                                   ${row.salesPrice.toFixed(2)}
                                 </td>
                                 <td className="px-3 py-2.5 text-right text-neutral-500">
-                                  ${editing.makingCost.toFixed(2)}
+                                  {lc.conversionWarning
+                                    ? <span className="text-warning-600 text-xs">⚠ mismatch</span>
+                                    : `$${lc.makingCost.toFixed(4)}`
+                                  }
                                 </td>
                                 <td className="px-3 py-2.5 text-right">
                                   <FoodCostBadge pct={pct} />
@@ -1027,13 +1264,23 @@ function HQSaleItemsContent() {
                       </div>
                     </div>
                     {/* Live food cost preview */}
-                    {newPricingPrice && !isNaN(parseFloat(newPricingPrice)) && parseFloat(newPricingPrice) > 0 && (
-                      <div className="flex items-center gap-2 text-xs text-neutral-600 bg-white border border-neutral-200 rounded px-2 py-1.5">
-                        <TrendingUp className="h-3.5 w-3.5 text-brand-500" />
-                        Food cost at this price: <strong className="ml-1">{foodCostPct(editing.makingCost, parseFloat(newPricingPrice))}</strong>
-                        <span className="text-neutral-400 ml-1">(${editing.makingCost.toFixed(2)} ÷ ${parseFloat(newPricingPrice).toFixed(2)} × 100)</span>
-                      </div>
-                    )}
+                    {newPricingPrice && !isNaN(parseFloat(newPricingPrice)) && parseFloat(newPricingPrice) > 0 && (() => {
+                      const lc    = computeLiveCost(editing, recipes);
+                      const price = parseFloat(newPricingPrice);
+                      if (lc.conversionWarning) return (
+                        <div className="flex items-center gap-2 text-xs text-warning-700 bg-warning-50 border border-warning-100 rounded px-2 py-1.5">
+                          <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                          Cannot compute food cost % — unit mismatch on making cost.
+                        </div>
+                      );
+                      return (
+                        <div className="flex items-center gap-2 text-xs text-neutral-600 bg-white border border-neutral-200 rounded px-2 py-1.5">
+                          <TrendingUp className="h-3.5 w-3.5 text-brand-500" />
+                          Food cost at this price: <strong className="ml-1">{foodCostPct(lc.makingCost, price)}</strong>
+                          <span className="text-neutral-400 ml-1">(${lc.makingCost.toFixed(4)} ÷ ${price.toFixed(2)} × 100)</span>
+                        </div>
+                      );
+                    })()}
                     <input
                       type="text"
                       value={newPricingNotes}

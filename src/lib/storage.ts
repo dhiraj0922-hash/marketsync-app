@@ -7,6 +7,101 @@ import { supabase } from "@/lib/supabase";
 // natively. No module will write to Supabase structurally outside this firewall.
 // ============================================================================
 
+// ─────────────────────────────────────────────────────────────────────────────
+// UNIT CONVERSION
+//
+// Converts a quantity expressed in `fromUnit` into `toUnit`.
+// Supports: kg, g, lb, oz   (mass)
+//           l, ml, fl oz    (volume)
+//
+// Returns null when the conversion is impossible (e.g. mass → volume, unknown
+// unit), so callers can show a warning instead of producing a garbage number.
+//
+// Example:
+//   convertUnit(15, 'kg', 'oz')  →  529.109
+//   convertUnit(1,  'kg', 'kg')  →  1
+//   convertUnit(1,  'kg', 'l')   →  null  (different dimensions)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** All units expressed in grams (mass) or millilitres (volume). */
+const TO_BASE: Record<string, { base: 'g' | 'ml'; factor: number }> = {
+  // ── Mass ──────────────────────────────────────────────────────────────────
+  'kg':    { base: 'g',  factor: 1000      },
+  'g':     { base: 'g',  factor: 1         },
+  'lb':    { base: 'g',  factor: 453.59237 },
+  'oz':    { base: 'g',  factor: 28.349523 },
+  // ── Volume ────────────────────────────────────────────────────────────────
+  'l':     { base: 'ml', factor: 1000      },
+  'ml':    { base: 'ml', factor: 1         },
+  'fl oz': { base: 'ml', factor: 29.57353  },
+};
+
+/**
+ * Convert `qty` from `fromUnit` to `toUnit`.
+ * Returns null if conversion is impossible or a unit is unknown.
+ */
+export function convertUnit(
+  qty: number,
+  fromUnit: string,
+  toUnit: string,
+): number | null {
+  const norm = (u: string) => u.trim().toLowerCase();
+  const from = norm(fromUnit);
+  const to   = norm(toUnit);
+
+  // Same unit → no conversion needed
+  if (from === to) return qty;
+
+  const fromEntry = TO_BASE[from];
+  const toEntry   = TO_BASE[to];
+
+  // Unknown unit
+  if (!fromEntry || !toEntry) return null;
+  // Different measurement dimensions (e.g. mass vs volume)
+  if (fromEntry.base !== toEntry.base) return null;
+
+  // Convert: qty × fromFactor ÷ toFactor
+  return (qty * fromEntry.factor) / toEntry.factor;
+}
+
+/**
+ * Convert a recipe yield quantity into the finished good's base unit.
+ *
+ * Returns:
+ *   { qty: number; converted: boolean }  on success
+ *   null  when conversion is impossible (caller should show a warning)
+ *
+ * Example:
+ *   convertYieldToBaseUnit(15, 'kg', 'oz')
+ *   → { qty: 529.109, converted: true }
+ */
+export function convertYieldToBaseUnit(
+  recipeYieldQty:  number,
+  recipeYieldUnit: string,
+  fgBaseUnit:      string,
+): { qty: number; converted: boolean } | null {
+  if (recipeYieldQty <= 0) return null;
+
+  const norm = (u: string) => u.trim().toLowerCase();
+  const fromU = norm(recipeYieldUnit);
+  const toU   = norm(fgBaseUnit);
+
+  // Same unit — no conversion required
+  if (fromU === toU) return { qty: recipeYieldQty, converted: false };
+
+  // Non-dimensional units (ea, pcs, box, case, pack, btl…) can't be converted
+  const dimensional = Object.keys(TO_BASE);
+  if (!dimensional.includes(fromU) || !dimensional.includes(toU)) {
+    // If BOTH are non-dimensional and equal → handled above.
+    // If one is dimensional and the other isn't → impossible.
+    return null;
+  }
+
+  const converted = convertUnit(recipeYieldQty, fromU, toU);
+  if (converted === null) return null;
+  return { qty: converted, converted: true };
+}
+
 // ----------------------------------------------------------------------------
 // 1. INVENTORY ITEMS 
 // ----------------------------------------------------------------------------
@@ -491,7 +586,8 @@ const mapSaleItemToFrontend = (db: any): SaleItem => ({
   category:             db.category ?? null,
   sourceCommissary:     db.source_commissary ?? 'Commissary HQ',
   description:          db.description ?? null,
-  baseUnit:             db.base_unit ?? 'ea',
+  // Normalise unit at read time so 'Oz', ' KG ', etc. never break comparisons
+  baseUnit:             (db.base_unit ?? 'ea').trim().toLowerCase(),
   instock:              Number(db.instock ?? 0),
   parLevel:             Number(db.par_level ?? 0),
   isActive:             db.is_active ?? true,
@@ -826,9 +922,15 @@ export async function updateSaleItemCost(
  *
  * Finds all hq_sale_items rows whose source_recipe_id matches the saved recipe,
  * then patches:
- *   making_cost             = theoreticalCost / yieldQty   (per-unit cost)
- *   source_recipe_yield_qty = yieldQty
+ *   making_cost             = theoreticalCost / yieldInBaseUnit   (per FG base-unit cost)
+ *   source_recipe_yield_qty = yieldInBaseUnit  (already converted to FG base unit)
  *   making_cost_updated_at  = now()
+ *
+ * Unit conversion:
+ *   If the recipe yields in 'kg' but the FG base unit is 'oz', the yield is
+ *   converted before division:  yieldInBaseUnit = convertYieldToBaseUnit(yieldQty, yieldUnit, baseUnit)
+ *   If conversion is impossible (incompatible units), that item is skipped with
+ *   a warning and counted as an error — no bad price is ever written.
  *
  * Intentionally does NOT touch manual_price, instock, or any other field.
  * suggested_price is a GENERATED column in Postgres (making_cost * 1.20) —
@@ -840,36 +942,61 @@ export async function syncLinkedFgCost(recipe: {
   id:              string;
   theoreticalCost: number;
   yieldQty:        number;
+  yieldUnit:       string;   // ← required for unit conversion
 }): Promise<{ updated: number; errors: number; ids: string[]; newCostPerUnit: number }> {
-  const safeYield = recipe.yieldQty > 0 ? recipe.yieldQty : 1;
-  const newCostPerUnit = Number((recipe.theoreticalCost / safeYield).toFixed(4));
 
-  // 1. Find all linked sale items — fetch current making_cost for before/after logging
+  if (recipe.yieldQty <= 0) {
+    console.warn('[Recipe Sync] yieldQty is 0 or missing — skipping sync for recipe', recipe.id);
+    return { updated: 0, errors: 0, ids: [], newCostPerUnit: 0 };
+  }
+
+  // 1. Find all linked sale items — also fetch base_unit for per-item conversion
   const { data: linked, error: fetchErr } = await supabase
     .from('hq_sale_items')
-    .select('id, making_cost')
+    .select('id, making_cost, base_unit')
     .eq('source_recipe_id', recipe.id);
 
   if (fetchErr || !linked || linked.length === 0) {
     if (fetchErr) console.warn('[Recipe Sync] lookup error', fetchErr);
     else          console.debug('[Recipe Sync] no linked FGs for recipe', recipe.id);
-    return { updated: 0, errors: fetchErr ? 1 : 0, ids: [], newCostPerUnit };
+    return { updated: 0, errors: fetchErr ? 1 : 0, ids: [], newCostPerUnit: 0 };
   }
 
   // 2. Patch each linked sale item in parallel + emit per-item [Recipe Sync] log
+  let totalNewCostPerUnit = 0;
   const results = await Promise.all(
     linked.map(async row => {
-      const oldCost = Number(row.making_cost ?? 0);
-      const res = await updateSaleItemCost(row.id, newCostPerUnit, safeYield);
+      const fgBaseUnit = row.base_unit || 'ea';
+      const oldCost    = Number(row.making_cost ?? 0);
+
+      // Convert recipe yield into this FG's base unit before dividing cost
+      const conv = convertYieldToBaseUnit(recipe.yieldQty, recipe.yieldUnit, fgBaseUnit);
+
+      if (conv === null) {
+        // Conversion impossible — skip this item rather than write a wrong price
+        console.warn(
+          `[Recipe Sync] SKIPPED — cannot convert recipe yield unit "${recipe.yieldUnit}" → FG base unit "${fgBaseUnit}"` +
+          ` | recipeId=${recipe.id} | saleItemId=${row.id}` +
+          ` (set both to the same unit or a convertible pair)`
+        );
+        return { success: false, error: { message: `Unit conversion impossible: ${recipe.yieldUnit} → ${fgBaseUnit}` } };
+      }
+
+      const yieldInBaseUnit = conv.qty;
+      const newCostPerUnit  = Number((recipe.theoreticalCost / yieldInBaseUnit).toFixed(4));
+      totalNewCostPerUnit   = newCostPerUnit; // for the summary return value
+
+      const res = await updateSaleItemCost(row.id, newCostPerUnit, yieldInBaseUnit);
       if (res.success) {
-        // Required audit log: recipeId, saleItemId, old cost → new cost
         console.log(
           `[Recipe Sync] Updated linked FG cost` +
           ` | recipeId=${recipe.id}` +
           ` | saleItemId=${row.id}` +
           ` | oldCost=$${oldCost.toFixed(4)}` +
           ` | newCost=$${newCostPerUnit.toFixed(4)}` +
-          ` | yieldQty=${safeYield}`
+          (conv.converted
+            ? ` | yieldConverted=${recipe.yieldQty}${recipe.yieldUnit}→${yieldInBaseUnit.toFixed(4)}${fgBaseUnit}`
+            : ` | yieldQty=${yieldInBaseUnit}${fgBaseUnit}`)
         );
       } else {
         console.error(
@@ -888,7 +1015,7 @@ export async function syncLinkedFgCost(recipe: {
   const errors  = results.filter(r => !r.success).length;
   const updated = results.filter(r =>  r.success).length;
 
-  return { updated, errors, ids, newCostPerUnit };
+  return { updated, errors, ids, newCostPerUnit: totalNewCostPerUnit };
 }
 
 /**
@@ -1034,7 +1161,9 @@ const mapRecipeToFrontend = (db: any) => ({
     name:            db.name,
     category:        db.category,
     yieldQty:        db.yieldqty,
-    yieldUnit:       db.yieldunit,
+    // Normalise at DB boundary: trim whitespace + lowercase so 'Kg', ' KG ', etc.
+    // never reach computeLiveCost or convertYieldToBaseUnit as a wrong unit string.
+    yieldUnit:       (db.yieldunit ?? '').trim().toLowerCase(),
     theoreticalCost: db.theoreticalcost,
     margin:          db.margin,
     ingredients:     db.ingredients || []
