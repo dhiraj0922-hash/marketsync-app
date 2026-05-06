@@ -2281,7 +2281,7 @@ export async function loadRequisitionItems(
   // PostgREST: include both FK joins; each returns null when the FK is null.
   const { data, error } = await supabase
     .from("requisition_items")
-    .select("*, inventory_items(name), hq_sale_items(name, base_unit)")
+    .select("*, inventory_items(name), hq_sale_items(name, base_unit, instock)")
     .eq("requisition_id", requisitionId)
     .order("created_at", { ascending: true });
 
@@ -2290,7 +2290,7 @@ export async function loadRequisitionItems(
     console.warn("loadRequisitionItems: join failed, retrying without hq_sale_items join", error.message);
     const { data: fallbackData, error: fallbackError } = await supabase
       .from("requisition_items")
-      .select("*, inventory_items(name)")
+      .select("*, inventory_items(name), hq_sale_items(name, base_unit, instock)")
       .eq("requisition_id", requisitionId)
       .order("created_at", { ascending: true });
     if (fallbackError) { console.error("loadRequisitionItems fallback:", fallbackError); return { success: false, error: fallbackError }; }
@@ -2337,6 +2337,11 @@ function mapReqItemRow(row: any) {
     quantityFulfilled: row.quantity_fulfilled != null ? Number(row.quantity_fulfilled) : null,
     unitPrice:         row.unit_price  != null ? Number(row.unit_price)  : null,
     lineTotal:         row.line_total  != null ? Number(row.line_total)  : null,
+    // HQ available stock — only populated for FG-mode lines via hq_sale_items join.
+    // null for raw inventory lines (shown as '—' in UI).
+    hqAvailableStock:  isFGMode && row.hq_sale_items?.instock != null
+                         ? Number(row.hq_sale_items.instock)
+                         : null,
   };
 }
 
@@ -2368,7 +2373,7 @@ export async function loadRequisitionItemsBatch(
       .in("requisition_id", requisitionIds)
       .order("created_at", { ascending: true });
 
-  let { data, error } = await run("*, inventory_items(name), hq_sale_items(name, base_unit)");
+  let { data, error } = await run("*, inventory_items(name), hq_sale_items(name, base_unit, instock)");
 
   if (error) {
     console.warn("[loadRequisitionItemsBatch] join failed, retrying without hq_sale_items", error.message);
@@ -2653,30 +2658,57 @@ async function writeFulfilledAndRecalc(
   }
   console.log(`[Fulfillment] Step 8 OK: quantity_fulfilled=${quantityFulfilled}`);
 
-  // ── 9. Recalculate requisition status ──────────────────────────────────────────
+  // ── 9. Recalculate requisition status + total_amount ──────────────────────────
   const { data: allItems, error: siblingsError } = await supabase
     .from("requisition_items")
-    .select("quantity_requested, quantity_fulfilled")
+    .select("quantity_requested, quantity_fulfilled, unit_price")
     .eq("requisition_id", requisitionId);
 
   if (siblingsError || !allItems || allItems.length === 0) {
     return { success: true };
   }
 
+  // -- Status rules (only valid DB statuses: fulfilled | approved) --
+  // partial/backordered are UI-display-only computed client-side from line quantities.
+  // The DB CHECK constraint only allows: draft, submitted, approved, rejected, fulfilled.
   const allDone = allItems.every(
     (row) => Number(row.quantity_fulfilled ?? 0) >= Number(row.quantity_requested)
   );
   const newStatus = allDone ? "fulfilled" : "approved";
 
+  // ── Fulfilled total: sum(quantityFulfilled × unitPrice) ──────────────────────
+  const fulfilledTotal = allItems.reduce((sum, row) => {
+    return sum + Number(row.quantity_fulfilled ?? 0) * Number(row.unit_price ?? 0);
+  }, 0);
+
+  // Guard: missing requisitionId would update every row -- abort early.
+  if (!requisitionId) {
+    console.error("[Fulfillment] ✗ Step 9: requisitionId missing.");
+    return { success: true };
+  }
+
+  // Minimal status-only UPDATE -- never include location_id or other header fields.
   const { error: statusError } = await supabase
     .from("requisitions")
-    .update({ status: newStatus })
+    .update({ status: newStatus })   // only status -- no location_id, no created_at
     .eq("id", requisitionId);
 
   if (statusError) {
-    console.error("[Fulfillment] ✗ Step 9: status sync failed", statusError);
+    console.error("[Fulfillment] ✗ Step 9a: status update failed", statusError);
+    return { success: false, error: statusError };
+  }
+  console.log(`[Fulfillment] Step 9a OK: status -> ${newStatus}`);
+
+  // Non-fatal total_amount patch -- separate so a missing column cannot block status.
+  const { error: totalError } = await supabase
+    .from("requisitions")
+    .update({ total_amount: parseFloat(fulfilledTotal.toFixed(2)) })
+    .eq("id", requisitionId);
+
+  if (totalError) {
+    console.warn(`[Fulfillment] Step 9b: total_amount non-fatal: ${totalError.message}`);
   } else {
-    console.log(`[Fulfillment] Step 9 OK: requisition status → ${newStatus}`);
+    console.log(`[Fulfillment] Step 9b OK: total_amount -> $${fulfilledTotal.toFixed(2)}`);
   }
 
   return { success: true, newStatus };

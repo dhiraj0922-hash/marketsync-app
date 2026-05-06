@@ -673,6 +673,9 @@ export default function Inventory() {
   };
 
   const openItemDrawer = (item: any) => {
+    /** Safely convert a nullable number to a string input value. */
+    const numToInput = (v: number | null | undefined) => (v == null ? "" : String(v));
+
     setSelectedItem(item);
     setAdjType("Add");
     setAdjQty("");
@@ -683,11 +686,17 @@ export default function Inventory() {
       setAdjUnit(item.baseUnit || item.unit);
     }
     setAdjNotes("");
-    setNewParLevel(item.parLevel.toString());
+    // parLevel can be null for legacy items — guard before calling toString()
+    setNewParLevel(numToInput(item.parLevel));
     setParNotes("");
     setEditBaseUnit(item.baseUnit || item.unit || "");
     setEditPurchaseUnits(item.purchaseUnits ? JSON.parse(JSON.stringify(item.purchaseUnits)) : []);
-    setEditPurchaseCost(item.purchaseCost !== undefined ? item.purchaseCost.toString() : (item.cost !== undefined ? item.cost.toString() : ""));
+    // purchaseCost and cost can both be null — use numToInput throughout
+    setEditPurchaseCost(
+      item.purchaseCost != null ? numToInput(item.purchaseCost)
+        : item.cost     != null ? numToInput(item.cost)
+        : ""
+    );
     setIsDrawerOpen(true);
   };
 
