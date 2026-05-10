@@ -765,7 +765,9 @@ function HQAdminView({
   const [finishedGoods, setFinishedGoods] = useState<any[]>(initialFG);
   const [searchQuery, setSearchQuery] = useState("");
   const [filterStatus, setFilterStatus] = useState("all");
-  const [filterLocation, setFilterLocation] = useState("All");
+  const [filterLocation, setFilterLocation] = useState("All"); // stores location.id or "All"
+  const [filterFromDate, setFilterFromDate] = useState("");    // ISO date string "YYYY-MM-DD" or ""
+  const [filterToDate, setFilterToDate] = useState("");        // ISO date string "YYYY-MM-DD" or ""
   const [selectedReq, setSelectedReq] = useState<any>(null);
   const [selectedReqIds, setSelectedReqIds] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState<"overview" | "hq-production">("overview");
@@ -1001,15 +1003,43 @@ function HQAdminView({
   });
   locValues.forEach((v, k) => { if (v > maxVal) { maxVal = v; topLocation = k; } });
 
+  // Build a quick lookup: location.id → location.name for search and display.
+  const locationById = new Map(locations.map((l) => [l.id, l.name]));
+
   const filteredReqs = requisitions.filter((r) => {
+    // ── Status ────────────────────────────────────────────────────────────────
     if (filterStatus !== "all" && String(r.status || "").toLowerCase() !== filterStatus) return false;
-    if (filterLocation !== "All" && r.location !== filterLocation) return false;
+
+    // ── Location — compare against location_id (r.location stores the FK) ────
+    if (filterLocation !== "All" && r.location_id !== filterLocation) return false;
+
+    // ── Date range ────────────────────────────────────────────────────────────
+    if (filterFromDate || filterToDate) {
+      // r.date may be "May 10, 2025" (locale string) or ISO — parse both
+      const rDate = new Date(r.date ?? "");
+      if (isNaN(rDate.getTime())) {
+        // Unparseable date — exclude from date-filtered results
+        if (filterFromDate || filterToDate) return false;
+      } else {
+        const rDateOnly = rDate.toISOString().slice(0, 10); // "YYYY-MM-DD"
+        if (filterFromDate && rDateOnly < filterFromDate) return false;
+        if (filterToDate   && rDateOnly > filterToDate)   return false;
+      }
+    }
+
+    // ── Search: id, location_id, location name, requester, status ─────────────
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
-      if (!String(r.id).toLowerCase().includes(q) &&
-          !String(r.location || "").toLowerCase().includes(q) &&
-          !String(r.requestedBy || r.requestedby || "").toLowerCase().includes(q)) return false;
+      const locName = locationById.get(r.location_id ?? r.location ?? "") ?? "";
+      const matches =
+        String(r.id).toLowerCase().includes(q) ||
+        String(r.location_id || r.location || "").toLowerCase().includes(q) ||
+        locName.toLowerCase().includes(q) ||
+        String(r.requestedBy || r.requestedby || "").toLowerCase().includes(q) ||
+        String(r.status || "").toLowerCase().includes(q);
+      if (!matches) return false;
     }
+
     return true;
   });
 
@@ -1300,7 +1330,7 @@ function HQAdminView({
                     onChange={(e) => setFilterLocation(e.target.value)}
                   >
                     <option value="All">All Locations (HQ View)</option>
-                    {locations.map((l) => <option key={l.id} value={l.name}>{l.name}</option>)}
+                    {locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
                   </select>
                 )}
                 {profile?.role === "location_manager" && profile.locationId && (
@@ -1308,6 +1338,23 @@ function HQAdminView({
                     <MapPin className="h-3.5 w-3.5 text-brand-500" />
                     {profile.locationId}
                   </div>
+                )}
+                {/* Date range filters */}
+                <label className="flex items-center gap-1.5 text-xs text-neutral-500 font-medium">
+                  From
+                  <input type="date" value={filterFromDate} onChange={(e) => setFilterFromDate(e.target.value)}
+                    className="px-2 py-1.5 text-sm bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm" />
+                </label>
+                <label className="flex items-center gap-1.5 text-xs text-neutral-500 font-medium">
+                  To
+                  <input type="date" value={filterToDate} onChange={(e) => setFilterToDate(e.target.value)}
+                    className="px-2 py-1.5 text-sm bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm" />
+                </label>
+                {(filterStatus !== "all" || filterLocation !== "All" || filterFromDate || filterToDate || searchQuery) && (
+                  <button onClick={() => { setFilterStatus("all"); setFilterLocation("All"); setFilterFromDate(""); setFilterToDate(""); setSearchQuery(""); }}
+                    className="px-3 py-1.5 text-xs font-medium text-neutral-500 hover:text-neutral-700 border border-neutral-200 rounded-lg bg-white hover:bg-neutral-50 transition-colors">
+                    Clear filters
+                  </button>
                 )}
               </div>
             </CardHeader>
