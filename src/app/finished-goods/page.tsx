@@ -17,6 +17,8 @@ import {
   ChefHat,
   Layers,
   ShoppingBag,
+  Repeat2,
+  X,
 } from "lucide-react";
 import {
   loadRecipes,
@@ -144,6 +146,13 @@ export default function FinishedGoods() {
   const [isAutoFulfillMode, setIsAutoFulfillMode] = useState<boolean>(false);
   const [isImportOpen, setIsImportOpen]         = useState(false);
   const [isLoading, setIsLoading]               = useState(true);
+
+  // ── Ingredient substitution (session-only, never persisted) ──────────────
+  // Key = ingredient index in recipe.ingredients[]
+  // Value = the inventory item chosen as substitute for this production run
+  const [substitutes, setSubstitutes] = useState<Map<number, any>>(new Map());
+  // Which ingredient's substitute picker is open
+  const [substituteModal, setSubstituteModal] = useState<{ ingIdx: number; query: string } | null>(null);
 
   useEffect(() => {
     async function fetchData() {
@@ -312,6 +321,18 @@ export default function FinishedGoods() {
     return null;
   };
 
+  // ── Substitute helper ─────────────────────────────────────────────────────
+  // Returns the effective raw item for a given ingredient — substitute if set,
+  // otherwise the original inventory lookup.  Keyed by ingredient array index.
+  const getEffectiveRawItem = (ing: any, ingIdx: number, invList = inventoryData): any | null => {
+    if (substitutes.has(ingIdx)) return substitutes.get(ingIdx);
+    return invList.find(
+      (i: any) =>
+        i.id.toString() === ing.inventoryId.toString() ||
+        i.itemId === ing.inventoryId
+    ) ?? null;
+  };
+
   // ── Production constraints ───────────────────────────────────────────────
   // Unchanged from original — no production logic modified.
   const getProductionConstraints = (fg: any, batches: number) => {
@@ -323,13 +344,10 @@ export default function FinishedGoods() {
     const shortages: any[] = [];
     let maxBatches = Infinity;
 
-    const ingredientsCheck = recipe.ingredients.map((ing: any) => {
-      const rawItem = inventoryData.find(
-        (i: any) =>
-          i.id.toString() === ing.inventoryId.toString() ||
-          i.itemId === ing.inventoryId  // itemId is the camelCase field from mapInventoryToFrontend
-      );
+    const ingredientsCheck = recipe.ingredients.map((ing: any, ingIdx: number) => {
+      const rawItem = getEffectiveRawItem(ing, ingIdx);
       const inStock = rawItem ? rawItem.inStock : 0;
+      const isSubstituted = substitutes.has(ingIdx);
 
       // Labour items (LABOUR*/LABOR* by name) are available on demand.
       // Their instock is always 0 and should never block production or
@@ -375,11 +393,15 @@ export default function FinishedGoods() {
 
       return {
         name: ing.name || (rawItem ? rawItem.name : "Unknown"),
+        effectiveName: rawItem?.name ?? ing.name ?? "Unknown",  // resolved name (may be substitute)
+        originalName: ing.name || "Unknown",                    // recipe ingredient name
+        isSubstituted,
         requiredTotal,
         inStock,
         unit: rawItem ? rawItem.unit : ing.unit,
         isShort: short || !!conversionError,
         error: conversionError,
+        ingIdx,  // carry index so JSX can key the Switch button
       };
     });
 
@@ -425,23 +447,22 @@ export default function FinishedGoods() {
     const _inv = [...inventoryData]; // still needed for auto-fulfill stock math
 
     type DeductionPlan = {
-      rowId:         string;
-      rawItem:       any;
-      normalizedQty: number;
-      isLabourItem:  boolean;  // labour items skip stock deduction but still log movement
+      rowId:          string;
+      rawItem:        any;
+      normalizedQty:  number;
+      isLabourItem:   boolean;  // labour items skip stock deduction but still log movement
+      substituteNote: string;   // "" when no substitute; "substitute for X" when swapped
     };
     const deductionPlan: DeductionPlan[] = [];
 
-    for (const ing of recipe.ingredients) {
-      const rawItem = _inv.find(
-        (i: any) =>
-          i.id.toString() === ing.inventoryId.toString() ||
-          i.itemId === ing.inventoryId  // itemId is the camelCase field from mapInventoryToFrontend
-      );
+    for (const [ingIdx, ing] of recipe.ingredients.entries()) {
+      const rawItem = getEffectiveRawItem(ing, ingIdx, _inv);
 
       if (!rawItem) {
         console.warn(
-          `[executeProduction] ingredient "${ing.name}" (inventoryId=${ing.inventoryId}) not found in loaded inventory — skipping`
+          `[executeProduction] ingredient "${ing.name}" (inventoryId=${ing.inventoryId})${
+            substitutes.has(ingIdx) ? " [substitute]" : ""
+          } not found in loaded inventory — skipping`
         );
         continue;
       }
@@ -466,7 +487,17 @@ export default function FinishedGoods() {
       // Always push into deductionPlan (including labour) so movement log fires.
       // isLabourItem is carried in the plan entry so step 5a can skip the
       // physical DB deduction for labour without skipping the movement log.
-      deductionPlan.push({ rowId: String(rawItem.id), rawItem, normalizedQty, isLabourItem });
+      const isSubstituteUsed = substitutes.has(ingIdx);
+      deductionPlan.push({
+        rowId: String(rawItem.id),
+        rawItem,
+        normalizedQty,
+        isLabourItem,
+        // Carry substitute label into movement log notes
+        substituteNote: isSubstituteUsed
+          ? `[substitute for "${ing.name}"]`
+          : "",
+      });
 
       // Mirror in _inv for auto-fulfill FG stock math — skip for labour
       // (instock is intentionally 0; mirroring a deduction is a no-op).
@@ -645,7 +676,9 @@ export default function FinishedGoods() {
           unitCost:      plan.rawItem.cost ?? null,
           referenceType: "production",
           referenceId:   newLog.id,
-          notes: `Production: ${targetBatches}× ${fg.name} — consumed ${plan.normalizedQty} ${plan.rawItem.unit} of ${plan.rawItem.name}`,
+          notes: `Production: ${targetBatches}× ${fg.name} — consumed ${plan.normalizedQty} ${plan.rawItem.unit} of ${plan.rawItem.name}${
+            (plan as any).substituteNote ? " " + (plan as any).substituteNote : ""
+          }`,
         });
       }
 
@@ -665,6 +698,8 @@ export default function FinishedGoods() {
     setSelectedFG(null);
     setProduceBatches(1);
     setIsAutoFulfillMode(false);
+    setSubstitutes(new Map());   // clear substitutes for next production run
+    setSubstituteModal(null);
     alert(alertMsg);
   };
 
@@ -916,6 +951,8 @@ export default function FinishedGoods() {
           setSelectedFG(null);
           setProduceBatches(1);
           setIsAutoFulfillMode(false);
+          setSubstitutes(new Map());
+          setSubstituteModal(null);
         }}
         title={
           isAutoFulfillMode
@@ -1079,59 +1116,182 @@ export default function FinishedGoods() {
                   <TableHead>Raw Ingredient</TableHead>
                   <TableHead>Required</TableHead>
                   <TableHead>HQ Stock</TableHead>
-                  <TableHead className="text-right">Status</TableHead>
+                  <TableHead className="text-right">Status / Switch</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {activeConstraints?.ingredientsCheck.map((ing: any, idx: number) => (
-                  <TableRow
-                    key={`ing-${idx}`}
-                    className={`hover:bg-neutral-50/50 ${ing.isShort ? "bg-red-50/30" : ""}`}
-                  >
-                    <TableCell>
-                      <div className="font-medium text-sm text-neutral-900">{ing.name}</div>
-                    </TableCell>
-                    <TableCell>
-                      <span className="text-sm font-bold text-neutral-800 tabular-nums">
-                        {ing.requiredTotal} {ing.unit}
-                      </span>
-                    </TableCell>
-                    <TableCell>
-                      <span
-                        className={`text-sm font-semibold tabular-nums ${
-                          ing.isShort ? "text-red-600" : "text-neutral-600"
-                        }`}
-                      >
-                        {ing.inStock} {ing.unit}
-                      </span>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      {ing.error ? (
-                        <Badge
-                          variant="danger"
-                          className="text-xs px-2 py-0.5 border-none bg-red-100 text-red-800"
-                          title={ing.error}
+                {activeConstraints?.ingredientsCheck.map((ing: any, idx: number) => {
+                  const recipe = selectedFG ? findRecipeForFg(selectedFG) : null;
+                  const originalIngName = recipe?.ingredients?.[ing.ingIdx]?.name ?? ing.originalName ?? ing.name;
+                  const isModalOpen = substituteModal?.ingIdx === ing.ingIdx;
+
+                  // Candidate substitutes: all raw-type inventory items
+                  const candidatesAll = inventoryData.filter((i: any) =>
+                    i.itemType !== "Finished Good" && i.itemType !== "Preparation"
+                  );
+                  // Prioritise: same unit AND same category as original ingredient's item
+                  const effectiveOriginal = inventoryData.find((i: any) =>
+                    i.id.toString() === (recipe?.ingredients?.[ing.ingIdx]?.inventoryId ?? "").toString()
+                  );
+                  const sameGroup = candidatesAll.filter((i: any) =>
+                    i.id.toString() !== effectiveOriginal?.id?.toString() &&
+                    (i.unit === effectiveOriginal?.unit || i.category === effectiveOriginal?.category)
+                  );
+                  const rest = candidatesAll.filter((i: any) =>
+                    !sameGroup.some((s: any) => s.id === i.id) &&
+                    i.id.toString() !== effectiveOriginal?.id?.toString()
+                  );
+                  const candidates = [...sameGroup, ...rest];
+                  const q = (substituteModal?.query ?? "").toLowerCase();
+                  const filtered = q
+                    ? candidates.filter((i: any) => i.name.toLowerCase().includes(q))
+                    : candidates;
+
+                  return (
+                    <TableRow
+                      key={`ing-${idx}`}
+                      className={`hover:bg-neutral-50/50 ${ing.isShort ? "bg-red-50/30" : ""}`}
+                    >
+                      <TableCell>
+                        <div className="font-medium text-sm text-neutral-900">
+                          {ing.effectiveName ?? ing.name}
+                        </div>
+                        {ing.isSubstituted && (
+                          <div className="flex items-center gap-1 mt-0.5">
+                            <Repeat2 className="h-3 w-3 text-violet-500" />
+                            <span className="text-[10px] text-violet-600 font-medium">
+                              Using substitute instead of &ldquo;{originalIngName}&rdquo;
+                            </span>
+                            <button
+                              onClick={() => {
+                                const m = new Map(substitutes);
+                                m.delete(ing.ingIdx);
+                                setSubstitutes(m);
+                              }}
+                              className="ml-1 text-[10px] text-neutral-400 hover:text-red-500 transition-colors"
+                              title="Restore original ingredient"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </div>
+                        )}
+                        {/* ── Substitute picker modal ──────────────────── */}
+                        {isModalOpen && (
+                          <div className="absolute z-50 mt-1 w-72 bg-white border border-neutral-200 rounded-lg shadow-xl p-3 flex flex-col gap-2">
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-semibold text-neutral-700">Pick substitute</span>
+                              <button
+                                onClick={() => setSubstituteModal(null)}
+                                className="text-neutral-400 hover:text-neutral-700"
+                              >
+                                <X className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                            <input
+                              autoFocus
+                              type="text"
+                              placeholder="Search inventory…"
+                              value={substituteModal?.query ?? ""}
+                              onChange={(e) =>
+                                setSubstituteModal((prev) =>
+                                  prev ? { ...prev, query: e.target.value } : prev
+                                )
+                              }
+                              className="px-2 py-1.5 text-xs border border-neutral-200 rounded-md w-full focus:outline-none focus:ring-1 focus:ring-brand-500"
+                            />
+                            <div className="max-h-48 overflow-y-auto flex flex-col gap-0.5">
+                              {filtered.length === 0 && (
+                                <span className="text-xs text-neutral-400 text-center py-3">No items found</span>
+                              )}
+                              {sameGroup.length > 0 && !q && (
+                                <div className="text-[10px] text-neutral-400 font-semibold uppercase tracking-wider px-1 py-0.5 mt-1">
+                                  Same unit / category
+                                </div>
+                              )}
+                              {filtered.map((item: any) => (
+                                <button
+                                  key={item.id}
+                                  onClick={() => {
+                                    const m = new Map(substitutes);
+                                    m.set(ing.ingIdx, item);
+                                    setSubstitutes(m);
+                                    setSubstituteModal(null);
+                                  }}
+                                  className="flex items-center justify-between px-2 py-1.5 rounded hover:bg-brand-50 text-left transition-colors"
+                                >
+                                  <span className="text-xs font-medium text-neutral-800 truncate">{item.name}</span>
+                                  <span className={`text-[10px] ml-2 shrink-0 ${
+                                    item.inStock <= 0 ? "text-red-500" : "text-green-600"
+                                  }`}>
+                                    {item.inStock} {item.unit}
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <span className="text-sm font-bold text-neutral-800 tabular-nums">
+                          {ing.requiredTotal} {ing.unit}
+                        </span>
+                      </TableCell>
+                      <TableCell>
+                        <span
+                          className={`text-sm font-semibold tabular-nums ${
+                            ing.isShort ? "text-red-600" : "text-neutral-600"
+                          }`}
                         >
-                          Unit Conflict
-                        </Badge>
-                      ) : ing.isShort ? (
-                        <Badge
-                          variant="danger"
-                          className="text-xs px-2 py-0.5 border-none"
-                        >
-                          Shortage (-{(ing.requiredTotal - ing.inStock).toFixed(2)})
-                        </Badge>
-                      ) : (
-                        <Badge
-                          variant="success"
-                          className="text-xs px-2 py-0.5 border-none bg-green-100 text-green-800"
-                        >
-                          Available
-                        </Badge>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))}
+                          {ing.inStock} {ing.unit}
+                        </span>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          {ing.error ? (
+                            <Badge
+                              variant="danger"
+                              className="text-xs px-2 py-0.5 border-none bg-red-100 text-red-800"
+                              title={ing.error}
+                            >
+                              Unit Conflict
+                            </Badge>
+                          ) : ing.isShort ? (
+                            <Badge
+                              variant="danger"
+                              className="text-xs px-2 py-0.5 border-none"
+                            >
+                              Shortage (-{(ing.requiredTotal - ing.inStock).toFixed(2)})
+                            </Badge>
+                          ) : (
+                            <Badge
+                              variant="success"
+                              className="text-xs px-2 py-0.5 border-none bg-green-100 text-green-800"
+                            >
+                              Available
+                            </Badge>
+                          )}
+                          {/* Switch button */}
+                          <button
+                            onClick={() =>
+                              setSubstituteModal(
+                                isModalOpen ? null : { ingIdx: ing.ingIdx, query: "" }
+                              )
+                            }
+                            className={`inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-semibold transition-colors border ${
+                              ing.isSubstituted
+                                ? "bg-violet-50 border-violet-200 text-violet-700 hover:bg-violet-100"
+                                : "bg-neutral-50 border-neutral-200 text-neutral-500 hover:bg-neutral-100"
+                            }`}
+                            title={ing.isSubstituted ? "Change substitute" : "Switch ingredient"}
+                          >
+                            <Repeat2 className="h-3 w-3" />
+                            {ing.isSubstituted ? "Change" : "Switch"}
+                          </button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
                 {(!activeConstraints ||
                   activeConstraints.ingredientsCheck.length === 0) && (
                   <TableRow>
