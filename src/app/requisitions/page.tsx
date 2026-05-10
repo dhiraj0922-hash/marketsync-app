@@ -31,6 +31,7 @@ import {
   saveFinishedGoods,
   loadInventory,
   loadSaleItems,
+  loadLocations,
   saveNewRequisition,
   loadRequisitionItems,
   loadRequisitionItemsBatch,
@@ -751,7 +752,7 @@ function LocationManagerView({
 // HQ ADMIN VIEW  (unchanged logic, cleaned up)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const locationsData = ["Downtown", "Uptown", "Westside", "North Hills", "South Point"];
+// (locationsData hardcoded list removed — real locations loaded from DB via loadLocations())
 
 function HQAdminView({
   finishedGoods: initialFG,
@@ -789,13 +790,21 @@ function HQAdminView({
   // Defined here (not inside hqProductionDemand) so the useEffect below can use it too.
   const PRODUCTION_STATUSES = new Set(["submitted", "approved", "partial", "backordered", "fulfilled"]);
 
+  // Real locations loaded from DB — used for the filter dropdown.
+  const [locations, setLocations] = useState<Array<{ id: string; name: string }>>([]);
+
   useEffect(() => {
     async function fetchData() {
       setIsLoading(true);
       try {
-        const [reqs, fg] = await Promise.all([loadRequisitions(), loadFinishedGoods()]);
+        const [reqs, fg, locs] = await Promise.all([
+          loadRequisitions(),
+          loadFinishedGoods(),
+          loadLocations(),
+        ]);
         setRequisitions(Array.isArray(reqs) ? reqs : []);
         setFinishedGoods(Array.isArray(fg) ? fg : []);
+        setLocations(Array.isArray(locs) ? locs : []);
       } finally {
         setIsLoading(false);
       }
@@ -1006,7 +1015,9 @@ function HQAdminView({
 
   const createMockRequest = async () => {
     if (finishedGoods.length === 0) return;
-    const loc = locationsData[Math.floor(Math.random() * locationsData.length)];
+    const loc = locations.length
+      ? locations[Math.floor(Math.random() * locations.length)].name
+      : "HQ";
     const names = ["Alex R.", "Sarah J.", "Mike T.", "David W.", "Jessica K."];
     const user = names[Math.floor(Math.random() * names.length)];
     const numItems = Math.floor(Math.random() * 3) + 1;
@@ -1290,7 +1301,7 @@ function HQAdminView({
                     onChange={(e) => setFilterLocation(e.target.value)}
                   >
                     <option value="All">All Locations (HQ View)</option>
-                    {locationsData.map((l) => <option key={l} value={l}>{l}</option>)}
+                    {locations.map((l) => <option key={l.id} value={l.name}>{l.name}</option>)}
                   </select>
                 )}
                 {profile?.role === "location_manager" && profile.locationId && (
