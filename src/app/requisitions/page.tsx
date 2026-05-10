@@ -119,7 +119,7 @@ function LocationManagerView({
   const [reqLineItems, setReqLineItems] = useState<any[]>([]); // items from requisition_items table
   const [lineItemsLoading, setLineItemsLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [filterStatus, setFilterStatus] = useState("All");
+  const [filterStatus, setFilterStatus] = useState("all");
 
   // ── Create form state ──────────────────────────────────────────────────────
   const [draftNotes, setDraftNotes] = useState("");
@@ -166,7 +166,7 @@ function LocationManagerView({
 
   // ── Filter ────────────────────────────────────────────────────────────────
   const filtered = requisitions.filter((r) => {
-    if (filterStatus !== "All" && r.status !== filterStatus) return false;
+    if (filterStatus !== "all" && String(r.status || "").toLowerCase() !== filterStatus) return false;
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
       if (!String(r.id).toLowerCase().includes(q) && !String(r.notes || "").toLowerCase().includes(q)) return false;
@@ -349,7 +349,7 @@ function LocationManagerView({
             onChange={(e) => setFilterStatus(e.target.value)}
             className="px-3 py-1.5 text-sm border border-neutral-200 bg-white rounded-lg outline-none focus:ring-1 focus:ring-brand-500"
           >
-            <option value="All">All Statuses</option>
+          <option value="all">All Statuses</option>
             <option value="draft">Draft</option>
             <option value="submitted">Submitted</option>
             <option value="approved">Approved</option>
@@ -764,7 +764,7 @@ function HQAdminView({
   const [requisitions, setRequisitions] = useState<any[]>([]);
   const [finishedGoods, setFinishedGoods] = useState<any[]>(initialFG);
   const [searchQuery, setSearchQuery] = useState("");
-  const [filterStatus, setFilterStatus] = useState("All");
+  const [filterStatus, setFilterStatus] = useState("all");
   const [filterLocation, setFilterLocation] = useState("All");
   const [selectedReq, setSelectedReq] = useState<any>(null);
   const [selectedReqIds, setSelectedReqIds] = useState<string[]>([]);
@@ -1002,7 +1002,7 @@ function HQAdminView({
   locValues.forEach((v, k) => { if (v > maxVal) { maxVal = v; topLocation = k; } });
 
   const filteredReqs = requisitions.filter((r) => {
-    if (filterStatus !== "All" && r.status !== filterStatus) return false;
+    if (filterStatus !== "all" && String(r.status || "").toLowerCase() !== filterStatus) return false;
     if (filterLocation !== "All" && r.location !== filterLocation) return false;
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
@@ -1283,15 +1283,14 @@ function HQAdminView({
               <div className="flex flex-wrap gap-2">
                 <select className="px-3 py-1.5 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm"
                   value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
-                  <option value="All">All Statuses</option>
-                  <option value="Draft">Draft</option>
-                  <option value="Submitted">Submitted</option>
-                  <option value="submitted">submitted</option>
-                  <option value="Approved">Approved</option>
-                  <option value="Partial">Partial</option>
-                  <option value="Backordered">Backordered</option>
-                  <option value="Fulfilled">Fulfilled</option>
-                  <option value="Rejected">Rejected</option>
+                  <option value="all">All Statuses</option>
+                  <option value="draft">Draft</option>
+                  <option value="submitted">Submitted</option>
+                  <option value="approved">Approved</option>
+                  <option value="partial">Partial</option>
+                  <option value="backordered">Backordered</option>
+                  <option value="fulfilled">Fulfilled</option>
+                  <option value="rejected">Rejected</option>
                 </select>
                 {/* Location filter: hidden for location_manager — RLS already isolates their data */}
                 {profile?.role !== "location_manager" && (
