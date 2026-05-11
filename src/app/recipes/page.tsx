@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
@@ -60,7 +61,11 @@ function withTimeout<T>(promise: Promise<T>, ms: number, timeoutMsg: string): Pr
 export default function Recipes() {
   return (
     <HQOnlyGuard>
-      <RecipesPageContent />
+      <Suspense fallback={
+        <div className="animate-pulse flex p-12 justify-center text-neutral-400">Loading Recipes...</div>
+      }>
+        <RecipesPageContent />
+      </Suspense>
     </HQOnlyGuard>
   );
 }
@@ -158,6 +163,30 @@ function RecipesPageContent() {
   // Re-fetch if user resolves after mount (auth timing)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.locationId, user?.role]);
+
+  // ── Deep-link: open a specific recipe from ?recipeId= ───────────────────────
+  // Fired once after the first successful data load so openBuilder() has
+  // a full recipes[] array to look up from. A ref guards against re-firing
+  // on subsequent renders (e.g. optimistic state updates after a recipe save).
+  const searchParams    = useSearchParams();
+  const deepLinkFiredRef = useRef(false);
+
+  useEffect(() => {
+    if (isLoading) return;                       // wait for data
+    if (deepLinkFiredRef.current) return;        // only fire once
+    const targetId = searchParams?.get("recipeId");
+    if (!targetId) return;
+    const match = recipes.find(
+      (r: any) => r.id?.toString() === targetId.toString()
+    );
+    if (match) {
+      deepLinkFiredRef.current = true;
+      openBuilder(match);
+    }
+  // openBuilder is defined inline and stable enough within the same render;
+  // recipes and isLoading are the reactive values that matter here.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoading, recipes]);
 
   if (isLoading) return <div className="animate-pulse flex p-12 justify-center text-neutral-400">Loading Recipes...</div>;
 

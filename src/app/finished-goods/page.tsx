@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
@@ -117,7 +118,27 @@ function ClassBadge({ cls }: { cls: ItemClass }) {
   );
 }
 
-function RecipeBadge({ linked }: { linked: boolean }) {
+function RecipeBadge({
+  linked,
+  recipeId,
+  onNavigate,
+}: {
+  linked: boolean;
+  recipeId?: string | null;
+  onNavigate?: () => void;
+}) {
+  if (linked && onNavigate) {
+    return (
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); onNavigate(); }}
+        className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200 cursor-pointer hover:bg-green-100 hover:border-green-400 focus:outline-none focus:ring-1 focus:ring-green-400 transition-colors"
+        title="Open linked recipe"
+      >
+        <CheckCircle2 className="h-2.5 w-2.5" /> Linked recipe
+      </button>
+    );
+  }
   return linked ? (
     <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200">
       <CheckCircle2 className="h-2.5 w-2.5" /> Linked recipe
@@ -129,9 +150,9 @@ function RecipeBadge({ linked }: { linked: boolean }) {
   );
 }
 
-// ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function FinishedGoods() {
+  const router = useRouter();
   const [recipes, setRecipes]               = useState<any[]>([]);
   const [inventoryData, setInventoryData]   = useState<any[]>([]);
   const [saleItems, setSaleItems]           = useState<any[]>([]); // hq_sale_items
@@ -867,7 +888,15 @@ export default function FinishedGoods() {
                       {/* Recipe badge */}
                       <TableCell className="py-3">
                         <div className="flex flex-col gap-0.5">
-                          <RecipeBadge linked={hasRecipe} />
+                          <RecipeBadge
+                            linked={hasRecipe}
+                            recipeId={recipe?.id ?? null}
+                            onNavigate={
+                              hasRecipe && recipe?.id
+                                ? () => router.push(`/recipes?recipeId=${encodeURIComponent(recipe.id)}`)
+                                : undefined
+                            }
+                          />
                           {hasRecipe && (
                             <span className="text-[10px] text-neutral-400 truncate max-w-[140px]">
                               {recipe.name}
