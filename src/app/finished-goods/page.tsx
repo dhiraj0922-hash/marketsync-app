@@ -40,6 +40,8 @@ import {
   updateSaleItemStock,
   deductInventoryItemStock,
   loadProductionMovements,
+  upsertRecipe,
+  syncLinkedFgCost,
   type ProductionMovementRow,
 } from "@/lib/storage";
 import { normalizeUnit } from "@/lib/units";
@@ -194,6 +196,76 @@ export default function FinishedGoods() {
   const [substitutes, setSubstitutes] = useState<Map<number, any>>(new Map());
   // Which ingredient's substitute picker is open
   const [substituteModal, setSubstituteModal] = useState<{ ingIdx: number; query: string } | null>(null);
+
+  // ── "Update recipe" permanent-substitute confirmation dialog ─────────────
+  type RecipeUpdateTarget = {
+    ingIdx:        number;   // index in recipe.ingredients[]
+    substituteItem: any;    // the new inventory item
+    recipe:         any;    // the recipe object to patch
+  };
+  const [recipeUpdateConfirm, setRecipeUpdateConfirm] = useState<RecipeUpdateTarget | null>(null);
+  const [recipeUpdateSaving,  setRecipeUpdateSaving]  = useState(false);
+  const [recipeUpdateError,   setRecipeUpdateError]   = useState<string | null>(null);
+
+  // ── Handler: permanently swap one ingredient in a recipe ─────────────────
+  async function handleUpdateRecipeIngredient() {
+    if (!recipeUpdateConfirm) return;
+    const { ingIdx, substituteItem, recipe } = recipeUpdateConfirm;
+    setRecipeUpdateSaving(true);
+    setRecipeUpdateError(null);
+    try {
+      // Deep-clone the ingredient list and swap the target ingredient
+      const newIngredients = (recipe.ingredients ?? []).map((ing: any, i: number) => {
+        if (i !== ingIdx) return ing;
+        return {
+          ...ing,
+          inventoryId: substituteItem.id,
+          name:        substituteItem.name,
+          // Preserve quantity and unit — only the item reference changes
+        };
+      });
+
+      // Recalculate theoretical cost client-side (cost × requiredQty per ingredient)
+      const theoreticalCost = newIngredients.reduce((sum: number, ing: any) => {
+        const invItem = inventoryData.find((i: any) =>
+          i.id?.toString() === ing.inventoryId?.toString()
+        );
+        const unitCost = Number(invItem?.cost ?? 0);
+        return sum + unitCost * Number(ing.quantity ?? 0);
+      }, 0);
+
+      const updatedRecipe = { ...recipe, ingredients: newIngredients, theoreticalCost };
+
+      const { success, error } = await upsertRecipe(updatedRecipe);
+      if (!success) throw new Error(error?.message ?? "Recipe save failed");
+
+      // Sync linked FG making_cost exactly as the Recipes page does on save
+      await syncLinkedFgCost({
+        id:              updatedRecipe.id,
+        theoreticalCost: updatedRecipe.theoreticalCost,
+        yieldQty:        updatedRecipe.yieldQty ?? 1,
+        yieldUnit:       updatedRecipe.yieldUnit ?? 'ea',
+      });
+
+      // Update local recipes state so the modal reflects the change immediately
+      setRecipes(prev =>
+        prev.map(r => r.id === updatedRecipe.id ? updatedRecipe : r)
+      );
+
+      // Remove the session substitute since the recipe now uses the new item
+      setSubstitutes(prev => {
+        const m = new Map(prev);
+        m.delete(ingIdx);
+        return m;
+      });
+
+      setRecipeUpdateConfirm(null);
+    } catch (err: any) {
+      setRecipeUpdateError(err?.message ?? "An error occurred");
+    } finally {
+      setRecipeUpdateSaving(false);
+    }
+  }
 
   useEffect(() => {
     async function fetchData() {
@@ -1308,11 +1380,12 @@ export default function FinishedGoods() {
                           {ing.effectiveName ?? ing.name}
                         </div>
                         {ing.isSubstituted && (
-                          <div className="flex items-center gap-1 mt-0.5">
-                            <Repeat2 className="h-3 w-3 text-violet-500" />
+                          <div className="flex items-center gap-1 mt-0.5 flex-wrap">
+                            <Repeat2 className="h-3 w-3 text-violet-500 shrink-0" />
                             <span className="text-[10px] text-violet-600 font-medium">
                               Using substitute instead of &ldquo;{originalIngName}&rdquo;
                             </span>
+                            {/* Restore original */}
                             <button
                               onClick={() => {
                                 const m = new Map(substitutes);
@@ -1324,6 +1397,26 @@ export default function FinishedGoods() {
                             >
                               <X className="h-3 w-3" />
                             </button>
+                            {/* Permanent recipe update */}
+                            {recipe && (
+                              <button
+                                onClick={() => {
+                                  const sub = substitutes.get(ing.ingIdx);
+                                  if (sub) {
+                                    setRecipeUpdateError(null);
+                                    setRecipeUpdateConfirm({
+                                      ingIdx:        ing.ingIdx,
+                                      substituteItem: sub,
+                                      recipe,
+                                    });
+                                  }
+                                }}
+                                className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded hover:bg-emerald-100 transition-colors"
+                                title="Permanently replace this ingredient in the recipe"
+                              >
+                                <CheckCircle2 className="h-2.5 w-2.5" /> Update recipe
+                              </button>
+                            )}
                           </div>
                         )}
                         {/* ── Substitute picker modal ──────────────────── */}
@@ -1501,6 +1594,76 @@ export default function FinishedGoods() {
             );
           })()}
         </div>
+
+        {/* ── Permanent recipe-update confirmation dialog ──────────────── */}
+        {recipeUpdateConfirm && (() => {
+          const { ingIdx, substituteItem, recipe: targetRecipe } = recipeUpdateConfirm;
+          const oldIng = targetRecipe.ingredients?.[ingIdx];
+          const oldName = oldIng?.name ?? "original ingredient";
+          return (
+            <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm">
+              <div className="bg-white rounded-xl shadow-2xl border border-neutral-200 w-full max-w-md mx-4 p-6 flex flex-col gap-4">
+                {/* Header */}
+                <div className="flex items-start gap-3">
+                  <span className="inline-flex items-center justify-center w-9 h-9 rounded-full bg-amber-100 text-amber-700 shrink-0">
+                    <AlertTriangle className="h-5 w-5" />
+                  </span>
+                  <div>
+                    <h3 className="font-bold text-neutral-900 text-base">Permanently update recipe?</h3>
+                    <p className="text-sm text-neutral-500 mt-0.5">This action cannot be undone from this page.</p>
+                  </div>
+                </div>
+
+                {/* Details */}
+                <div className="bg-neutral-50 border border-neutral-200 rounded-lg p-3 text-xs space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-neutral-500 w-16 shrink-0">Recipe</span>
+                    <span className="font-semibold text-neutral-800 truncate">{targetRecipe.name}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-neutral-500 w-16 shrink-0">Replace</span>
+                    <span className="font-semibold text-red-700 line-through truncate">{oldName}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-neutral-500 w-16 shrink-0">With</span>
+                    <span className="font-semibold text-emerald-700 truncate">{substituteItem.name}</span>
+                  </div>
+                  <p className="text-neutral-400 pt-1 border-t border-neutral-200">
+                    Quantity and unit will be preserved. Recipe cost and linked finished-good making cost will be recalculated.
+                  </p>
+                </div>
+
+                {/* Error */}
+                {recipeUpdateError && (
+                  <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">
+                    {recipeUpdateError}
+                  </p>
+                )}
+
+                {/* Actions */}
+                <div className="flex items-center justify-end gap-3 pt-1">
+                  <button
+                    onClick={() => { setRecipeUpdateConfirm(null); setRecipeUpdateError(null); }}
+                    disabled={recipeUpdateSaving}
+                    className="px-4 py-2 text-sm font-semibold text-neutral-600 bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50 transition-colors disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleUpdateRecipeIngredient}
+                    disabled={recipeUpdateSaving}
+                    className="px-4 py-2 text-sm font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors disabled:opacity-60 inline-flex items-center gap-2"
+                  >
+                    {recipeUpdateSaving && (
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                    )}
+                    {recipeUpdateSaving ? "Updating…" : "Confirm update"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
       </Drawer>
 
       {/* ── CSV Import Modal ──────────────────────────────────────────────── */}
