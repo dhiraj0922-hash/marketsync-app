@@ -2776,6 +2776,65 @@ export async function logMovement(params: {
 
 
 // ----------------------------------------------------------------------------
+// PRODUCTION MOVEMENTS — read-only history for the Production History view
+// Fetches all inventory_movements rows where reference_type = 'production'.
+// Callers group by reference_id client-side. Non-fatal on error.
+// ----------------------------------------------------------------------------
+
+export interface ProductionMovementRow {
+  id:            number;
+  created_at:    string;
+  location_id:   string | null;
+  item_id:       string | null;
+  movement_type: string;   // 'production_in' | 'production_consumption'
+  quantity:      number;
+  unit_cost:     number | null;
+  total_cost:    number | null;
+  reference_type: string | null;
+  reference_id:   string | null;
+  notes:          string | null;
+}
+
+export async function loadProductionMovements(opts?: {
+  dateFrom?: string;   // ISO date "YYYY-MM-DD"
+  dateTo?:   string;
+}): Promise<ProductionMovementRow[]> {
+  let query = supabase
+    .from('inventory_movements')
+    .select('id, created_at, location_id, item_id, movement_type, quantity, unit_cost, total_cost, reference_type, reference_id, notes')
+    .eq('reference_type', 'production')
+    .order('created_at', { ascending: false })
+    .range(0, 4999);  // cap at 5 000 rows for safety
+
+  if (opts?.dateFrom) {
+    query = query.gte('created_at', `${opts.dateFrom}T00:00:00Z`);
+  }
+  if (opts?.dateTo) {
+    query = query.lte('created_at', `${opts.dateTo}T23:59:59Z`);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    console.error('[loadProductionMovements] DB error:', error.message);
+    return [];
+  }
+  return (data ?? []).map((r: any): ProductionMovementRow => ({
+    id:             Number(r.id            ?? 0),
+    created_at:     r.created_at           ?? '',
+    location_id:    r.location_id          ?? null,
+    item_id:        r.item_id              ?? null,
+    movement_type:  r.movement_type        ?? '',
+    quantity:       Number(r.quantity      ?? 0),
+    unit_cost:      r.unit_cost  != null ? Number(r.unit_cost)  : null,
+    total_cost:     r.total_cost != null ? Number(r.total_cost) : null,
+    reference_type: r.reference_type       ?? null,
+    reference_id:   r.reference_id         ?? null,
+    notes:          r.notes                ?? null,
+  }));
+}
+
+
+// ----------------------------------------------------------------------------
 // PURCHASE OPTIONS  — multi-supplier pricing rows per inventory item
 // ----------------------------------------------------------------------------
 // Schema:

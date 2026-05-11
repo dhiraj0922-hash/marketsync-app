@@ -20,6 +20,12 @@ import {
   ShoppingBag,
   Repeat2,
   X,
+  History,
+  ChevronDown,
+  ChevronRight,
+  Calendar,
+  DollarSign,
+  Package,
 } from "lucide-react";
 import {
   loadRecipes,
@@ -33,6 +39,8 @@ import {
   loadSaleItems,
   updateSaleItemStock,
   deductInventoryItemStock,
+  loadProductionMovements,
+  type ProductionMovementRow,
 } from "@/lib/storage";
 import { normalizeUnit } from "@/lib/units";
 import { FgImportModal } from "@/components/FgImportModal";
@@ -162,6 +170,18 @@ export default function FinishedGoods() {
   const [searchQuery, setSearchQuery]   = useState("");
   const [filterMode, setFilterMode]     = useState<FilterMode>("final");
 
+  // ── Page-level view: item list vs history ────────────────────────────────
+  type PageView = "items" | "history";
+  const [pageView, setPageView] = useState<PageView>("items");
+
+  // ── Production history (movements) ───────────────────────────────────────
+  const [productionMovements, setProductionMovements] = useState<ProductionMovementRow[]>([]);
+  const [historyLoading, setHistoryLoading]           = useState(false);
+  const [historyDateFrom, setHistoryDateFrom]         = useState("");
+  const [historyDateTo, setHistoryDateTo]             = useState("");
+  const [historySearch, setHistorySearch]             = useState("");
+  const [expandedEvents, setExpandedEvents]           = useState<Set<string>>(new Set());
+
   const [selectedFG, setSelectedFG]             = useState<any>(null);
   const [produceBatches, setProduceBatches]     = useState<number>(1);
   const [isAutoFulfillMode, setIsAutoFulfillMode] = useState<boolean>(false);
@@ -199,6 +219,27 @@ export default function FinishedGoods() {
     }
     fetchData();
   }, []);
+
+  // ── Lazy-load production movements when history tab is active ────────────
+  useEffect(() => {
+    if (pageView !== "history") return;
+    let cancelled = false;
+    async function loadHistory() {
+      setHistoryLoading(true);
+      try {
+        const rows = await loadProductionMovements({
+          dateFrom: historyDateFrom || undefined,
+          dateTo:   historyDateTo   || undefined,
+        });
+        if (!cancelled) setProductionMovements(rows);
+      } finally {
+        if (!cancelled) setHistoryLoading(false);
+      }
+    }
+    loadHistory();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageView, historyDateFrom, historyDateTo]);
 
   if (isLoading) {
     return (
@@ -758,6 +799,29 @@ export default function FinishedGoods() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {/* Page-level view tabs */}
+          <div className="flex items-center gap-1 bg-neutral-100 rounded-lg p-1">
+            <button
+              onClick={() => setPageView("items")}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
+                pageView === "items"
+                  ? "bg-white text-neutral-900 shadow-sm"
+                  : "text-neutral-500 hover:text-neutral-700"
+              }`}
+            >
+              <Package className="h-3.5 w-3.5" /> Production Items
+            </button>
+            <button
+              onClick={() => setPageView("history")}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
+                pageView === "history"
+                  ? "bg-white text-neutral-900 shadow-sm"
+                  : "text-neutral-500 hover:text-neutral-700"
+              }`}
+            >
+              <History className="h-3.5 w-3.5" /> Production History
+            </button>
+          </div>
           <button
             onClick={() => setIsImportOpen(true)}
             className="flex items-center gap-1.5 px-4 py-2 text-sm font-semibold bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 shadow-sm transition-colors"
@@ -766,6 +830,8 @@ export default function FinishedGoods() {
           </button>
         </div>
       </div>
+
+      {pageView === "items" && (<>
 
       {/* ── Metrics ──────────────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -1444,6 +1510,342 @@ export default function FinishedGoods() {
         existingNames={finishedGoods.map((fg: any) => fg.name)}
         onSuccess={() => window.location.reload()}
       />
+      </>)}  {/* end pageView === "items" */}
+
+      {/* ══════════════════════════════════════════════════════════════════════
+          PRODUCTION HISTORY VIEW
+      ══════════════════════════════════════════════════════════════════════ */}
+      {pageView === "history" && (() => {
+        // ── Labour detection ─────────────────────────────────────────────
+        const isLabour = (notes: string | null) => {
+          const u = (notes ?? "").toUpperCase();
+          return u.includes("LABOUR") || u.includes("LABOR");
+        };
+
+        // ── Group movements by reference_id ──────────────────────────────
+        type HistoryEvent = {
+          refId:          string;
+          fgName:         string;
+          producedAt:     string;   // ISO timestamp of production_in row
+          yieldQty:       number;
+          yieldUnit:      string;
+          batches:        string;
+          notes:          string | null;
+          ingredientCost: number;
+          labourCost:     number;
+          totalCost:      number;
+          lines:          ProductionMovementRow[];
+        };
+
+        const eventMap = new Map<string, HistoryEvent>();
+        for (const row of productionMovements) {
+          const refId = row.reference_id ?? "unknown";
+          if (!eventMap.has(refId)) {
+            eventMap.set(refId, {
+              refId,
+              fgName:         "—",
+              producedAt:     row.created_at,
+              yieldQty:       0,
+              yieldUnit:      "",
+              batches:        "",
+              notes:          row.notes,
+              ingredientCost: 0,
+              labourCost:     0,
+              totalCost:      0,
+              lines:          [],
+            });
+          }
+          const ev = eventMap.get(refId)!;
+          ev.lines.push(row);
+
+          if (row.movement_type === "production_in") {
+            ev.fgName     = (row.notes ?? "").replace(/^Production output:.*? batches of /, "").split("[")[0].trim() || ev.fgName;
+            ev.yieldQty   = row.quantity;
+            ev.producedAt = row.created_at;
+            // extract batch count from notes like "2 batches of …"
+            const bm = (row.notes ?? "").match(/^Production output:\s*(\d+)\s*batch/i);
+            if (bm) ev.batches = `${bm[1]} batch${Number(bm[1]) !== 1 ? "es" : ""}`;
+          }
+
+          if (row.movement_type === "production_consumption") {
+            const cost = row.total_cost ?? 0;
+            if (isLabour(row.notes)) {
+              ev.labourCost += cost;
+            } else {
+              ev.ingredientCost += cost;
+            }
+            ev.totalCost += cost;
+          }
+        }
+
+        // Sorted newest first
+        const events = Array.from(eventMap.values()).sort(
+          (a, b) => new Date(b.producedAt).getTime() - new Date(a.producedAt).getTime()
+        );
+
+        // Search filter
+        const q = historySearch.toLowerCase();
+        const filteredEvents = q
+          ? events.filter(e =>
+              e.fgName.toLowerCase().includes(q) ||
+              e.refId.toLowerCase().includes(q)
+            )
+          : events;
+
+        // Summary totals
+        const totalEvents       = filteredEvents.length;
+        const totalIngredient   = filteredEvents.reduce((s, e) => s + e.ingredientCost, 0);
+        const totalLabour       = filteredEvents.reduce((s, e) => s + e.labourCost,     0);
+        const totalProduction   = filteredEvents.reduce((s, e) => s + e.totalCost,      0);
+
+        const fmtDate = (iso: string) => {
+          try { return new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit" }); }
+          catch { return iso; }
+        };
+
+        return (
+          <div className="space-y-5">
+
+            {/* Summary cards */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              {[
+                { label: "Production Events", value: totalEvents.toString(),           icon: <Package className="h-4 w-4"/>,    color: "text-neutral-900" },
+                { label: "Ingredient Cost",   value: `$${totalIngredient.toFixed(2)}`, icon: <DollarSign className="h-4 w-4"/>, color: "text-neutral-700" },
+                { label: "Labour Cost",       value: `$${totalLabour.toFixed(2)}`,     icon: <Calendar className="h-4 w-4"/>,   color: "text-amber-700"   },
+                { label: "Total Cost",        value: `$${totalProduction.toFixed(2)}`, icon: <DollarSign className="h-4 w-4"/>, color: "text-brand-700"   },
+              ].map((s, i) => (
+                <Card key={i} className="shadow-sm border-neutral-200">
+                  <CardContent className="p-4 flex flex-col gap-1">
+                    <div className="flex items-center gap-1.5 text-neutral-400">{s.icon}<span className="text-xs font-medium text-neutral-500">{s.label}</span></div>
+                    <span className={`text-xl font-bold tabular-nums ${s.color}`}>{s.value}</span>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+
+            {/* Filters */}
+            <Card className="shadow-sm border-neutral-200">
+              <CardContent className="p-4">
+                <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
+                  {/* Search */}
+                  <div className="relative flex-1 min-w-0">
+                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                      <Search className="h-4 w-4 text-neutral-400" />
+                    </div>
+                    <input
+                      type="text"
+                      placeholder="Search by product name or reference ID…"
+                      value={historySearch}
+                      onChange={e => setHistorySearch(e.target.value)}
+                      className="pl-9 pr-4 py-1.5 border border-neutral-200 rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 w-full bg-neutral-50 hover:bg-white transition-colors"
+                    />
+                  </div>
+                  {/* Date range */}
+                  <div className="flex items-center gap-2 shrink-0">
+                    <Calendar className="h-4 w-4 text-neutral-400 shrink-0" />
+                    <input
+                      type="date"
+                      value={historyDateFrom}
+                      onChange={e => setHistoryDateFrom(e.target.value)}
+                      className="border border-neutral-200 rounded-md text-xs px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-brand-500 bg-neutral-50"
+                      title="From date"
+                    />
+                    <span className="text-neutral-400 text-xs">–</span>
+                    <input
+                      type="date"
+                      value={historyDateTo}
+                      onChange={e => setHistoryDateTo(e.target.value)}
+                      className="border border-neutral-200 rounded-md text-xs px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-brand-500 bg-neutral-50"
+                      title="To date"
+                    />
+                    {(historyDateFrom || historyDateTo) && (
+                      <button
+                        onClick={() => { setHistoryDateFrom(""); setHistoryDateTo(""); }}
+                        className="text-neutral-400 hover:text-red-500 transition-colors"
+                        title="Clear dates"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    )}
+                  </div>
+                  {/* Refresh */}
+                  <button
+                    onClick={() => {
+                      // Toggle pageView off/on to force re-fetch
+                      setProductionMovements([]);
+                      setPageView("items");
+                      setTimeout(() => setPageView("history"), 0);
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-white border border-neutral-200 text-neutral-600 rounded-md hover:bg-neutral-50 transition-colors shadow-sm shrink-0"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" /> Refresh
+                  </button>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Events list */}
+            {historyLoading ? (
+              <div className="flex justify-center py-16 text-neutral-400 animate-pulse text-sm">
+                Loading production history…
+              </div>
+            ) : filteredEvents.length === 0 ? (
+              <Card className="shadow-sm border-neutral-200">
+                <CardContent className="py-16 text-center text-neutral-400 text-sm">
+                  {productionMovements.length === 0
+                    ? "No production movements found. Execute a production run to see history here."
+                    : `No events match "${historySearch}".`}
+                </CardContent>
+              </Card>
+            ) : (
+              <div className="space-y-3">
+                {filteredEvents.map(ev => {
+                  const isOpen = expandedEvents.has(ev.refId);
+                  const costPerUnit = ev.yieldQty > 0 ? ev.totalCost / ev.yieldQty : 0;
+                  const consLines   = ev.lines.filter(l => l.movement_type === "production_consumption");
+                  const outLine     = ev.lines.find(l  => l.movement_type === "production_in");
+
+                  // Try to extract unit from notes "yielding X kg" or "production_in" row notes
+                  const unitMatch = (outLine?.notes ?? "").match(/yielding\s+[\d.]+\s+(\w+)/i);
+                  const yieldUnit = ev.yieldUnit || unitMatch?.[1] || "";
+
+                  return (
+                    <Card key={ev.refId} className="shadow-sm border-neutral-200 overflow-hidden">
+                      {/* Event header — always visible */}
+                      <button
+                        type="button"
+                        onClick={() => setExpandedEvents(prev => {
+                          const next = new Set(prev);
+                          isOpen ? next.delete(ev.refId) : next.add(ev.refId);
+                          return next;
+                        })}
+                        className="w-full text-left"
+                      >
+                        <CardContent className="p-4">
+                          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                            {/* Expand chevron */}
+                            <span className="text-neutral-400 shrink-0">
+                              {isOpen ? <ChevronDown className="h-4 w-4"/> : <ChevronRight className="h-4 w-4"/>}
+                            </span>
+
+                            {/* FG name + ref */}
+                            <div className="flex-1 min-w-0">
+                              <p className="font-semibold text-neutral-900 truncate">{ev.fgName}</p>
+                              <p className="text-[10px] text-neutral-400 font-mono">{ev.refId}</p>
+                            </div>
+
+                            {/* Date */}
+                            <div className="text-xs text-neutral-500 shrink-0 sm:text-right">
+                              <p className="font-medium">{fmtDate(ev.producedAt)}</p>
+                              {ev.batches && <p className="text-neutral-400">{ev.batches}</p>}
+                            </div>
+
+                            {/* Yield */}
+                            <div className="text-right shrink-0">
+                              <p className="text-sm font-bold text-neutral-900 tabular-nums">
+                                {ev.yieldQty} {yieldUnit}
+                              </p>
+                              <p className="text-[10px] text-neutral-400">produced</p>
+                            </div>
+
+                            {/* Cost pills */}
+                            <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+                              {ev.ingredientCost > 0 && (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-neutral-100 text-neutral-700 border border-neutral-200">
+                                  Ing ${ev.ingredientCost.toFixed(2)}
+                                </span>
+                              )}
+                              {ev.labourCost > 0 && (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">
+                                  Labour ${ev.labourCost.toFixed(2)}
+                                </span>
+                              )}
+                              <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-brand-50 text-brand-700 border border-brand-200">
+                                Total ${ev.totalCost.toFixed(2)}
+                              </span>
+                              {costPerUnit > 0 && (
+                                <span className="text-[10px] text-neutral-400 tabular-nums">
+                                  ${costPerUnit.toFixed(3)}/{yieldUnit || "unit"}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </CardContent>
+                      </button>
+
+                      {/* Expanded breakdown */}
+                      {isOpen && (
+                        <div className="border-t border-neutral-100 bg-neutral-50/50 px-4 pb-4 pt-3">
+                          <p className="text-[10px] uppercase font-semibold text-neutral-400 tracking-wider mb-2">
+                            Ingredient &amp; Labour Breakdown
+                          </p>
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-xs">
+                              <thead>
+                                <tr className="text-neutral-400 border-b border-neutral-200">
+                                  <th className="text-left font-semibold pb-1.5 pr-3">Item</th>
+                                  <th className="text-right font-semibold pb-1.5 px-3">Qty</th>
+                                  <th className="text-right font-semibold pb-1.5 px-3">Unit Cost</th>
+                                  <th className="text-right font-semibold pb-1.5 pl-3">Total Cost</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-neutral-100">
+                                {consLines.map(line => {
+                                  const itemLabel = (line.notes ?? "")
+                                    .replace(/^Production:.*?— consumed [\d.]+ \w+ of /, "")
+                                    .replace(/\s*\[.*$/, "")
+                                    .trim() || line.item_id || "—";
+                                  const lab = isLabour(line.notes);
+                                  return (
+                                    <tr key={line.id} className={lab ? "bg-amber-50/40" : ""}>
+                                      <td className="py-1.5 pr-3 font-medium text-neutral-800">
+                                        {itemLabel}
+                                        {lab && (
+                                          <span className="ml-1.5 text-[9px] font-bold uppercase text-amber-600 bg-amber-100 px-1 py-0.5 rounded">Labour</span>
+                                        )}
+                                      </td>
+                                      <td className="py-1.5 px-3 text-right tabular-nums text-neutral-600">
+                                        {line.quantity}
+                                      </td>
+                                      <td className="py-1.5 px-3 text-right tabular-nums text-neutral-600">
+                                        {line.unit_cost != null ? `$${line.unit_cost.toFixed(4)}` : "—"}
+                                      </td>
+                                      <td className="py-1.5 pl-3 text-right tabular-nums font-semibold text-neutral-800">
+                                        {line.total_cost != null ? `$${line.total_cost.toFixed(2)}` : "—"}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                              {ev.totalCost > 0 && (
+                                <tfoot>
+                                  <tr className="border-t-2 border-neutral-200">
+                                    <td colSpan={3} className="pt-2 text-right font-semibold text-neutral-700 pr-3">Total Production Cost</td>
+                                    <td className="pt-2 pl-3 text-right font-bold text-brand-700 tabular-nums">${ev.totalCost.toFixed(2)}</td>
+                                  </tr>
+                                  {costPerUnit > 0 && (
+                                    <tr>
+                                      <td colSpan={3} className="pt-0.5 text-right text-neutral-400 pr-3">Cost per {yieldUnit || "unit"}</td>
+                                      <td className="pt-0.5 pl-3 text-right text-neutral-500 tabular-nums">${costPerUnit.toFixed(4)}</td>
+                                    </tr>
+                                  )}
+                                </tfoot>
+                              )}
+                            </table>
+                          </div>
+                          {outLine?.notes && (
+                            <p className="mt-2 text-[10px] text-neutral-400 italic truncate">{outLine.notes}</p>
+                          )}
+                        </div>
+                      )}
+                    </Card>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }
