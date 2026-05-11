@@ -391,6 +391,9 @@ export default function FinishedGoods() {
         });
       }
 
+      // Cost per ingredient (used for cost summary)
+      const itemCost: number = rawItem?.cost ?? 0;
+
       return {
         name: ing.name || (rawItem ? rawItem.name : "Unknown"),
         effectiveName: rawItem?.name ?? ing.name ?? "Unknown",  // resolved name (may be substitute)
@@ -402,6 +405,8 @@ export default function FinishedGoods() {
         isShort: short || !!conversionError,
         error: conversionError,
         ingIdx,  // carry index so JSX can key the Switch button
+        isLabour,          // true for LABOUR*/LABOR* items
+        itemCost,          // unit cost of the raw item
       };
     });
 
@@ -1125,6 +1130,57 @@ export default function FinishedGoods() {
                   const originalIngName = recipe?.ingredients?.[ing.ingIdx]?.name ?? ing.originalName ?? ing.name;
                   const isModalOpen = substituteModal?.ingIdx === ing.ingIdx;
 
+                  // ── Labour row: special rendering ──────────────────────────
+                  if (ing.isLabour) {
+                    const labourCost = ing.requiredTotal * ing.itemCost;
+                    return (
+                      <TableRow key={`ing-${idx}`} className="bg-amber-50/30 hover:bg-amber-50/50">
+                        <TableCell>
+                          <div className="flex items-center gap-1.5">
+                            <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-amber-100 text-amber-700 shrink-0">
+                              <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                                <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
+                              </svg>
+                            </span>
+                            <div>
+                              <div className="font-medium text-sm text-neutral-900">{ing.effectiveName ?? ing.name}</div>
+                              <div className="text-[10px] text-amber-700 font-medium mt-0.5">Labour / Non-stock cost</div>
+                            </div>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex flex-col gap-0.5">
+                            <span className="text-sm font-bold text-neutral-800 tabular-nums">
+                              {ing.requiredTotal} hr{ing.requiredTotal !== 1 ? "s" : ""}
+                            </span>
+                            <span className="text-[10px] text-neutral-500">
+                              Rate: ${ing.itemCost.toFixed(2)}/hr
+                            </span>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          {/* Labour items intentionally show no stock */}
+                          <span className="text-xs text-neutral-400 italic">Non-stock</span>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <div className="flex flex-col items-end gap-1">
+                            <Badge
+                              variant="success"
+                              className="text-xs px-2 py-0.5 border-none bg-amber-100 text-amber-800"
+                            >
+                              Labour Cost
+                            </Badge>
+                            <span className="text-xs font-bold text-amber-700 tabular-nums">
+                              ${labourCost.toFixed(2)}
+                            </span>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  }
+
+                  // ── Standard ingredient row ────────────────────────────────
+
                   // Candidate substitutes: all raw-type inventory items
                   const candidatesAll = inventoryData.filter((i: any) =>
                     i.itemType !== "Finished Good" && i.itemType !== "Preparation"
@@ -1306,6 +1362,49 @@ export default function FinishedGoods() {
               </TableBody>
             </Table>
           </div>
+
+          {/* ── Production Cost Summary ───────────────────────────────────── */}
+          {activeConstraints && activeConstraints.ingredientsCheck.length > 0 && (() => {
+            const ingredientCost = activeConstraints.ingredientsCheck
+              .filter((r: any) => !r.isLabour)
+              .reduce((sum: number, r: any) => sum + r.requiredTotal * r.itemCost, 0);
+
+            const labourCost = activeConstraints.ingredientsCheck
+              .filter((r: any) => r.isLabour)
+              .reduce((sum: number, r: any) => sum + r.requiredTotal * r.itemCost, 0);
+
+            const totalCost = ingredientCost + labourCost;
+            const projectedYield = activeConstraints.yield ?? 0;
+            const costPerUnit = projectedYield > 0 ? totalCost / projectedYield : 0;
+
+            return (
+              <div className="bg-neutral-50 border border-neutral-200 rounded-lg p-4">
+                <h4 className="text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-3">Production Cost Summary</h4>
+                <div className="grid grid-cols-2 gap-x-8 gap-y-2">
+                  <div className="flex items-center justify-between col-span-2 sm:col-span-1">
+                    <span className="text-xs text-neutral-500">Ingredient Cost</span>
+                    <span className="text-xs font-semibold text-neutral-800 tabular-nums">${ingredientCost.toFixed(2)}</span>
+                  </div>
+                  <div className="flex items-center justify-between col-span-2 sm:col-span-1">
+                    <span className="text-xs text-amber-700 font-medium">Labour Cost</span>
+                    <span className="text-xs font-semibold text-amber-700 tabular-nums">${labourCost.toFixed(2)}</span>
+                  </div>
+                  <div className="col-span-2 border-t border-neutral-200 pt-2 mt-1 flex items-center justify-between">
+                    <span className="text-sm font-semibold text-neutral-900">Total Production Cost</span>
+                    <span className="text-sm font-bold text-brand-700 tabular-nums">${totalCost.toFixed(2)}</span>
+                  </div>
+                  <div className="col-span-2 flex items-center justify-between">
+                    <span className="text-xs text-neutral-500">
+                      Cost per {activeConstraints.unit ?? "unit"}
+                    </span>
+                    <span className="text-xs font-semibold text-neutral-700 tabular-nums">
+                      ${costPerUnit.toFixed(4)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       </Drawer>
 
