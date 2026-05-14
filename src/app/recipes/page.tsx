@@ -9,7 +9,14 @@ import { Drawer } from "@/components/ui/drawer";
 import { loadRecipes, saveRecipes, loadInventory, saveInventory, upsertRecipe, updateInventoryItemCost, syncLinkedFgCost, loadSuppliers, deleteRecipe } from "@/lib/storage";
 import { InventoryEditDrawer } from "@/components/InventoryEditDrawer";
 
-import { normalizeUnit, canonicalizeUnit, resolveEffectiveBaseUom, computeBaseUnitCostFromPack, auditItemUnitAmbiguity } from "@/lib/units";
+import {
+  normalizeUnit,
+  canonicalizeUnit,
+  resolveEffectiveBaseUom,
+  computeBaseUnitCostFromPack,
+  computeIngredientLineCost,
+  auditItemUnitAmbiguity,
+} from "@/lib/units";
 
 import { Plus, Search, SplitSquareVertical, Calculator, Trash2, Sparkles, Pencil } from "lucide-react";
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
@@ -325,40 +332,22 @@ function RecipesPageContent() {
     let errors = 0;
 
     ingredients.forEach(ing => {
-      try {
-        const targetId = ing.inventoryId || ing.fgId;
-        if (targetId) {
-          // Dual-path lookup: row PK first, then shared itemId (same as row renderer)
-          const invItem = inventory.find(i =>
-            i.id.toString() === targetId.toString() ||
-            (i.itemId && i.itemId.toString() === targetId.toString())
-          );
-          if (invItem) {
-             // Phase 1: use resolveEffectiveBaseUom so base_uom takes priority over baseUnit when set
-             const baseTargetUnit = resolveEffectiveBaseUom(invItem);
-             const normQty = normalizeUnit(ing.qty, ing.unit, baseTargetUnit);
+      const targetId = ing.inventoryId || ing.fgId;
+      if (!targetId) return;
 
-             // ── Effective base cost — three-path priority chain ────────────────────
-             // Path 1 (NEW): structured pack fields all populated
-             //   → computeBaseUnitCostFromPack (read-time only, no write-back)
-             // Path 2 (EXISTING): purchaseUnits JSONB
-             //   → effectiveBaseCost = purchaseCost / primary.conversion
-             // Path 3 (LEGACY): item.cost is already the base-unit cost
-             let effectiveBaseCost = invItem.cost;                                        // Path 3 default
-             const structuredCost = computeBaseUnitCostFromPack(invItem);
-             if (structuredCost !== null) {
-               effectiveBaseCost = structuredCost;                                         // Path 1
-             } else if (invItem.purchaseUnits && invItem.purchaseUnits.length > 0) {
-               const primary = invItem.purchaseUnits.find((u: any) => u.isPrimary) || invItem.purchaseUnits[0];
-               const purchCost = (invItem.purchaseCost !== undefined && invItem.purchaseCost !== null)
-                 ? invItem.purchaseCost
-                 : invItem.cost * primary.conversion;                                     // reconstruct for legacy rows
-               effectiveBaseCost = purchCost / primary.conversion;                        // Path 2
-             }
-             total += (normQty * effectiveBaseCost);
-           }
-        }
-      } catch (e) {
+      const invItem = inventory.find(i =>
+        i.id.toString() === targetId.toString() ||
+        (i.itemId && i.itemId.toString() === targetId.toString())
+      );
+      if (!invItem) return;
+
+      // ── SINGLE COSTING ENTRYPOINT: computeIngredientLineCost ─────────
+      // Handles: unit canonicalization, qty conversion into base unit,
+      // and the three-path cost chain (pack fields → purchaseUnits → item.cost).
+      const result = computeIngredientLineCost(ing.qty, ing.unit, invItem);
+      if (result.ok) {
+        total += result.cost;
+      } else {
         errors++;
       }
     });
@@ -847,36 +836,23 @@ function RecipesPageContent() {
 
                   if (invItem) {
                      try {
-                        // Phase 1: use resolveEffectiveBaseUom so base_uom takes priority over baseUnit when set
-                        const baseTargetUnit = resolveEffectiveBaseUom(invItem);
-                        const normQty = normalizeUnit(ing.qty, ing.unit, baseTargetUnit);
-
-                        // ── Effective base cost — three-path priority chain ──────
-                        // Path 1 (NEW): structured pack fields fully populated
-                        // Path 2 (EXISTING): purchaseUnits JSONB
-                        // Path 3 (LEGACY): item.cost is already base-unit cost
-                        let effectiveBaseCost = invItem.cost;                              // Path 3 default
-                        const structuredCost = computeBaseUnitCostFromPack(invItem);
-                        if (structuredCost !== null) {
-                           effectiveBaseCost = structuredCost;                             // Path 1
-                        } else if (invItem.purchaseUnits && invItem.purchaseUnits.length > 0) {
-                            const primary = invItem.purchaseUnits.find((u: any) => u.isPrimary) || invItem.purchaseUnits[0];
-                            const purchCost = (invItem.purchaseCost !== undefined && invItem.purchaseCost !== null)
-                              ? invItem.purchaseCost
-                              : invItem.cost * primary.conversion;                         // reconstruct if missing
-                            effectiveBaseCost = purchCost / primary.conversion;            // Path 2
+                        // ── SINGLE COSTING ENTRYPOINT ───────────────────────────────
+                        const lineResult = computeIngredientLineCost(ing.qty, ing.unit, invItem);
+                        if (lineResult.ok) {
+                          lineCost = lineResult.cost;
+                        } else {
+                          hasError     = true;
+                          costErrorMsg = lineResult.error;
                         }
-                        lineCost = normQty * effectiveBaseCost;
 
                         // Soft-warning audit (Phase 1) — never blocks saving
                         const unitWarnings = auditItemUnitAmbiguity(invItem, ing.unit);
                         if (unitWarnings.length > 0 && !hasError) {
-                          // Surface first warning so ⚠ badge appears without overriding a real error
                           costErrorMsg = unitWarnings[0];
                         }
                      } catch (e: any) {
                         hasError = true;
-                        costErrorMsg = e?.message ?? "Unit conversion error";
+                        costErrorMsg = e?.message ?? 'Unit conversion error';
                      }
                   }
 

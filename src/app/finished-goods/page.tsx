@@ -44,7 +44,11 @@ import {
   syncLinkedFgCost,
   type ProductionMovementRow,
 } from "@/lib/storage";
-import { normalizeUnit } from "@/lib/units";
+import {
+  computeIngredientLineCost,
+  convertQuantity,
+  resolveEffectiveBaseUom,
+} from "@/lib/units";
 import { FgImportModal } from "@/components/FgImportModal";
 
 // ─── Classification helpers ───────────────────────────────────────────────────
@@ -225,14 +229,20 @@ export default function FinishedGoods() {
         };
       });
 
-      // Recalculate theoretical cost client-side (cost × requiredQty per ingredient)
-      const theoreticalCost = newIngredients.reduce((sum: number, ing: any) => {
+      // Recalculate theoretical cost using the canonical costing engine
+      let theoreticalCost = 0;
+      for (const ing of newIngredients) {
         const invItem = inventoryData.find((i: any) =>
           i.id?.toString() === ing.inventoryId?.toString()
         );
-        const unitCost = Number(invItem?.cost ?? 0);
-        return sum + unitCost * Number(ing.quantity ?? 0);
-      }, 0);
+        if (!invItem) continue;
+        const result = computeIngredientLineCost(
+          Number(ing.qty ?? ing.quantity ?? 0),
+          ing.unit ?? '',
+          invItem,
+        );
+        if (result.ok) theoreticalCost += result.cost;
+      }
 
       const updatedRecipe = { ...recipe, ingredients: newIngredients, theoreticalCost };
 
@@ -486,61 +496,77 @@ export default function FinishedGoods() {
       // Labour items (LABOUR*/LABOR* by name) are available on demand.
       // Their instock is always 0 and should never block production or
       // reduce maxBatches — they still appear in the check table for visibility.
-      const itemNameUpper = (rawItem?.name ?? ing.name ?? "").toUpperCase();
-      const isLabour = itemNameUpper.includes("LABOUR") || itemNameUpper.includes("LABOR");
+      const itemNameUpper = (rawItem?.name ?? ing.name ?? '').toUpperCase();
+      const isLabour = itemNameUpper.includes('LABOUR') || itemNameUpper.includes('LABOR');
 
-      let requiredTotal = 0;
-      let short = false;
-      let possibleCount = 0;
-      let conversionError = "";
+      let requiredTotal    = 0;
+      let short            = false;
+      let possibleCount    = 0;
+      let conversionError  = '';
+      let itemCost         = 0;   // cost per base unit
 
-      try {
-        const normalizedQty = normalizeUnit(
+      if (rawItem) {
+        // ── Route through the canonical costing engine ────────────────────────
+        // This is the ONLY place production constraints compute cost/qty.
+        // computeIngredientLineCost handles: unit canonicalization,
+        // qty conversion into item base unit, three-path cost chain.
+        const lineResult = computeIngredientLineCost(
           ing.qty,
           ing.unit,
-          rawItem ? rawItem.unit : ing.unit
+          rawItem,
         );
-        requiredTotal = normalizedQty * batches;
-        if (!isLabour) {
-          short = requiredTotal > inStock;
-          if (short) valid = false;
-          possibleCount = inStock > 0 ? Math.floor(inStock / normalizedQty) : 0;
-          if (possibleCount < maxBatches) maxBatches = possibleCount;
+
+        if (lineResult.ok) {
+          // normalizedQty is in the item's base unit — use for stock comparison
+          const normalizedQtyPerBatch = lineResult.normalizedQty;
+          requiredTotal = normalizedQtyPerBatch * batches;
+          itemCost      = lineResult.costPerBaseUnit;
+
+          if (!isLabour) {
+            short = requiredTotal > inStock;
+            if (short) valid = false;
+            possibleCount = normalizedQtyPerBatch > 0
+              ? Math.floor(inStock / normalizedQtyPerBatch)
+              : 0;
+            if (possibleCount < maxBatches) maxBatches = possibleCount;
+          }
+        } else {
+          // Dimension incompatible — only block production for non-labour
+          conversionError = lineResult.error;
+          if (!isLabour) {
+            valid = false;
+            maxBatches = 0;
+          }
         }
-      } catch (e: any) {
-        conversionError = e.message;
-        if (!isLabour) {
-          valid = false;
-          maxBatches = 0;
-        }
+      } else {
+        // rawItem not found — can still show the row for visibility
+        conversionError = `Inventory item not found`;
+        if (!isLabour) { valid = false; maxBatches = 0; }
       }
 
       if (short || conversionError) {
         shortages.push({
-          name: ing.name || (rawItem ? rawItem.name : "Unknown"),
+          name: ing.name || (rawItem ? rawItem.name : 'Unknown'),
           required: requiredTotal,
           available: inStock,
-          unit: rawItem ? rawItem.unit : ing.unit,
+          unit: rawItem ? resolveEffectiveBaseUom(rawItem) : ing.unit,
           error: conversionError,
         });
       }
 
-      // Cost per ingredient (used for cost summary)
-      const itemCost: number = rawItem?.cost ?? 0;
-
       return {
-        name: ing.name || (rawItem ? rawItem.name : "Unknown"),
-        effectiveName: rawItem?.name ?? ing.name ?? "Unknown",  // resolved name (may be substitute)
-        originalName: ing.name || "Unknown",                    // recipe ingredient name
+        name:          ing.name || (rawItem ? rawItem.name : 'Unknown'),
+        effectiveName: rawItem?.name ?? ing.name ?? 'Unknown',
+        originalName:  ing.name || 'Unknown',
         isSubstituted,
         requiredTotal,
         inStock,
-        unit: rawItem ? rawItem.unit : ing.unit,
+        unit: rawItem ? resolveEffectiveBaseUom(rawItem) : ing.unit,
         isShort: short || !!conversionError,
         error: conversionError,
-        ingIdx,  // carry index so JSX can key the Switch button
-        isLabour,          // true for LABOUR*/LABOR* items
-        itemCost,          // unit cost of the raw item
+        ingIdx,
+        isLabour,
+        itemCost,  // cost per base unit (not raw item.cost)
       };
     });
 
@@ -612,12 +638,17 @@ export default function FinishedGoods() {
       const _itemNameUpper = (rawItem.name ?? ing.name ?? "").toUpperCase();
       const isLabourItem = _itemNameUpper.includes("LABOUR") || _itemNameUpper.includes("LABOR");
 
+      // ── Canonical qty normalisation via the costing engine ──────────────
+      // MUST normalise into the item's base unit — not rawItem.unit (display)
+      // — to ensure stock deduction matches the correct quantity dimension.
+      const baseUomForDeduction = resolveEffectiveBaseUom(rawItem);
+      const deductConv = convertQuantity(ing.qty, ing.unit, baseUomForDeduction);
       let normalizedQty = 0;
-      try {
-        normalizedQty = normalizeUnit(ing.qty, ing.unit, rawItem.unit) * targetBatches;
-      } catch (e) {
+      if (deductConv.ok) {
+        normalizedQty = (deductConv.qty ?? 0) * targetBatches;
+      } else {
         console.error(
-          `[executeProduction] unit convert failed for "${ing.name}": ${(e as any)?.message}. Using raw qty.`
+          `[executeProduction] unit convert failed for "${ing.name}": ${deductConv.error}. Using raw qty.`
         );
         normalizedQty = ing.qty * targetBatches;
       }

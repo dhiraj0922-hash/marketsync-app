@@ -9,7 +9,7 @@ import {
    saveOrders,
    generateOrderId,
 } from "./storage";
- import { normalizeUnit } from "./units";
+ import { normalizeUnit, resolveEffectiveBaseUom } from "./units";
  
  export async function runAutomationEngine() {
   if (typeof window === "undefined") return;
@@ -121,7 +121,7 @@ import {
        );
        if (item) {
           try {
-            const normalizedQty = normalizeUnit(ing.qty, ing.unit, item.baseUnit || item.unit);
+            const normalizedQty = normalizeUnit(ing.qty, ing.unit, resolveEffectiveBaseUom(item));
             const requiredIngQty = batchesNeeded * normalizedQty;
             rawMaterialDeficits[ing.inventoryId] = (rawMaterialDeficits[ing.inventoryId] || 0) + requiredIngQty;
           } catch (e) {

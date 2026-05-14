@@ -1,127 +1,179 @@
 /**
- * src/lib/units.ts
+ * src/lib/units.ts  — SINGLE SOURCE OF TRUTH for all unit/costing logic
  *
- * Canonical unit system for recipe costing and AI import.
+ * Architecture
+ * ─────────────
+ * This file is the ONE place in the entire app that may perform:
+ *   • unit canonicalization
+ *   • quantity conversion between measurement families
+ *   • dimensional compatibility checks
+ *   • ingredient line-cost computation (the THREE-PATH cost chain)
  *
- * Structure:
- *  1. UNIT_CANON  — maps every raw string variant → canonical code
- *  2. UNIT_FAMILIES — conversion factors for each canonical code
- *  3. canonicalizeUnit(raw) — resolve a raw string to a canonical code (or null)
- *  4. normalizeUnit(qty, from, to) — convert qty between any two units in the
- *     same family. Both from/to are resolved through UNIT_CANON first, so raw
- *     DB strings like "fl oz", "litre", "lbs", "fluid ounce" all work.
+ * No page, component, or library may inline:
+ *   • rawItem.cost × qty
+ *   • packCost ÷ packQty
+ *   • ad-hoc normalizeUnit calls for costing
  *
- * Root cause this fixes:
- *   normalizeUnit received raw strings from the DB (invItem.baseUnit / invItem.unit)
- *   which it could not look up because its internal table only contained canonical
- *   codes. "fl oz" stored in the DB → not in table → Unit conversion error → Math Error.
- *   Now both inputs are canonicalized before lookup, so every recognised spelling works.
+ * All costing MUST route through computeIngredientLineCost().
+ * All quantity normalisation MUST route through convertQuantity().
+ *
+ * ─── Exports ──────────────────────────────────────────────────────────────────
+ *   UNIT_CANON              alias → canonical code map
+ *   UNIT_FAMILIES           canonical code → { family, factor } for normalizeUnit
+ *   DIMENSION               'weight' | 'volume' | 'each'  (new categorical type)
+ *   getDimension()          canonical code → DIMENSION (or null)
+ *   areDimensionsCompatible() check before conversion attempt
+ *   canonicalizeUnit()      raw string → canonical code (or null)
+ *   normalizeUnit()         qty conversion (throws on cross-family / unknown)
+ *   convertQuantity()       safe wrapper around normalizeUnit — returns { qty, error }
+ *   resolveEffectiveBaseUom() pick the correct costing base unit for an item
+ *   computeBaseUnitCostFromPack()  pack-field cost decomposition (Path 1)
+ *   computeIngredientLineCost()    THE SINGLE COSTING ENTRYPOINT — all sites use this
+ *   auditItemUnitAmbiguity()       soft-warning audit for inventory items
  */
 
 // ─── 1. Canonical alias table ─────────────────────────────────────────────────
 //
 // Maps every raw / alternate / misspelled unit string → canonical code.
-// Key rule: keys are always lowercase & trimmed (normalizeUnit handles that).
-// Add new aliases here — normalizeUnit and canonicalizeUnit pick them up automatically.
+// Key rule: keys are always lowercase & trimmed.
+// Add new aliases here — all downstream functions pick them up automatically.
 
 export const UNIT_CANON: Record<string, string> = {
   // ── Weight ────────────────────────────────────────────────────────────────
-  g: "g", gm: "g", gms: "g", gram: "g", grams: "g",
-  kg: "kg", kilo: "kg", kilos: "kg", kilogram: "kg", kilograms: "kg",
-  mg: "mg", milligram: "mg", milligrams: "mg",
-  oz: "oz", ounce: "oz", ounces: "oz",
-  lb: "lb", lbs: "lb", pound: "lb", pounds: "lb",
+  g:   'g', gm: 'g', gms: 'g', gram: 'g', grams: 'g',
+  // 'gr' is a common data-entry alias for grams (not the troy grain).
+  // We deliberately map it to 'g' so legacy DB rows using "gr" convert correctly.
+  gr:  'g', grs: 'g',
+  kg:  'kg', kilo: 'kg', kilos: 'kg', kilogram: 'kg', kilograms: 'kg',
+  mg:  'mg', milligram: 'mg', milligrams: 'mg',
+  oz:  'oz', ounce: 'oz', ounces: 'oz',
+  lb:  'lb', lbs: 'lb', pound: 'lb', pounds: 'lb',
 
   // ── Volume (metric / SI) ─────────────────────────────────────────────────
-  ml: "ml", millilitre: "ml", milliliter: "ml", millilitres: "ml", milliliters: "ml",
-  cl: "cl", centilitre: "cl", centiliter: "cl", centilitres: "cl", centiliters: "cl",
-  dl: "dl", decilitre: "dl", deciliter: "dl", decilitres: "dl", deciliters: "dl",
-  l: "l", litre: "l", liter: "l", litres: "l", liters: "l", lt: "l",
+  ml: 'ml', millilitre: 'ml', milliliter: 'ml', millilitres: 'ml', milliliters: 'ml',
+  cl: 'cl', centilitre: 'cl', centiliter: 'cl', centilitres: 'cl', centiliters: 'cl',
+  dl: 'dl', decilitre: 'dl', deciliter: 'dl', decilitres: 'dl', deciliters: 'dl',
+  l:  'l',  litre: 'l', liter: 'l', litres: 'l', liters: 'l', lt: 'l',
 
   // ── Volume (imperial / culinary) ─────────────────────────────────────────
-  // "fl oz" is the canonical code for fluid ounces (not "floz") because
-  // the user's requirement spells it "fl oz" and it reads more naturally.
-  // All aliases — including the legacy "floz" code — resolve to "fl oz".
-  "fl oz": "fl oz",
-  floz: "fl oz",          // legacy canonical used in previous code → mapped here
-  "fl-oz": "fl oz",
-  "fl. oz.": "fl oz",
-  "fl.oz.": "fl oz",
-  "fluid oz": "fl oz",
-  "fluid ounce": "fl oz",
-  "fluid ounces": "fl oz",
-  "fl. oz": "fl oz",
+  'fl oz':    'fl oz',
+  floz:       'fl oz',   // legacy canonical used in old code
+  'fl-oz':    'fl oz',
+  'fl. oz.':  'fl oz',
+  'fl.oz.':   'fl oz',
+  'fluid oz': 'fl oz',
+  'fluid ounce':  'fl oz',
+  'fluid ounces': 'fl oz',
+  'fl. oz':   'fl oz',
 
-  tsp: "tsp", teaspoon: "tsp", teaspoons: "tsp", "tea spoon": "tsp",
-  tbsp: "tbsp", tablespoon: "tbsp", tablespoons: "tbsp", tbs: "tbsp", "table spoon": "tbsp",
-  cup: "cup", cups: "cup",
+  tsp: 'tsp', teaspoon: 'tsp', teaspoons: 'tsp', 'tea spoon': 'tsp',
+  tbsp: 'tbsp', tablespoon: 'tbsp', tablespoons: 'tbsp', tbs: 'tbsp', 'table spoon': 'tbsp',
+  cup: 'cup', cups: 'cup',
 
-  // ── Count / Each — all map to "ea" ───────────────────────────────────────
-  ea: "ea", each: "ea",
-  pcs: "ea", pc: "ea", piece: "ea", pieces: "ea",
-  unit: "ea", units: "ea",
-  no: "ea", nos: "ea", number: "ea",
-  count: "ea", cnt: "ea",
-  "1": "ea",
+  // ── Count / Each ─────────────────────────────────────────────────────────
+  ea: 'ea', each: 'ea',
+  pcs: 'ea', pc: 'ea', piece: 'ea', pieces: 'ea',
+  unit: 'ea', units: 'ea',
+  no: 'ea', nos: 'ea', number: 'ea',
+  count: 'ea', cnt: 'ea',
+  '1': 'ea',
 
   // ── Pack / Portion ────────────────────────────────────────────────────────
-  pack: "pack", packet: "pack", pkt: "pack", packs: "pack",
-  bunch: "bunch", bunches: "bunch",
-  can: "can", cans: "can", tin: "can", tins: "can",
-  bottle: "bottle", bottles: "bottle",
-  bag: "bag", bags: "bag",
-  box: "box", boxes: "box",
-  case: "case", cases: "case",
-  clove: "clove", cloves: "clove",
-  sprig: "sprig", sprigs: "sprig",
-  slice: "slice", slices: "slice",
-  strip: "strip", strips: "strip",
-  sheet: "sheet", sheets: "sheet",
-  knob: "knob",
+  pack: 'pack', packet: 'pack', pkt: 'pack', packs: 'pack',
+  bunch: 'bunch', bunches: 'bunch',
+  can: 'can', cans: 'can', tin: 'can', tins: 'can',
+  bottle: 'bottle', bottles: 'bottle',
+  bag: 'bag', bags: 'bag',
+  box: 'box', boxes: 'box',
+  case: 'case', cases: 'case',
+  clove: 'clove', cloves: 'clove',
+  sprig: 'sprig', sprigs: 'sprig',
+  slice: 'slice', slices: 'slice',
+  strip: 'strip', strips: 'strip',
+  sheet: 'sheet', sheets: 'sheet',
+  knob: 'knob',
 };
 
 // ─── 2. Conversion factors ────────────────────────────────────────────────────
 //
 // Maps canonical code → { family, factor }.
-// factor is the multiplier to convert 1 unit into the family's base:
-//   mass base = kg, volume base = l, count base = ea (all factor 1).
+// factor = multiplier to convert 1 unit into the family's SI base:
+//   mass base   = kg   (factor = qty_in_kg per 1 unit)
+//   volume base = l    (factor = qty_in_litres per 1 unit)
+//   count base  = ea   (all factor 1)
 
 const UNIT_FAMILIES: Record<string, { family: string; factor: number }> = {
-  // Weight — base unit: kg
-  g:   { family: "mass",   factor: 0.001 },
-  kg:  { family: "mass",   factor: 1 },
-  mg:  { family: "mass",   factor: 0.000001 },
-  oz:  { family: "mass",   factor: 0.0283495 },   // 1 oz = 28.3495 g
-  lb:  { family: "mass",   factor: 0.453592 },    // 1 lb = 453.592 g
+  // Weight — base: kg
+  g:   { family: 'mass', factor: 0.001 },
+  kg:  { family: 'mass', factor: 1 },
+  mg:  { family: 'mass', factor: 0.000001 },
+  oz:  { family: 'mass', factor: 0.028349523125 },   // exact per NIST
+  lb:  { family: 'mass', factor: 0.45359237 },       // exact per NIST
 
-  // Volume — base unit: l
-  ml:     { family: "volume", factor: 0.001 },
-  cl:     { family: "volume", factor: 0.01 },
-  dl:     { family: "volume", factor: 0.1 },
-  l:      { family: "volume", factor: 1 },
-  "fl oz":{ family: "volume", factor: 0.0295735 }, // 1 fl oz = 29.5735 ml
-  tsp:    { family: "volume", factor: 0.00492892 }, // 1 tsp = 4.92892 ml
-  tbsp:   { family: "volume", factor: 0.0147868 },  // 1 tbsp = 14.7868 ml
-  cup:    { family: "volume", factor: 0.236588 },   // 1 cup = 236.588 ml
+  // Volume — base: l
+  ml:     { family: 'volume', factor: 0.001 },
+  cl:     { family: 'volume', factor: 0.01 },
+  dl:     { family: 'volume', factor: 0.1 },
+  l:      { family: 'volume', factor: 1 },
+  'fl oz':{ family: 'volume', factor: 0.0295735296 }, // 1 US fl oz = 29.5735296 ml
+  tsp:    { family: 'volume', factor: 0.00492892159 }, // 1 US tsp = 4.92892159 ml
+  tbsp:   { family: 'volume', factor: 0.0147867648 },  // 1 US tbsp = 14.7867648 ml
+  cup:    { family: 'volume', factor: 0.236588236 },   // 1 US cup = 236.588236 ml
 
-  // Count — base unit: ea (all factor 1, 1:1 within family)
-  ea:     { family: "count", factor: 1 },
-  pack:   { family: "count", factor: 1 },
-  box:    { family: "count", factor: 1 },
-  case:   { family: "count", factor: 1 },
-  can:    { family: "count", factor: 1 },
-  bottle: { family: "count", factor: 1 },
-  bag:    { family: "count", factor: 1 },
-  bunch:  { family: "count", factor: 1 },
-  clove:  { family: "count", factor: 1 },
-  sprig:  { family: "count", factor: 1 },
-  slice:  { family: "count", factor: 1 },
-  strip:  { family: "count", factor: 1 },
-  sheet:  { family: "count", factor: 1 },
-  knob:   { family: "count", factor: 1 },
+  // Count — base: ea (all 1:1)
+  ea:     { family: 'count', factor: 1 },
+  pack:   { family: 'count', factor: 1 },
+  box:    { family: 'count', factor: 1 },
+  case:   { family: 'count', factor: 1 },
+  can:    { family: 'count', factor: 1 },
+  bottle: { family: 'count', factor: 1 },
+  bag:    { family: 'count', factor: 1 },
+  bunch:  { family: 'count', factor: 1 },
+  clove:  { family: 'count', factor: 1 },
+  sprig:  { family: 'count', factor: 1 },
+  slice:  { family: 'count', factor: 1 },
+  strip:  { family: 'count', factor: 1 },
+  sheet:  { family: 'count', factor: 1 },
+  knob:   { family: 'count', factor: 1 },
 };
 
-// ─── 3. canonicalizeUnit ──────────────────────────────────────────────────────
+// ─── 3. Dimensional categories ────────────────────────────────────────────────
+//
+// High-level dimension used for compatibility checks.
+// 'weight' and 'volume' are inter-convertible within themselves.
+// 'each' cannot convert to weight or volume.
+
+export type Dimension = 'weight' | 'volume' | 'each';
+
+const FAMILY_TO_DIMENSION: Record<string, Dimension> = {
+  mass:   'weight',
+  volume: 'volume',
+  count:  'each',
+};
+
+/**
+ * Return the Dimension for a canonical unit code, or null if unrecognised.
+ */
+export function getDimension(canonicalCode: string): Dimension | null {
+  const def = UNIT_FAMILIES[canonicalCode];
+  if (!def) return null;
+  return FAMILY_TO_DIMENSION[def.family] ?? null;
+}
+
+/**
+ * Check whether two canonical unit codes can be converted to each other.
+ * Returns true for same-family pairs (oz ↔ g, ml ↔ l) and same-unit pairs.
+ * Returns false for cross-family (g ↔ ml, oz ↔ ea).
+ */
+export function areDimensionsCompatible(fromCanon: string, toCanon: string): boolean {
+  if (fromCanon === toCanon) return true;
+  const fromDef = UNIT_FAMILIES[fromCanon];
+  const toDef   = UNIT_FAMILIES[toCanon];
+  if (!fromDef || !toDef) return false;
+  return fromDef.family === toDef.family;
+}
+
+// ─── 4. canonicalizeUnit ──────────────────────────────────────────────────────
 
 /**
  * Resolve a raw unit string to its canonical code.
@@ -135,59 +187,50 @@ const UNIT_FAMILIES: Record<string, { family: string; factor: number }> = {
  *   "LBS"          → "lb"
  *   "fl. oz."      → "fl oz"
  *   "grams"        → "g"
+ *   "gr"           → "g"      ← common data-entry alias for grams
  */
 export function canonicalizeUnit(raw: string | null | undefined): string | null {
-  if (!raw || typeof raw !== "string") return null;
+  if (!raw || typeof raw !== 'string') return null;
 
-  const clean = raw.trim().toLowerCase().replace(/[,;]+$/, "");
+  const clean = raw.trim().toLowerCase().replace(/[,;]+$/, '');
   if (!clean) return null;
 
   // Direct match
   if (UNIT_CANON[clean]) return UNIT_CANON[clean];
 
   // Multi-word lookup with normalised internal spaces (e.g. "fl  oz" → "fl oz")
-  const spaceColl = clean.replace(/\s+/g, " ");
+  const spaceColl = clean.replace(/\s+/g, ' ');
   if (UNIT_CANON[spaceColl]) return UNIT_CANON[spaceColl];
 
   // Plural stripping: "grams" → "gram" → "g"
-  if (clean.endsWith("s") && UNIT_CANON[clean.slice(0, -1)]) {
+  if (clean.endsWith('s') && UNIT_CANON[clean.slice(0, -1)]) {
     return UNIT_CANON[clean.slice(0, -1)];
   }
 
   return null;
 }
 
-// ─── 4. normalizeUnit ─────────────────────────────────────────────────────────
+// ─── 5. normalizeUnit ─────────────────────────────────────────────────────────
 
 /**
  * Convert `qty` from one unit to another within the same measurement family.
  *
- * Both `fromUnitBase` and `toUnitBase` are resolved through the canonical alias
- * table before conversion, so raw DB strings (e.g. "fl oz", "litre", "lbs") and
- * canonical codes (e.g. "l", "kg", "ea") both work at every call site without
- * any changes to callers.
+ * Both inputs are resolved through UNIT_CANON before conversion, so raw DB
+ * strings ("fl oz", "litre", "lbs", "gr") all work without caller changes.
  *
- * Supported conversions (cross-family within same dimension auto-convert):
- *   Mass:   g ↔ kg ↔ lb ↔ oz  (and mg)
- *   Volume: ml ↔ l ↔ fl oz ↔ tsp ↔ tbsp ↔ cup  (and cl, dl)
- *   Count:  ea ↔ pcs ↔ pack ↔ box ↔ case ↔ can ↔ bottle …
+ * Throws — with a descriptive message — for:
+ *   • unrecognised unit strings
+ *   • cross-family pairs (mass ↔ volume, volume ↔ each, etc.)
  *
- * Cross-family (mass ↔ volume, ea ↔ kg, etc.) throws with a descriptive message.
- * Unknown unit strings throw with the unrecognised raw value in the message.
- *
- * @param qty      Quantity in the source unit
- * @param fromUnitBase  Source unit (raw or canonical)
- * @param toUnitBase    Target unit (raw or canonical)
- * @returns Converted quantity, rounded to 6 decimal places
+ * IMPORTANT: prefer convertQuantity() at call-sites that want a { qty, error }
+ * result instead of a thrown exception.
  */
-export function normalizeUnit(qty: number, fromUnitBase: string, toUnitBase: string): number {
+export function normalizeUnit(qty: number, fromUnitRaw: string, toUnitRaw: string): number {
   if (qty === 0) return 0;
 
-  // Canonicalize both inputs through the alias table
-  const fromCanon = canonicalizeUnit(fromUnitBase) ?? fromUnitBase.trim().toLowerCase();
-  const toCanon   = canonicalizeUnit(toUnitBase)   ?? toUnitBase.trim().toLowerCase();
+  const fromCanon = canonicalizeUnit(fromUnitRaw) ?? fromUnitRaw.trim().toLowerCase();
+  const toCanon   = canonicalizeUnit(toUnitRaw)   ?? toUnitRaw.trim().toLowerCase();
 
-  // Identical canonical units — no conversion needed (handles ea↔ea, kg↔kg, etc.)
   if (fromCanon === toCanon) return qty;
 
   const fromDef = UNIT_FAMILIES[fromCanon];
@@ -196,41 +239,75 @@ export function normalizeUnit(qty: number, fromUnitBase: string, toUnitBase: str
   if (!fromDef || !toDef || fromDef.family !== toDef.family) {
     const hint =
       !fromDef
-        ? `"${fromUnitBase}" is not a recognised unit`
+        ? `"${fromUnitRaw}" is not a recognised unit`
         : !toDef
-        ? `"${toUnitBase}" is not a recognised unit`
-        : `"${fromUnitBase}" (${fromDef.family}) cannot convert to "${toUnitBase}" (${toDef.family}) — they are in different measurement families`;
+        ? `"${toUnitRaw}" is not a recognised unit`
+        : `"${fromUnitRaw}" (${FAMILY_TO_DIMENSION[fromDef.family] ?? fromDef.family}) ` +
+          `cannot convert to "${toUnitRaw}" (${FAMILY_TO_DIMENSION[toDef.family] ?? toDef.family}) — ` +
+          `incompatible dimensions`;
     throw new Error(`Unit conversion error: ${hint}`);
   }
 
-  // Convert: qty → family base → target unit
+  // Convert: qty → family SI base → target unit
   const baseQty   = qty * fromDef.factor;
   const targetQty = baseQty / toDef.factor;
-
-  // Round to 6 decimal places
   return Math.round(targetQty * 1_000_000) / 1_000_000;
 }
 
-// =============================================================================
-// Phase 1: Structured packaging / UOM helpers
-//
-// These are additive exports — nothing above is changed.
-// They are only called by recipe costing when the new structured fields are
-// populated. All three return null / empty-array when fields are missing so
-// callers can safely fall back to legacy behaviour.
-// =============================================================================
+// ─── 6. convertQuantity — safe non-throwing wrapper ──────────────────────────
+
+export type ConvertQuantityResult =
+  | { ok: true;  qty: number; fromCanon: string; toCanon: string }
+  | { ok: false; qty: null;   error: string; fromCanon: string | null; toCanon: string | null };
+
+/**
+ * Safe wrapper around normalizeUnit that never throws.
+ *
+ * Use this instead of normalizeUnit() everywhere you need a { ok, qty, error }
+ * result rather than a try/catch. All production/requisition deduction logic
+ * MUST use this so conversion errors are surfaced clearly instead of silently
+ * using raw quantities.
+ */
+export function convertQuantity(
+  qty: number,
+  fromUnitRaw: string,
+  toUnitRaw:   string,
+): ConvertQuantityResult {
+  const fromCanon = canonicalizeUnit(fromUnitRaw) ?? null;
+  const toCanon   = canonicalizeUnit(toUnitRaw)   ?? null;
+
+  try {
+    const converted = normalizeUnit(qty, fromUnitRaw, toUnitRaw);
+    return {
+      ok:        true,
+      qty:       converted,
+      fromCanon: fromCanon ?? fromUnitRaw.trim().toLowerCase(),
+      toCanon:   toCanon   ?? toUnitRaw.trim().toLowerCase(),
+    };
+  } catch (err: any) {
+    return {
+      ok:        false,
+      qty:       null,
+      error:     err?.message ?? 'Unit conversion error',
+      fromCanon,
+      toCanon,
+    };
+  }
+}
+
+// ─── 7. resolveEffectiveBaseUom ───────────────────────────────────────────────
 
 /**
  * Resolve the effective canonical costing unit for an inventory item.
  *
  * Priority:
- *   1. base_uom (new, explicit)            → item.baseUomNew
- *   2. baseunit (legacy DB column)         → item.baseUnit
- *   3. unit (display unit, last resort)    → item.unit
+ *   1. base_uom (new, explicit)        → item.baseUomNew
+ *   2. baseunit (legacy DB column)     → item.baseUnit
+ *   3. unit (display unit, last resort)→ item.unit
  *   4. 'ea' (hard fallback, never empty)
  *
- * Used by recipe costing and the recipe builder row renderer so both use
- * the identical target unit for normalizeUnit() calls.
+ * Used by computeIngredientLineCost so both the constraint checker and the
+ * recipe builder use the identical target unit.
  */
 export function resolveEffectiveBaseUom(item: {
   baseUomNew?: string | null;
@@ -245,6 +322,8 @@ export function resolveEffectiveBaseUom(item: {
   );
 }
 
+// ─── 8. computeBaseUnitCostFromPack — Path 1 cost ────────────────────────────
+
 /**
  * Compute cost per base unit from the structured pack fields (read-time only).
  *
@@ -252,13 +331,9 @@ export function resolveEffectiveBaseUom(item: {
  *   totalBaseUnits = normalizeUnit(packQty × innerUnitSize, innerUnitUom → baseUom)
  *   costPerBaseUnit = purchaseCost / totalBaseUnits
  *
- * Returns null if:
- *   - any required field is null / zero
- *   - innerUnitUom and baseUom are in different measurement families (cross-family)
- *   - normalizeUnit throws for any reason
- *
- * The caller must fall back to the next costing path when null is returned.
- * Per Phase 1 decisions: this result is NEVER written back to item.cost.
+ * Returns null if any required field is missing/zero or units are incompatible.
+ * Caller (computeIngredientLineCost) falls back to Path 2 → Path 3 on null.
+ * Per architecture decision: this result is NEVER written back to item.cost.
  */
 export function computeBaseUnitCostFromPack(item: {
   purchaseCost?:  number | null;
@@ -271,7 +346,6 @@ export function computeBaseUnitCostFromPack(item: {
 }): number | null {
   const { purchaseCost, packQty, innerUnitSize, innerUnitUom } = item;
 
-  // All structured fields must be present and non-zero
   if (
     purchaseCost  == null || purchaseCost  <= 0 ||
     packQty       == null || packQty       <= 0 ||
@@ -280,31 +354,142 @@ export function computeBaseUnitCostFromPack(item: {
   ) return null;
 
   const baseUom = resolveEffectiveBaseUom(item);
-  if (!baseUom || baseUom === 'ea') {
-    // Structured cost computation is meaningless for count-only items
-    return null;
-  }
+  if (!baseUom || baseUom === 'ea') return null;
 
   try {
-    const totalInnerQty  = packQty * innerUnitSize;                     // e.g. 12 × 330 = 3960 ml
-    const totalBaseUnits = normalizeUnit(totalInnerQty, innerUnitUom, baseUom); // e.g. 3960 ml → 3.96 l
+    const totalInnerQty  = packQty * innerUnitSize;
+    const totalBaseUnits = normalizeUnit(totalInnerQty, innerUnitUom, baseUom);
     if (totalBaseUnits <= 0) return null;
     return purchaseCost / totalBaseUnits;
   } catch {
-    // Cross-family or unrecognised unit — fall through to legacy path
     return null;
   }
 }
 
+// ─── 9. computeIngredientLineCost — THE SINGLE COSTING ENTRYPOINT ────────────
+
 /**
- * Return a list of soft-warning strings for an inventory item whose unit fields
- * are ambiguous or inconsistent.
+ * Compute the cost for one recipe ingredient line.
  *
- * These are shown as ⚠ badges in the recipe builder — they never block saving.
- * Per Phase 1 decisions, allowed_recipe_uoms violations are soft warnings only.
+ * This is the ONLY function in the entire application that may perform
+ * ingredient cost math. All pages/components MUST call this.
  *
- * @param item   Front-end item shape (camelCase)
- * @param usedUnit  The unit the user selected in the recipe ingredient row
+ * Algorithm
+ * ─────────
+ * 1. Resolve item's canonical base unit: resolveEffectiveBaseUom(invItem)
+ * 2. Convert recipe qty into that base unit: normalizeUnit(recipeQty, recipeUnit, baseUnit)
+ * 3. Resolve cost per base unit — three-path priority chain:
+ *      Path 1 (BEST): structured pack fields (computeBaseUnitCostFromPack)
+ *      Path 2: purchaseUnits JSONB → purchaseCost ÷ primary.conversion
+ *      Path 3 (LEGACY): item.cost is already the per-base-unit cost
+ * 4. line cost = normalizedQty × effectiveBaseCost
+ *
+ * Correct example:
+ *   Pack 380 gr, cost $4.50, recipe uses 24 oz
+ *   → baseUnit = 'g'
+ *   → normalizedQty = normalizeUnit(24, 'oz', 'g') = 680.388 g
+ *   → effectiveBaseCost = 4.50 / 380 = 0.011842 $/g   (via Path 1 or purchaseUnits)
+ *   → lineCost = 680.388 × 0.011842 = $8.06 ✓
+ *
+ * @param recipeQty   Quantity specified in the recipe
+ * @param recipeUnit  Unit specified in the recipe (raw string, any recognised alias)
+ * @param invItem     The inventory item (front-end camelCase shape from storage.ts)
+ *
+ * @returns
+ *   ok: true   → { cost, normalizedQty, baseUnit, costPerBaseUnit }
+ *   ok: false  → { error, normalizedQty (null), baseUnit }
+ */
+export type IngredientLineCostResult =
+  | {
+      ok:             true;
+      cost:           number;   // total line cost ($)
+      normalizedQty:  number;   // qty in item's base unit
+      baseUnit:       string;   // effective base unit used
+      costPerBaseUnit:number;   // cost per base unit ($)
+      costPath:       1 | 2 | 3; // which path resolved the cost
+    }
+  | {
+      ok:             false;
+      cost:           0;
+      normalizedQty:  null;
+      baseUnit:       string;
+      costPerBaseUnit:0;
+      error:          string;
+    };
+
+export function computeIngredientLineCost(
+  recipeQty:  number,
+  recipeUnit: string,
+  invItem: {
+    cost?:          number | null;
+    purchaseCost?:  number | null;
+    purchaseUnits?: Array<{ isPrimary?: boolean; conversion: number }> | null;
+    packQty?:       number | null;
+    innerUnitSize?: number | null;
+    innerUnitUom?:  string | null;
+    baseUomNew?:    string | null;
+    baseUnit?:      string | null;
+    unit?:          string | null;
+  },
+): IngredientLineCostResult {
+  const baseUnit = resolveEffectiveBaseUom(invItem);
+
+  // ── Step 1: Quantity conversion ───────────────────────────────────────────
+  const convResult = convertQuantity(recipeQty, recipeUnit, baseUnit);
+  if (!convResult.ok) {
+    return {
+      ok:             false,
+      cost:           0,
+      normalizedQty:  null,
+      baseUnit,
+      costPerBaseUnit:0,
+      error:          convResult.error,
+    };
+  }
+  const normalizedQty = convResult.qty!;
+
+  // ── Step 2: Cost per base unit — three-path chain ─────────────────────────
+  let effectiveBaseCost: number;
+  let costPath: 1 | 2 | 3;
+
+  // Path 1: structured pack fields (purchaseCost, packQty, innerUnitSize, innerUnitUom)
+  const structuredCost = computeBaseUnitCostFromPack(invItem);
+  if (structuredCost !== null) {
+    effectiveBaseCost = structuredCost;
+    costPath          = 1;
+  } else if (invItem.purchaseUnits && invItem.purchaseUnits.length > 0) {
+    // Path 2: legacy purchaseUnits JSONB
+    const primary = invItem.purchaseUnits.find((u) => u.isPrimary) ?? invItem.purchaseUnits[0];
+    const purchCost =
+      invItem.purchaseCost !== undefined && invItem.purchaseCost !== null
+        ? Number(invItem.purchaseCost)
+        : Number(invItem.cost ?? 0) * primary.conversion; // reconstruct if purchaseCost missing
+    effectiveBaseCost = purchCost / primary.conversion;
+    costPath          = 2;
+  } else {
+    // Path 3: item.cost is already the per-base-unit cost (legacy)
+    effectiveBaseCost = Number(invItem.cost ?? 0);
+    costPath          = 3;
+  }
+
+  const cost = normalizedQty * effectiveBaseCost;
+
+  return {
+    ok:             true,
+    cost:           Math.round(cost * 1_000_000) / 1_000_000, // 6dp precision
+    normalizedQty,
+    baseUnit,
+    costPerBaseUnit:effectiveBaseCost,
+    costPath,
+  };
+}
+
+// ─── 10. auditItemUnitAmbiguity — soft-warning audit ─────────────────────────
+
+/**
+ * Return soft-warning strings for an inventory item whose unit fields are
+ * ambiguous or inconsistent. Shown as ⚠ badges in the recipe builder.
+ * These never block saving — they are informational only.
  */
 export function auditItemUnitAmbiguity(
   item: {
@@ -315,7 +500,7 @@ export function auditItemUnitAmbiguity(
     innerUnitUom?:     string | null;
     allowedRecipeUoms?: string[] | null;
   },
-  usedUnit?: string | null
+  usedUnit?: string | null,
 ): string[] {
   const warnings: string[] = [];
   const effectiveBase = resolveEffectiveBaseUom(item);
@@ -324,49 +509,48 @@ export function auditItemUnitAmbiguity(
   // 1. No meaningful base unit
   if (!effectiveBase || effectiveBase === 'ea') {
     warnings.push(
-      `"${label}" has no specific base unit — pack-level cost computation is disabled. Costing uses item.cost directly.`
+      `"${label}" has no specific base unit — pack-level cost computation is disabled. Costing uses item.cost directly.`,
     );
   }
 
-  // 2. base_uom conflicts with existing baseunit (informational, not an error)
+  // 2. base_uom conflicts with existing baseunit (informational)
   const legacyBase = item.baseUnit?.trim();
   const newBase    = item.baseUomNew?.trim();
   if (newBase && legacyBase && newBase !== legacyBase) {
     try {
-      // If they convert to each other they're just aliases — not really conflicting
       normalizeUnit(1, newBase, legacyBase);
     } catch {
       warnings.push(
-        `"${label}" base_uom="${newBase}" and baseunit="${legacyBase}" are in different measurement families. base_uom takes priority for costing.`
+        `"${label}" base_uom="${newBase}" and baseunit="${legacyBase}" are in different measurement families. base_uom takes priority for costing.`,
       );
     }
   }
 
-  // 3. inner_unit_uom cannot convert to effectiveBase (cross-family conflict)
+  // 3. inner_unit_uom cannot convert to effectiveBase
   const innerUom = item.innerUnitUom?.trim();
   if (innerUom && effectiveBase && effectiveBase !== 'ea') {
     try {
       normalizeUnit(1, innerUom, effectiveBase);
     } catch {
       warnings.push(
-        `"${label}" inner_unit_uom="${innerUom}" cannot convert to costing unit "${effectiveBase}" — they are different measurement families. Pack cost computation falls back to legacy.`
+        `"${label}" inner_unit_uom="${innerUom}" cannot convert to costing unit "${effectiveBase}" — they are different measurement families. Pack cost computation falls back to legacy.`,
       );
     }
   }
 
-  // 4. Soft warning: recipe ingredient unit not in allowed_recipe_uoms whitelist
+  // 4. Soft warning: recipe ingredient unit not in allowed_recipe_uoms
   if (
     usedUnit &&
     Array.isArray(item.allowedRecipeUoms) &&
     item.allowedRecipeUoms.length > 0
   ) {
-    const usedCanon    = canonicalizeUnit(usedUnit) ?? usedUnit.trim().toLowerCase();
+    const usedCanon     = canonicalizeUnit(usedUnit) ?? usedUnit.trim().toLowerCase();
     const isWhitelisted = item.allowedRecipeUoms.some(
-      (u) => (canonicalizeUnit(u) ?? u.trim().toLowerCase()) === usedCanon
+      (u) => (canonicalizeUnit(u) ?? u.trim().toLowerCase()) === usedCanon,
     );
     if (!isWhitelisted) {
       warnings.push(
-        `"${label}" does not list "${usedUnit}" as an allowed recipe unit. Costing may be inaccurate — allowed: ${item.allowedRecipeUoms.join(', ')}.`
+        `"${label}" does not list "${usedUnit}" as an allowed recipe unit. Costing may be inaccurate — allowed: ${item.allowedRecipeUoms.join(', ')}.`,
       );
     }
   }
