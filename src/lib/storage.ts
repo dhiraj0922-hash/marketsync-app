@@ -1052,6 +1052,94 @@ export async function updateSaleItemStock(
   return { success: true, newStock };
 }
 
+/**
+ * createFgFromRecipe — one-click "Add to Finished Goods" from the Recipes list.
+ *
+ * Creates a new hq_sale_items row pre-filled from the recipe.  Aborts and
+ * returns { alreadyLinked: true } if any row with source_recipe_id = recipe.id
+ * already exists, so the caller can show "Linked" without creating a duplicate.
+ *
+ * Fields written:
+ *   name                  = recipe.name
+ *   source_recipe_id      = recipe.id
+ *   source_recipe_yield_qty = recipe.yieldQty  (or 1)
+ *   making_cost           = recipe.theoreticalCost / max(recipe.yieldQty, 1)
+ *   base_unit             = recipe.yieldUnit   (e.g. "kg", "L", "portions")
+ *   pack_qty              = 1
+ *   category              = recipe.category    (or null)
+ *   is_active             = true
+ *   is_requisitionable    = true
+ *   instock               = 0
+ *   par_level             = 0
+ *
+ * Does NOT touch: manual_price, suggested_price (generated), any inventory row.
+ */
+export async function createFgFromRecipe(recipe: {
+  id:              string;
+  name:            string;
+  theoreticalCost: number;
+  yieldQty:        number;
+  yieldUnit:       string;
+  category?:       string | null;
+}): Promise<{ success: boolean; alreadyLinked?: boolean; newId?: string; error?: any }> {
+
+  // 1. Guard: check whether a sale item is already linked to this recipe
+  const { data: existing, error: checkErr } = await supabase
+    .from('hq_sale_items')
+    .select('id')
+    .eq('source_recipe_id', recipe.id)
+    .limit(1);
+
+  if (checkErr) {
+    console.error('[createFgFromRecipe] link-check error', checkErr);
+    return { success: false, error: checkErr };
+  }
+
+  if (existing && existing.length > 0) {
+    console.log('[createFgFromRecipe] already linked — skipping insert', recipe.id);
+    return { success: true, alreadyLinked: true, newId: existing[0].id };
+  }
+
+  // 2. Build the row
+  const yieldQty      = Math.max(Number(recipe.yieldQty) || 1, 0.0001);
+  const makingCost    = Number((Number(recipe.theoreticalCost || 0) / yieldQty).toFixed(4));
+  const newId         = crypto.randomUUID();
+  const now           = new Date().toISOString();
+
+  const row = {
+    id:                      newId,
+    name:                    recipe.name.trim(),
+    category:                recipe.category?.trim() || null,
+    source_commissary:       'Commissary HQ',
+    description:             null,
+    base_unit:               (recipe.yieldUnit || 'ea').trim().toLowerCase(),
+    instock:                 0,
+    par_level:               0,
+    is_active:               true,
+    is_requisitionable:      true,
+    source_recipe_id:        recipe.id,
+    source_recipe_yield_qty: yieldQty,
+    making_cost:             makingCost,
+    making_cost_updated_at:  now,
+    manual_price:            null,
+    pack_qty:                1,
+    created_at:              now,
+    updated_at:              now,
+  };
+
+  const { error: insertErr } = await supabase.from('hq_sale_items').insert(row);
+  if (insertErr) {
+    console.error('[createFgFromRecipe] insert error', insertErr);
+    return { success: false, error: insertErr };
+  }
+
+  console.log(
+    `[createFgFromRecipe] Created FG "${recipe.name}" (id=${newId}) ` +
+    `| makingCost=${makingCost} | baseUnit=${recipe.yieldUnit} | recipeId=${recipe.id}`
+  );
+  return { success: true, alreadyLinked: false, newId };
+}
+
 
 // ----------------------------------------------------------------------------
 // 2. SUPPLIERS 

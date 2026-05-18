@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
-import { loadRecipes, saveRecipes, loadInventory, saveInventory, upsertRecipe, updateInventoryItemCost, syncLinkedFgCost, loadSuppliers, deleteRecipe } from "@/lib/storage";
+import { loadRecipes, saveRecipes, loadInventory, saveInventory, upsertRecipe, updateInventoryItemCost, syncLinkedFgCost, loadSuppliers, deleteRecipe, loadSaleItems, createFgFromRecipe } from "@/lib/storage";
 import { InventoryEditDrawer } from "@/components/InventoryEditDrawer";
 
 import {
@@ -18,7 +18,7 @@ import {
   auditItemUnitAmbiguity,
 } from "@/lib/units";
 
-import { Plus, Search, SplitSquareVertical, Calculator, Trash2, Sparkles, Pencil } from "lucide-react";
+import { Plus, Search, SplitSquareVertical, Calculator, Trash2, Sparkles, Pencil, Link } from "lucide-react";
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
 import { AIRecipeImport } from "@/components/AIRecipeImport";
 import { useAuth } from "@/components/AuthProvider";
@@ -103,6 +103,12 @@ function RecipesPageContent() {
   const [isSaving, setIsSaving] = useState(false);
   const [builderError, setBuilderError] = useState<string | null>(null);
 
+  // "Add to Finished Goods" state
+  // Set of recipe IDs that already have a linked hq_sale_item
+  const [linkedRecipeIds, setLinkedRecipeIds] = useState<Set<string>>(new Set());
+  // ID of the recipe currently being linked (for per-button loading spinner)
+  const [addingFgForId, setAddingFgForId] = useState<string | null>(null);
+
   // Ingredient combobox state
   const [ingSearch, setIngSearch]         = useState("");
   const [ingPanelOpen, setIngPanelOpen]   = useState(false);
@@ -160,6 +166,20 @@ function RecipesPageContent() {
         setRecipes(loadedRec);
         setInventory(loadedInv);
         setSuppliersData(Array.isArray(loadedSups) ? loadedSups : []);
+
+        // Populate linkedRecipeIds from existing sale items so buttons start
+        // in the correct "Linked" state without a separate round-trip later.
+        try {
+          const saleItems = await loadSaleItems();
+          const linked = new Set<string>(
+            saleItems
+              .filter((si: any) => si.sourceRecipeId)
+              .map((si: any) => si.sourceRecipeId as string)
+          );
+          setLinkedRecipeIds(linked);
+        } catch (siErr) {
+          console.warn('[RecipeDiag] could not load sale items for link status', siErr);
+        }
       } catch(e) {
         console.error(e);
       } finally {
@@ -196,6 +216,33 @@ function RecipesPageContent() {
   }, [isLoading, recipes]);
 
   if (isLoading) return <div className="animate-pulse flex p-12 justify-center text-neutral-400">Loading Recipes...</div>;
+
+  // ── "Add to Finished Goods" handler ──────────────────────────────────────
+  const handleAddToFg = async (recipe: any) => {
+    if (addingFgForId) return; // debounce
+    setAddingFgForId(recipe.id);
+    try {
+      const res = await createFgFromRecipe({
+        id:              recipe.id,
+        name:            recipe.name,
+        theoreticalCost: recipe.theoreticalCost ?? 0,
+        yieldQty:        recipe.yieldQty ?? 1,
+        yieldUnit:       recipe.yieldUnit ?? 'ea',
+        category:        recipe.category ?? null,
+      });
+      if (res.success) {
+        // Optimistically mark this recipe as linked in UI
+        setLinkedRecipeIds(prev => new Set([...prev, recipe.id]));
+      } else {
+        const msg = res.error?.message ?? res.error?.detail ?? 'Unknown error';
+        alert(`Failed to create Finished Good: ${msg}`);
+      }
+    } catch (err: any) {
+      alert(`Unexpected error: ${err?.message ?? err}`);
+    } finally {
+      setAddingFgForId(null);
+    }
+  };
 
   // ── Delete handler ────────────────────────────────────────────────────────
   const handleDeleteConfirm = async () => {
@@ -609,7 +656,30 @@ function RecipesPageContent() {
                     <p className="text-[10px] uppercase text-neutral-400 font-semibold tracking-wider mt-1">{recipe.margin}% target margin</p>
                   </TableCell>
                   <TableCell className="pr-6 py-4 text-right">
-                    <div className="inline-flex items-center gap-2">
+                    <div className="inline-flex items-center gap-2 flex-wrap justify-end">
+                      {/* ── Add to Finished Goods ─────────────────────────── */}
+                      {linkedRecipeIds.has(recipe.id) ? (
+                        <span
+                          className="px-3 py-1.5 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-md text-xs font-semibold inline-flex items-center gap-1.5 cursor-default"
+                          title="This recipe is already linked to a Finished Good"
+                        >
+                          <Link className="h-3.5 w-3.5" /> Linked
+                        </span>
+                      ) : (
+                        <button
+                          id={`add-fg-${recipe.id}`}
+                          onClick={() => handleAddToFg(recipe)}
+                          disabled={addingFgForId === recipe.id}
+                          className="px-3 py-1.5 bg-white border border-brand-300 text-brand-700 rounded-md text-xs font-semibold hover:bg-brand-50 transition-colors shadow-sm inline-flex items-center gap-1.5 disabled:opacity-60 disabled:cursor-not-allowed"
+                          title="Create a Finished Good from this recipe"
+                        >
+                          {addingFgForId === recipe.id ? (
+                            <><span className="h-3 w-3 border-2 border-brand-400 border-t-transparent rounded-full animate-spin" /> Adding…</>
+                          ) : (
+                            <><Link className="h-3.5 w-3.5" /> Add to FG</>
+                          )}
+                        </button>
+                      )}
                       <button
                         onClick={() => openBuilder(recipe)}
                         className="px-3 py-1.5 bg-white border border-neutral-200 text-neutral-700 rounded-md text-xs font-semibold hover:bg-neutral-50 transition-colors shadow-sm inline-flex items-center gap-1.5"
