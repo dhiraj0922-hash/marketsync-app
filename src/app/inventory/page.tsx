@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/components/AuthProvider";
 import { isHqAdmin, resolveLocationId } from "@/lib/roles";
@@ -9,8 +9,9 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
-import { Search, Plus, Upload, MoreHorizontal, ShoppingCart, History, Save, Trash2, ArrowDown, ArrowUp, AlertTriangle, X, Download, Loader2 } from "lucide-react";
-import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId, logMovement, deleteInventoryItem, deleteSaleItemByNameOrId, insertPurchaseOptions, loadPurchaseOptions, savePurchaseOptions, deletePurchaseOption } from "@/lib/storage";
+import { Search, Plus, Upload, MoreHorizontal, ShoppingCart, History, Save, Trash2, ArrowDown, ArrowUp, AlertTriangle, X, Download, Loader2, Link2, ChevronDown, ChevronRight, GitMerge } from "lucide-react";
+import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId, logMovement, deleteInventoryItem, deleteSaleItemByNameOrId, insertPurchaseOptions, loadPurchaseOptions, savePurchaseOptions, deletePurchaseOption, updateInventoryRowItemId } from "@/lib/storage";
+import { normalizeInventoryName } from "@/lib/inventoryIdentity";
 
 export default function Inventory() {
   const router = useRouter();
@@ -120,6 +121,24 @@ export default function Inventory() {
   });
 
   const [isLoading, setIsLoading] = useState(true);
+
+  // ── Identity inspection state (HQ only, additive) ─────────────────────────
+  // sharedLinkedDrawerItem: the inventory row whose shared-product drawer is open.
+  // showDuplicatePanel: toggle for the collapsible duplicate detection panel.
+  // mergeConfirm: pending merge operation waiting for user confirmation.
+  type MergeTarget = {
+    sourceRowId:    string;  // the row whose item_id will be reassigned
+    sourceRowName:  string;
+    sourceItemId:   string;  // current (old) item_id
+    canonicalItemId: string; // new item_id to assign
+    canonicalName:  string;
+    locationId:     string;
+  };
+  const [sharedLinkedDrawerItem, setSharedLinkedDrawerItem] = useState<any>(null);
+  const [showDuplicatePanel, setShowDuplicatePanel] = useState(false);
+  const [mergeConfirm, setMergeConfirm] = useState<MergeTarget | null>(null);
+  const [isMerging, setIsMerging] = useState(false);
+  const [mergeError, setMergeError] = useState<string | null>(null);
 
   useEffect(() => {
     async function fetchData() {
@@ -1555,6 +1574,90 @@ export default function Inventory() {
     document.body.removeChild(link);
   };
 
+  // ── Identity maps — O(n) builds, recomputed only on inventoryData change ───
+  //
+  // rowsByItemId:         item_id → all rows sharing that shared product identity
+  // linkedCountByItemId:  item_id → count of linked rows (used for badge rendering)
+  // duplicateGroups:      candidate accidental duplicates (same normalizedName,
+  //                       different item_id values). Each group has ≥ 2 item_ids.
+  //
+  const rowsByItemId = useMemo(() => {
+    const m = new Map<string, any[]>();
+    for (const row of inventoryData) {
+      const key = row.itemId ?? "";
+      if (!key) continue;
+      if (!m.has(key)) m.set(key, []);
+      m.get(key)!.push(row);
+    }
+    return m;
+  }, [inventoryData]);
+
+  const linkedCountByItemId = useMemo(() => {
+    const m = new Map<string, number>();
+    rowsByItemId.forEach((rows, itemId) => m.set(itemId, rows.length));
+    return m;
+  }, [rowsByItemId]);
+
+  const duplicateGroups = useMemo(() => {
+    // Group item_ids by their normalized product name
+    const normToGroups = new Map<string, { itemId: string; rows: any[] }[]>();
+    rowsByItemId.forEach((rows, itemId) => {
+      // Use the first row's name as representative; they should all match
+      const normName = normalizeInventoryName(rows[0]?.name ?? "");
+      if (!normName) return;
+      if (!normToGroups.has(normName)) normToGroups.set(normName, []);
+      normToGroups.get(normName)!.push({ itemId, rows });
+    });
+
+    // Keep only groups where ≥ 2 distinct item_ids share the same normalized name
+    const groups: {
+      normalizedName: string;
+      candidates: { itemId: string; rows: any[] }[];
+    }[] = [];
+
+    normToGroups.forEach((candidates, normalizedName) => {
+      if (candidates.length > 1) {
+        groups.push({ normalizedName, candidates });
+      }
+    });
+
+    return groups;
+  }, [rowsByItemId]);
+
+  // ── Merge handler ─────────────────────────────────────────────────────────
+  //
+  // Reassigns item_id on a single row (the "duplicate") to the canonical item_id.
+  // Does NOT rename, delete, or touch recipes/movements/requisitions.
+  //
+  const handleMerge = async () => {
+    if (!mergeConfirm) return;
+    setIsMerging(true);
+    setMergeError(null);
+    try {
+      const res = await updateInventoryRowItemId(
+        mergeConfirm.sourceRowId,
+        mergeConfirm.canonicalItemId
+      );
+      if (!res.success) {
+        setMergeError(res.error?.message ?? "Merge failed — database rejected the update.");
+        return;
+      }
+      // Optimistically patch local state so memos recompute immediately
+      setInventoryData(prev =>
+        prev.map(row =>
+          String(row.id) === mergeConfirm.sourceRowId
+            ? { ...row, itemId: mergeConfirm.canonicalItemId, item_id: mergeConfirm.canonicalItemId }
+            : row
+        )
+      );
+      setMergeConfirm(null);
+    } catch (err: any) {
+      setMergeError(err?.message ?? "Unexpected error during merge.");
+    } finally {
+      setIsMerging(false);
+    }
+  };
+
   if (isLoading) return <div className="animate-pulse flex items-center justify-center p-12 text-neutral-400">Loading Inventory Module...</div>;
 
   return (
@@ -1606,6 +1709,93 @@ export default function Inventory() {
           </button>
         </div>
       </div>
+
+      {/* ── HQ-only: Duplicate Detection Panel ──────────────────────────────── */}
+      {isHqAdmin(user) && duplicateGroups.length > 0 && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 overflow-hidden">
+          <button
+            className="w-full flex items-center justify-between px-4 py-3 text-sm font-semibold text-amber-800 hover:bg-amber-100 transition-colors"
+            onClick={() => setShowDuplicatePanel(p => !p)}
+          >
+            <span className="flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 text-amber-500" />
+              Potential Duplicate Products
+              <span className="ml-1 text-[10px] font-bold bg-amber-200 text-amber-800 px-2 py-0.5 rounded-full">
+                {duplicateGroups.length}
+              </span>
+            </span>
+            {showDuplicatePanel
+              ? <ChevronDown className="h-4 w-4 text-amber-500" />
+              : <ChevronRight className="h-4 w-4 text-amber-500" />
+            }
+          </button>
+
+          {showDuplicatePanel && (
+            <div className="px-4 pb-4 space-y-3">
+              <p className="text-xs text-amber-700">
+                These product names normalize to the same canonical form but have different shared identities (item_id).
+                This may indicate accidental duplicate entries. Review and merge the identity if appropriate.
+              </p>
+              {duplicateGroups.map((group) => (
+                <div key={group.normalizedName} className="bg-white rounded-lg border border-amber-200 p-3 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-amber-800 uppercase tracking-wide">Canonical form:</span>
+                    <span className="font-mono text-xs bg-amber-100 text-amber-900 px-2 py-0.5 rounded">&quot;{group.normalizedName}&quot;</span>
+                    <span className="text-[10px] text-amber-600">{group.candidates.length} distinct item_ids</span>
+                  </div>
+                  <div className="space-y-1.5">
+                    {group.candidates.map((candidate, ci) => {
+                      const repRow = candidate.rows[0];
+                      const isCanonical = ci === 0; // first (oldest by sort) treated as canonical
+                      return (
+                        <div key={candidate.itemId} className={`flex flex-col sm:flex-row sm:items-center gap-2 p-2 rounded-lg text-xs ${
+                          isCanonical ? 'bg-violet-50 border border-violet-200' : 'bg-neutral-50 border border-neutral-200'
+                        }`}>
+                          <div className="flex-1 min-w-0">
+                            <span className="font-semibold text-neutral-800">{repRow?.name ?? "(no name)"}</span>
+                            {isCanonical && <span className="ml-2 text-[10px] font-bold text-violet-600 bg-violet-100 px-1.5 py-0.5 rounded">CANONICAL</span>}
+                            <div className="text-[10px] text-neutral-500 font-mono mt-0.5 truncate">
+                              item_id: {candidate.itemId.slice(0, 18)}…
+                            </div>
+                            <div className="text-[10px] text-neutral-500 mt-0.5">
+                              {candidate.rows.length} location{candidate.rows.length !== 1 ? 's' : ''}
+                              {' · '}
+                              Cost: ${(repRow?.cost ?? 0).toFixed(2)}/{repRow?.baseUnit ?? repRow?.unit ?? 'unit'}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              onClick={() => setSharedLinkedDrawerItem(repRow)}
+                              className="flex items-center gap-1 px-2 py-1 text-[10px] font-semibold bg-white border border-neutral-200 text-neutral-700 rounded-md hover:bg-neutral-50 transition-colors shadow-sm"
+                            >
+                              <Link2 className="h-3 w-3" /> View Linked
+                            </button>
+                            {!isCanonical && (
+                              <button
+                                onClick={() => setMergeConfirm({
+                                  sourceRowId:     String(repRow.id),
+                                  sourceRowName:   repRow.name ?? "",
+                                  sourceItemId:    candidate.itemId,
+                                  canonicalItemId: group.candidates[0].itemId,
+                                  canonicalName:   group.candidates[0].rows[0]?.name ?? "",
+                                  locationId:      repRow.locationId ?? "LOC-HQ",
+                                })}
+                                className="flex items-center gap-1 px-2 py-1 text-[10px] font-semibold bg-violet-600 text-white rounded-md hover:bg-violet-700 transition-colors shadow-sm"
+                              >
+                                <GitMerge className="h-3 w-3" /> Merge
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <Card className="shadow-sm border-neutral-200 overflow-hidden">
         <CardHeader className="flex flex-col space-y-2 sm:space-y-0 sm:flex-row sm:items-center justify-between py-3 sm:py-4 px-3 sm:px-4 border-b border-neutral-100 bg-white">
@@ -1725,10 +1915,21 @@ export default function Inventory() {
                       </div>
                     </TableCell>
                     <TableCell className="px-2 sm:px-3 py-2.5 sm:py-4">
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1.5 flex-wrap">
                         <span className="font-semibold text-neutral-900 text-xs sm:text-sm leading-tight">{item.name}</span>
                         {item.itemType === 'Preparation' && <Badge variant="warning" className="text-[9px] px-1 py-0 border-none bg-orange-100 text-orange-700">PREP</Badge>}
                         {item.itemType === 'Finished Good' && <Badge variant="success" className="text-[9px] px-1 py-0 border-none bg-emerald-100 text-emerald-700">FG</Badge>}
+                        {/* HQ-only: Shared Product badge — shown when ≥ 2 rows share this item_id */}
+                        {isHqAdmin(user) && item.itemId && (linkedCountByItemId.get(item.itemId) ?? 0) > 1 && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setSharedLinkedDrawerItem(item); }}
+                            title={`Shared across ${linkedCountByItemId.get(item.itemId)} locations — click to inspect`}
+                            className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[9px] font-bold rounded-full bg-violet-100 text-violet-700 border border-violet-200 hover:bg-violet-200 transition-colors cursor-pointer select-none"
+                          >
+                            <Link2 className="h-2.5 w-2.5" />
+                            Shared &bull; {linkedCountByItemId.get(item.itemId)}
+                          </button>
+                        )}
                       </div>
                     </TableCell>
                     <TableCell className="px-2 sm:px-3 py-2.5 sm:py-4 hidden sm:table-cell">
@@ -3217,12 +3418,232 @@ export default function Inventory() {
               <p className="text-sm font-medium text-neutral-500">Upload a supplier CSV to begin</p>
               <p className="text-xs text-neutral-400">
                 Each row maps a supplier price to an inventory item.<br />
-                Item names are normalized before matching (size suffixes like "1 KG", "55LBS" are stripped).
+                Item names are normalized before matching (size suffixes like &quot;1 KG&quot;, &quot;55LBS&quot; are stripped).
               </p>
             </div>
           )}
         </div>
       </Drawer>
+
+      {/* ── HQ-only: Linked Locations Drawer ──────────────────────────────────
+           Read-only inspector: all inventory_items rows that share the same
+           item_id as the clicked row. No editing allowed here.
+      ──────────────────────────────────────────────────────────────────────── */}
+      {sharedLinkedDrawerItem && (() => {
+        const targetItemId: string = sharedLinkedDrawerItem.itemId ?? "";
+        const linkedRows: any[] = targetItemId ? (rowsByItemId.get(targetItemId) ?? []) : [];
+        const hqRow = linkedRows.find(r => r.locationId === "LOC-HQ");
+        return (
+          <Drawer
+            isOpen={!!sharedLinkedDrawerItem}
+            onClose={() => setSharedLinkedDrawerItem(null)}
+            title="Shared Product Identity"
+            description={`item_id: ${targetItemId.slice(0, 24)}… · ${linkedRows.length} linked location row${linkedRows.length !== 1 ? "s" : ""}`}
+          >
+            {/* ── Identity summary header ── */}
+            <div className="rounded-lg bg-violet-50 border border-violet-200 p-3 mb-4 space-y-1">
+              <div className="flex items-center gap-2">
+                <Link2 className="h-4 w-4 text-violet-600 shrink-0" />
+                <span className="text-sm font-semibold text-violet-900">{sharedLinkedDrawerItem.name}</span>
+                <span className="text-[10px] font-bold bg-violet-200 text-violet-800 px-2 py-0.5 rounded-full ml-auto">
+                  {linkedRows.length} location{linkedRows.length !== 1 ? "s" : ""}
+                </span>
+              </div>
+              <div className="text-[10px] font-mono text-violet-700 break-all">
+                Shared item_id: {targetItemId}
+              </div>
+            </div>
+
+            {/* ── Linked rows table ── */}
+            <div className="overflow-x-auto rounded-lg border border-neutral-200">
+              <table className="w-full text-xs">
+                <thead className="bg-neutral-50 border-b border-neutral-200">
+                  <tr>
+                    <th className="px-3 py-2 text-left font-semibold text-neutral-600">Location</th>
+                    <th className="px-3 py-2 text-left font-semibold text-neutral-600">Name</th>
+                    <th className="px-3 py-2 text-right font-semibold text-neutral-600">Stock</th>
+                    <th className="px-3 py-2 text-right font-semibold text-neutral-600">Cost</th>
+                    <th className="px-3 py-2 text-left font-semibold text-neutral-600 hidden sm:table-cell">Base UOM</th>
+                    <th className="px-3 py-2 text-left font-semibold text-neutral-600 hidden md:table-cell">Purchase UOM</th>
+                    <th className="px-3 py-2 text-left font-semibold text-neutral-600 hidden lg:table-cell">Supplier</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-neutral-100">
+                  {linkedRows.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="px-3 py-6 text-center text-neutral-400">
+                        No rows found for this item_id.
+                      </td>
+                    </tr>
+                  ) : linkedRows.map((row) => {
+                    const isHq = row.locationId === "LOC-HQ";
+                    const isCurrent = String(row.id) === String(sharedLinkedDrawerItem.id);
+                    const primaryPurchUOM = Array.isArray(row.purchaseUnits) && row.purchaseUnits.length > 0
+                      ? (row.purchaseUnits.find((u: any) => u.isPrimary) ?? row.purchaseUnits[0])?.name
+                      : (row.purchaseUom ?? "—");
+                    const supplierName = row.preferredSupplierName ?? getSupplierName(row.supplierId) ?? "—";
+                    return (
+                      <tr
+                        key={row.id}
+                        className={`transition-colors ${
+                          isCurrent ? "bg-brand-50/60 font-medium" :
+                          isHq      ? "bg-violet-50/40" : "hover:bg-neutral-50/50"
+                        }`}
+                      >
+                        <td className="px-3 py-2.5">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-neutral-700">{row.locationId ?? "—"}</span>
+                            {isHq     && <span className="text-[9px] font-bold bg-violet-100 text-violet-700 px-1.5 py-0.5 rounded">HQ</span>}
+                            {isCurrent && <span className="text-[9px] font-bold bg-brand-100 text-brand-700 px-1.5 py-0.5 rounded">THIS</span>}
+                          </div>
+                        </td>
+                        <td className="px-3 py-2.5 text-neutral-800">{row.name}</td>
+                        <td className="px-3 py-2.5 text-right font-mono">
+                          {row.inStock ?? 0}
+                          <span className="text-neutral-400 ml-0.5">{row.baseUnit ?? row.unit}</span>
+                        </td>
+                        <td className="px-3 py-2.5 text-right font-mono">
+                          ${(row.cost ?? 0).toFixed(2)}
+                        </td>
+                        <td className="px-3 py-2.5 text-neutral-600 hidden sm:table-cell">{row.baseUnit ?? row.unit ?? "—"}</td>
+                        <td className="px-3 py-2.5 text-neutral-600 hidden md:table-cell">{primaryPurchUOM}</td>
+                        <td className="px-3 py-2.5 text-neutral-600 hidden lg:table-cell truncate max-w-[120px]">{supplierName}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <p className="text-[10px] text-neutral-400 mt-3">
+              Read-only. To edit a row, close this drawer and use the ⋯ menu on the inventory table.
+            </p>
+          </Drawer>
+        );
+      })()}
+
+      {/* ── HQ-only: Merge Confirm Modal ──────────────────────────────────────
+           Shown when HQ clicks Merge on a duplicate candidate.
+           Confirms the item_id reassignment before writing to DB.
+      ──────────────────────────────────────────────────────────────────────── */}
+      {mergeConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-[2px] animate-in fade-in duration-200"
+          onClick={() => { if (!isMerging) { setMergeConfirm(null); setMergeError(null); } }}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl border border-neutral-200 max-w-md w-full mx-4 overflow-hidden animate-in slide-in-from-bottom-4 duration-300"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal header */}
+            <div className="flex items-center justify-between px-5 py-4 border-b border-neutral-100">
+              <div className="flex items-center gap-2">
+                <GitMerge className="h-5 w-5 text-violet-600" />
+                <h3 className="text-base font-bold text-neutral-900">Merge Product Identity</h3>
+              </div>
+              <button
+                onClick={() => { setMergeConfirm(null); setMergeError(null); }}
+                disabled={isMerging}
+                className="text-neutral-400 hover:text-neutral-600 hover:bg-neutral-100 p-1.5 rounded-md transition-colors"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {/* Modal body */}
+            <div className="px-5 py-4 space-y-4">
+
+              {/* ── Safety warning ── */}
+              <div className="flex gap-3 bg-amber-50 border border-amber-200 rounded-lg px-3 py-3">
+                <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
+                <p className="text-xs text-amber-800 leading-relaxed">
+                  <strong>This only changes the future shared identity for this inventory row.</strong>{" "}
+                  It does <strong>not</strong> rewrite historical movements, recipes, or past reports.
+                  Existing production logs, requisition history, and COGS data will continue to
+                  reference the old <code className="bg-amber-100 px-0.5 rounded">item_id</code> unchanged.
+                </p>
+              </div>
+
+              {/* ── Affected row detail card ── */}
+              <div className="bg-neutral-50 rounded-lg border border-neutral-200 p-3 space-y-1.5 text-xs">
+                <div className="flex justify-between">
+                  <span className="text-neutral-500 font-medium">Affected row</span>
+                  <span className="font-semibold text-neutral-800">{mergeConfirm.sourceRowName}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-neutral-500 font-medium">Row id</span>
+                  <span className="font-mono text-[10px] text-neutral-500 break-all max-w-[200px] text-right">{mergeConfirm.sourceRowId}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-neutral-500 font-medium">Location</span>
+                  <span className="font-mono text-neutral-700">{mergeConfirm.locationId}</span>
+                </div>
+                <div className="border-t border-neutral-200 pt-1.5 space-y-1">
+                  <div className="flex justify-between text-danger-600">
+                    <span className="font-medium">Old item_id</span>
+                    <span className="font-mono text-[10px] break-all max-w-[200px] text-right">{mergeConfirm.sourceItemId}</span>
+                  </div>
+                  <div className="flex justify-between text-violet-700">
+                    <span className="font-medium">New item_id</span>
+                    <span className="font-mono text-[10px] break-all max-w-[200px] text-right">{mergeConfirm.canonicalItemId}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-neutral-500 font-medium">Merging into</span>
+                    <span className="font-semibold text-violet-900">{mergeConfirm.canonicalName}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* ── No-historical-change disclaimer ── */}
+              <div className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2.5 space-y-1">
+                <p className="text-[10px] font-semibold text-neutral-500 uppercase tracking-wide">What will NOT be changed</p>
+                <ul className="text-[11px] text-neutral-500 space-y-0.5 list-none">
+                  {[
+                    "inventory_movements — historical production & fulfillment logs",
+                    "recipes.ingredients — ingredient inventoryId references",
+                    "requisition_items — past requisition line items",
+                    "COGS & financial reports — already-computed totals",
+                    "The row's name, stock level, cost, or any other field",
+                  ].map((line) => (
+                    <li key={line} className="flex items-start gap-1.5">
+                      <span className="text-neutral-300 mt-0.5">✕</span>
+                      <span>{line}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              {mergeError && (
+                <div className="bg-danger-50 border border-danger-200 rounded-lg px-3 py-2 text-xs text-danger-700">
+                  {mergeError}
+                </div>
+              )}
+            </div>
+
+            {/* Modal footer */}
+            <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-neutral-100 bg-neutral-50">
+              <button
+                onClick={() => { setMergeConfirm(null); setMergeError(null); }}
+                disabled={isMerging}
+                className="px-4 py-2 text-sm font-semibold text-neutral-700 bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleMerge}
+                disabled={isMerging}
+                className="flex items-center gap-2 px-4 py-2 text-sm font-bold bg-violet-600 text-white rounded-lg hover:bg-violet-700 disabled:opacity-60 transition-colors shadow-sm"
+              >
+                {isMerging ? (
+                  <><Loader2 className="h-4 w-4 animate-spin" /> Merging…</>
+                ) : (
+                  <><GitMerge className="h-4 w-4" /> Confirm Merge</>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

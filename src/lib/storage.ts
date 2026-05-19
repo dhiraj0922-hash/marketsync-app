@@ -263,6 +263,35 @@ export async function updateInventoryItemCost(
 }
 
 /**
+ * Reassign the shared product identity (item_id) on a single inventory_items row.
+ *
+ * This is the ONLY write used by the duplicate merge feature.
+ * It does NOT:
+ *  - rename the row
+ *  - delete any row
+ *  - touch recipes, movements, or requisitions
+ *
+ * After this call, the row will match HQ lookups that filter by newItemId,
+ * enabling fulfillment and future allocation to treat it as the canonical product.
+ */
+export async function updateInventoryRowItemId(
+  rowId: string,
+  newItemId: string
+): Promise<{ success: boolean; error?: any }> {
+  if (!rowId || !newItemId) {
+    return { success: false, error: { message: "rowId and newItemId are required." } };
+  }
+  const { error } = await supabase
+    .from('inventory_items')
+    .update({ item_id: newItemId })
+    .eq('id', rowId);
+  if (error) return { success: false, error };
+  return { success: true };
+}
+
+
+
+/**
  * Deduct a quantity from a single inventory_items row (atomic read-modify-write).
  *
  * Used by production execution to apply ingredient deductions after a production
