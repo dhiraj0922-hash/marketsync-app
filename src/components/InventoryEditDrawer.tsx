@@ -57,19 +57,23 @@ interface InventoryEditDrawerProps {
 }
 
 // ─── SupplierCombobox ─────────────────────────────────────────────────────────
-// Searchable combobox for picking an existing supplier name or typing a new one.
-// - suggestions: deduplicated alphabetical list (from suppliers master + purchase_options)
-// - value / onChange: controlled by parent
-// - Normalization: name.trim().replace(/\s+/g, ' ') on selection
-// - Free-text fallback: any typed value that doesn't match a suggestion is accepted as-is
+// Searchable combobox backed by full supplier master objects.
+// - supplierObjects: full {id, name} list from the suppliers table
+// - value/onChange: controlled string name (for display + free-text)
+// - onSelect(id, name): called when user picks an existing master supplier
+//   → caller should set both supplierId + supplierName together
+// - Typing a value not in the list = free-text new supplier (id stays null)
 
 interface SupplierComboboxProps {
   value: string;
-  suggestions: string[];
+  supplierObjects: { id: number; name: string }[];
+  /** Additional free-text name suggestions (from existing purchase_options rows) */
+  extraNames?: string[];
   onChange: (name: string) => void;
+  onSelect: (id: number | null, name: string) => void;
 }
 
-function SupplierCombobox({ value, suggestions, onChange }: SupplierComboboxProps) {
+function SupplierCombobox({ value, supplierObjects, extraNames = [], onChange, onSelect }: SupplierComboboxProps) {
   const [query,   setQuery]   = useState(value);
   const [open,    setOpen]    = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -77,31 +81,40 @@ function SupplierCombobox({ value, suggestions, onChange }: SupplierComboboxProp
   // Keep internal query in sync when parent resets the form
   useEffect(() => { setQuery(value); }, [value]);
 
-  // Close on outside click
+  // Close on outside click — commit free-text
   useEffect(() => {
     if (!open) return;
     const handler = (e: MouseEvent) => {
       if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
-        // Commit whatever is typed as free-text when the user clicks away
         const normalized = query.trim().replace(/\s+/g, ' ');
-        if (normalized !== value) onChange(normalized);
+        if (normalized !== value) {
+          // check if it matches a master supplier
+          const match = supplierObjects.find(s => s.name.toLowerCase() === normalized.toLowerCase());
+          if (match) { onSelect(match.id, match.name); }
+          else { onChange(normalized); onSelect(null, normalized); }
+        }
         setOpen(false);
       }
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
-  }, [open, query, value, onChange]);
+  }, [open, query, value, onChange, onSelect, supplierObjects]);
 
   const normalize = (s: string) => s.trim().replace(/\s+/g, ' ');
 
-  const filtered = suggestions.filter(s =>
-    s.toLowerCase().includes(query.toLowerCase())
-  );
+  // Merge master names + extra free-text names, dedup
+  const allNames = Array.from(new Set([
+    ...supplierObjects.map(s => s.name),
+    ...extraNames,
+  ])).sort((a, b) => a.localeCompare(b));
+
+  const filtered = allNames.filter(s => s.toLowerCase().includes(query.toLowerCase()));
 
   const select = (name: string) => {
     const n = normalize(name);
     setQuery(n);
-    onChange(n);
+    const match = supplierObjects.find(s => s.name.toLowerCase() === n.toLowerCase());
+    onSelect(match?.id ?? null, n);
     setOpen(false);
   };
 
@@ -111,13 +124,15 @@ function SupplierCombobox({ value, suggestions, onChange }: SupplierComboboxProp
       if (filtered.length > 0 && filtered[0].toLowerCase() === query.toLowerCase()) {
         select(filtered[0]);
       } else {
-        // Free-text confirmation
         select(query);
       }
     } else if (e.key === 'Escape') {
       setOpen(false);
     }
   };
+
+  // Whether typed query matches a known master supplier
+  const isKnown = supplierObjects.some(s => s.name.toLowerCase() === normalize(query).toLowerCase());
 
   return (
     <div ref={wrapRef} className="relative">
@@ -126,19 +141,23 @@ function SupplierCombobox({ value, suggestions, onChange }: SupplierComboboxProp
           autoFocus
           type="text"
           value={query}
-          placeholder="Supplier Co."
+          placeholder="Search supplier…"
           onFocus={() => setOpen(true)}
           onChange={e => {
             setQuery(e.target.value);
             setOpen(true);
           }}
           onKeyDown={handleKeyDown}
-          className="w-full px-2 py-1 border border-violet-300 rounded text-xs focus:outline-none focus:ring-1 focus:ring-violet-500 bg-white"
+          className={`w-full px-2 py-1 border rounded text-xs focus:outline-none focus:ring-1 bg-white ${
+            isKnown
+              ? 'border-violet-400 focus:ring-violet-500'
+              : 'border-neutral-300 focus:ring-brand-400'
+          }`}
         />
         {query && (
           <button
             type="button"
-            onClick={() => { setQuery(''); onChange(''); setOpen(true); }}
+            onClick={() => { setQuery(''); onSelect(null, ''); onChange(''); setOpen(true); }}
             className="text-neutral-400 hover:text-neutral-700 shrink-0 text-[10px] font-bold leading-none px-1"
             tabIndex={-1}
             title="Clear"
@@ -147,33 +166,39 @@ function SupplierCombobox({ value, suggestions, onChange }: SupplierComboboxProp
       </div>
 
       {open && (
-        <div className="absolute left-0 right-0 top-full mt-0.5 z-[80] bg-white border border-violet-200 rounded shadow-lg max-h-44 overflow-y-auto">
+        <div className="absolute left-0 right-0 top-full mt-0.5 z-[80] bg-white border border-violet-200 rounded shadow-lg max-h-48 overflow-y-auto">
           {filtered.length === 0 ? (
             <div className="px-3 py-2 text-[11px] text-neutral-400 italic">
-              No match — press Enter to use "{query}"
+              No match — press Enter to use "{query}" as new supplier
             </div>
           ) : (
-            filtered.map(name => (
-              <button
-                key={name}
-                type="button"
-                onMouseDown={e => { e.preventDefault(); select(name); }}
-                className={`w-full text-left px-3 py-1.5 text-xs transition-colors hover:bg-violet-50 ${
-                  normalize(name) === normalize(query) ? 'bg-violet-50 font-semibold text-violet-800' : 'text-neutral-800'
-                }`}
-              >
-                {name}
-              </button>
-            ))
+            filtered.map(name => {
+              const ismaster = supplierObjects.some(s => s.name.toLowerCase() === name.toLowerCase());
+              return (
+                <button
+                  key={name}
+                  type="button"
+                  onMouseDown={e => { e.preventDefault(); select(name); }}
+                  className={`w-full text-left px-3 py-1.5 text-xs transition-colors hover:bg-violet-50 ${
+                    normalize(name) === normalize(query) ? 'bg-violet-50 font-semibold text-violet-800' : 'text-neutral-800'
+                  }`}
+                >
+                  <span>{name}</span>
+                  {ismaster && (
+                    <span className="ml-1.5 text-[9px] font-bold uppercase text-violet-500 bg-violet-100 px-1 py-0.5 rounded">master</span>
+                  )}
+                </button>
+              );
+            })
           )}
-          {/* Always show a "use exactly what I typed" option when query doesn't exactly match */}
-          {query.trim() && !filtered.some(s => normalize(s) === normalize(query)) && (
+          {/* Free-text option — only when query doesn't exactly match any known name */}
+          {query.trim() && !allNames.some(s => normalize(s) === normalize(query)) && (
             <button
               type="button"
               onMouseDown={e => { e.preventDefault(); select(query); }}
               className="w-full text-left px-3 py-1.5 text-[11px] text-violet-600 font-semibold border-t border-violet-100 hover:bg-violet-50"
             >
-              + Add "{normalize(query)}"
+              + Add "{normalize(query)}" as new supplier
             </button>
           )}
         </div>
@@ -215,24 +240,26 @@ export function InventoryEditDrawer({
     unitPrice: "", isPreferred: false,
   });
 
-  // Supplier name suggestions (for the combobox)
-  const [supplierSuggestions, setSupplierSuggestions] = useState<string[]>([]);
+  // Supplier master list loaded from DB (id + name pairs)
+  const [supplierMaster, setSupplierMaster] = useState<{ id: number; name: string }[]>([]);
+  // Extra free-text names from existing purchase_options rows (deduped)
+  const [supplierExtraNames, setSupplierExtraNames] = useState<string[]>([]);
 
   // Save state
   const [isSaving, setIsSaving] = useState(false);
 
   // ── Seed state whenever a new item is passed ─────────────────────────────
-  // Load supplier suggestions once when the drawer first opens
+  // Load supplier master once on mount
   useEffect(() => {
     loadSuppliers()
       .then((suppliers: any[]) => {
-        setSupplierSuggestions(prev => {
-          const fromMaster = suppliers.map((s: any) => (s.name ?? '').trim()).filter(Boolean);
-          const merged = Array.from(new Set([...fromMaster, ...prev])).sort((a, b) => a.localeCompare(b));
-          return merged;
-        });
+        const objects = suppliers
+          .filter((s: any) => s.id != null && s.name)
+          .map((s: any) => ({ id: Number(s.id), name: String(s.name).trim() }))
+          .sort((a, b) => a.name.localeCompare(b.name));
+        setSupplierMaster(objects);
       })
-      .catch(() => { /* non-fatal — free-text still works */ });
+      .catch(() => { /* non-fatal */ });
   }, []); // once on mount
 
   useEffect(() => {
@@ -259,7 +286,7 @@ export function InventoryEditDrawer({
     );
     setAddingPurchOpt(false);
     setNewPurchOpt({
-      supplierName: "", supplierProductName: "",
+      supplierId: null, supplierName: "", supplierProductName: "",
       purchaseUom: "ea", packQty: "", packUom: "",
       unitPrice: "", isPreferred: false,
     });
@@ -274,7 +301,7 @@ export function InventoryEditDrawer({
         // Also add any supplier names from purchase_options to suggestions
         const fromOpts = rows.map((r: any) => (r.supplierName ?? '').trim()).filter(Boolean);
         if (fromOpts.length > 0) {
-          setSupplierSuggestions(prev => {
+          setSupplierExtraNames(prev => {
             const merged = Array.from(new Set([...prev, ...fromOpts])).sort((a, b) => a.localeCompare(b));
             return merged;
           });
@@ -347,6 +374,7 @@ export function InventoryEditDrawer({
     const payload = {
       ...newPurchOpt,
       inventoryItemId: String(editItem.id),
+      supplierId:  newPurchOpt.supplierId ?? null,    // FK to suppliers table
       packQty:   newPurchOpt.packQty   !== "" ? Number(newPurchOpt.packQty)   : null,
       unitPrice: newPurchOpt.unitPrice !== "" ? Number(newPurchOpt.unitPrice) : 0,
     };
@@ -377,7 +405,7 @@ export function InventoryEditDrawer({
       if (syncPrice !== null) setEditPurchaseCost(String(syncPrice));
       setAddingPurchOpt(false);
       setNewPurchOpt({
-        supplierName: "", supplierProductName: "", purchaseUom: "ea",
+        supplierId: null, supplierName: "", supplierProductName: "", purchaseUom: "ea",
         packQty: "", packUom: "", unitPrice: "", isPreferred: false,
       });
     } catch (err: any) {
@@ -842,7 +870,16 @@ export function InventoryEditDrawer({
                 <div className="grid grid-cols-2 gap-2 mb-1.5">
                   <div>
                     <label className="text-[10px] text-neutral-400 font-semibold uppercase block mb-0.5">Supplier Name</label>
-                    <input type="text" value={row.supplierName} onChange={e => updatePurchOptField(row.id, "supplierName", e.target.value)} className="w-full px-2 py-1 border border-neutral-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-brand-400" />
+                    <SupplierCombobox
+                      value={row.supplierName ?? ''}
+                      supplierObjects={supplierMaster}
+                      extraNames={supplierExtraNames}
+                      onChange={name => updatePurchOptField(row.id, 'supplierName', name)}
+                      onSelect={(id, name) => {
+                        updatePurchOptField(row.id, 'supplierName', name);
+                        if (id !== null) updatePurchOptField(row.id, 'supplierId', id);
+                      }}
+                    />
                   </div>
                   <div>
                     <label className="text-[10px] text-neutral-400 font-semibold uppercase block mb-0.5">Product Name</label>
@@ -879,9 +916,17 @@ export function InventoryEditDrawer({
                     <label className="text-[10px] text-neutral-500 font-semibold uppercase block mb-0.5">Supplier Name *</label>
                     <SupplierCombobox
                       value={newPurchOpt.supplierName}
-                      suggestions={supplierSuggestions}
+                      supplierObjects={supplierMaster}
+                      extraNames={supplierExtraNames}
                       onChange={name => setNewPurchOpt((p: any) => ({ ...p, supplierName: name }))}
+                      onSelect={(id, name) => setNewPurchOpt((p: any) => ({ ...p, supplierId: id, supplierName: name }))}
                     />
+                    {newPurchOpt.supplierId && (
+                      <p className="text-[9px] text-violet-500 mt-0.5">✓ Linked to master supplier</p>
+                    )}
+                    {newPurchOpt.supplierName && !newPurchOpt.supplierId && (
+                      <p className="text-[9px] text-amber-500 mt-0.5">New supplier — not in master list</p>
+                    )}
                   </div>
                   <div>
                     <label className="text-[10px] text-neutral-500 font-semibold uppercase block mb-0.5">Product Name</label>
