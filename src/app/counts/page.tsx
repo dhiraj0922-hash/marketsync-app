@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Drawer } from "@/components/ui/drawer";
 import { Calendar, CheckCircle2, Clock, Smartphone, Play, Save, Send, ShieldCheck, FileEdit, Calculator, ArrowRight, X, Search, SlidersHorizontal } from "lucide-react";
-import { loadCounts, saveCounts, loadInventory, saveInventory, loadLocations } from "@/lib/storage";
+import { loadCounts, saveCounts, loadInventory, saveInventory, loadLocations, loadSuppliers } from "@/lib/storage";
 import { useAuth } from "@/components/AuthProvider";
 import { isHqAdmin, resolveLocationId } from "@/lib/roles";
 
@@ -25,6 +25,8 @@ export default function Counts() {
   const [inventoryData, setInventoryData] = useState<any[]>([]);
   // Live locations from DB — replaces the old hardcoded array
   const [locations, setLocations] = useState<{ id: string; name: string }[]>([]);
+  // Supplier id → name map for snapshot enrichment
+  const [supplierIdToName, setSupplierIdToName] = useState<Map<number, string>>(new Map());
   
   // Drawer States
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -53,13 +55,23 @@ export default function Counts() {
     async function fetchData() {
       setIsLoading(true);
       try {
-        const [loadedCounts, loadedInv, loadedLocs] = await Promise.all([
+        const [loadedCounts, loadedInv, loadedLocs, loadedSuppliers] = await Promise.all([
           loadCounts(queryLocationId),
           loadInventory(),
           loadLocations(),
+          loadSuppliers(),
         ]);
         setCounts(loadedCounts);
         setInventoryData(loadedInv);
+
+        // Build supplier id → name lookup map
+        const supMap = new Map<number, string>();
+        if (Array.isArray(loadedSuppliers)) {
+          loadedSuppliers.forEach((s: any) => {
+            if (s.id != null && s.name) supMap.set(Number(s.id), String(s.name));
+          });
+        }
+        setSupplierIdToName(supMap);
 
         // Filter to active locations only (status === 'active' or no status field)
         const activeLocs: { id: string; name: string }[] = Array.isArray(loadedLocs)
@@ -73,7 +85,6 @@ export default function Counts() {
         //   - location_manager: pre-select their assigned location name
         //   - hq_admin: pre-select first live location, or empty if none exist
         if (!isHqAdmin(user) && user?.locationId) {
-          // Find the name that corresponds to the user's locationId
           const myLoc = activeLocs.find((l) => l.id === user.locationId);
           setCountLocation(myLoc?.name ?? user.locationId);
         } else {
@@ -176,20 +187,28 @@ export default function Counts() {
       const scopedInv = writeLocationId
         ? inventoryData.filter((inv: any) => inv.locationId === writeLocationId)
         : inventoryData;
-      const liveSnapshot = scopedInv.map((inv: any) => ({
-        id: inv.id,
-        name: String(inv.name ?? ""),
-        unit: String(inv.unit ?? "ea"),
-        cost: Number(inv.cost ?? 0),
-        category:     String(inv.category     ?? "Uncategorized"),
-        supplierName: String(inv.preferredSupplierName ?? (inv.supplierId ? `Supplier #${inv.supplierId}` : "Unknown")),
-        storageArea:  String(inv.itemType      ?? "General"),
-        parLevel:     Number(inv.parLevel      ?? 0),
-        theoreticalQty: Number(inv.inStock     ?? 0),
-        physicalQty: "",
-        variance: 0,
-        varianceValue: 0
-      }));
+      const liveSnapshot = scopedInv.map((inv: any) => {
+        // Resolve real supplier name: map lookup → purchaseOptions name → fallback
+        const resolvedSupplier =
+          (inv.supplierId != null && supplierIdToName.get(Number(inv.supplierId)))
+          || String(inv.preferredSupplierName ?? "")
+          || (inv.supplierId ? `Supplier #${inv.supplierId}` : "")  // only as last resort
+          || "Unknown Supplier";
+        return {
+          id: inv.id,
+          name: String(inv.name ?? ""),
+          unit: String(inv.unit ?? "ea"),
+          cost: Number(inv.cost ?? 0),
+          category:     String(inv.category  ?? "Uncategorized"),
+          supplierName: resolvedSupplier,
+          storageArea:  String(inv.itemType  ?? "General"),
+          parLevel:     Number(inv.parLevel  ?? 0),
+          theoreticalQty: Number(inv.inStock ?? 0),
+          physicalQty: "",
+          variance: 0,
+          varianceValue: 0,
+        };
+      });
       setCountItems(liveSnapshot);
     }
     setCfSearch(""); setCfCategory("All"); setCfSupplier("All");
