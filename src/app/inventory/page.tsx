@@ -9,8 +9,8 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
-import { Search, Plus, Upload, MoreHorizontal, ShoppingCart, History, Save, Trash2, ArrowDown, ArrowUp, AlertTriangle, X, Download, Loader2, Link2, ChevronDown, ChevronRight, GitMerge } from "lucide-react";
-import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId, logMovement, deleteInventoryItem, deleteSaleItemByNameOrId, insertPurchaseOptions, loadPurchaseOptions, savePurchaseOptions, deletePurchaseOption, updateInventoryRowItemId } from "@/lib/storage";
+import { Search, Plus, Upload, MoreHorizontal, ShoppingCart, History, Save, Trash2, ArrowDown, ArrowUp, AlertTriangle, X, Download, Loader2, Link2, ChevronDown, ChevronRight, GitMerge, MapPin } from "lucide-react";
+import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId, logMovement, deleteInventoryItem, deleteSaleItemByNameOrId, insertPurchaseOptions, loadPurchaseOptions, savePurchaseOptions, deletePurchaseOption, updateInventoryRowItemId, allocateInventoryToLocations, loadLocations } from "@/lib/storage";
 import { normalizeInventoryName } from "@/lib/inventoryIdentity";
 
 export default function Inventory() {
@@ -140,18 +140,30 @@ export default function Inventory() {
   const [isMerging, setIsMerging] = useState(false);
   const [mergeError, setMergeError] = useState<string | null>(null);
 
+  // ── Phase 3A: Allocation state (HQ only) ───────────────────────────────
+  const [allLocations, setAllLocations]           = useState<any[]>([]);   // from loadLocations()
+  const [allocationItem, setAllocationItem]         = useState<any | null>(null); // source HQ row
+  const [allocationLocations, setAllocationLocations] = useState<string[]>([]);  // selected locationIds
+  const [allocationLoading, setAllocationLoading]   = useState(false);
+  const [allocationResult, setAllocationResult]     = useState<string | null>(null); // success/error msg
+  const [copySupplier, setCopySupplier]             = useState(true);
+  const [copyCost, setCopyCost]                     = useState(true);
+  const [startingPar, setStartingPar]               = useState<number>(0);
+
   useEffect(() => {
     async function fetchData() {
       setIsLoading(true);
       try {
-        const [inv, act, cats, batches, sups, allPurchOpts] = await Promise.all([
+        const [inv, act, cats, batches, sups, allPurchOpts, locs] = await Promise.all([
           loadInventory(),
           loadInventoryActivity(),
           loadCategories('inventory'),
           loadImportBatches(),
           loadSuppliers(),
-          loadPurchaseOptions()   // bulk-load all rows up-front for startup merge
+          loadPurchaseOptions(),   // bulk-load all rows up-front for startup merge
+          loadLocations(),         // needed for allocation location picker
         ]);
+        setAllLocations(locs);
         // Scope to current user's location
         const userLocationId: string = resolveLocationId(user);
 
@@ -1687,7 +1699,47 @@ export default function Inventory() {
     }
   };
 
+  // ── Phase 3A: Allocation handler ─────────────────────────────────────────
+  //
+  // Calls allocateInventoryToLocations for each selected location.
+  // Merges returned rows into local inventoryData so the shared badge
+  // updates immediately without a full page reload.
+  //
+  const handleAllocate = async () => {
+    if (!allocationItem || allocationLocations.length === 0) return;
+    setAllocationLoading(true);
+    setAllocationResult(null);
+    try {
+      const res = await allocateInventoryToLocations(
+        allocationItem,
+        allocationLocations,
+        { copySupplier, copyCost, startingPar }
+      );
+      if (res.insertedRows && res.insertedRows.length > 0) {
+        // Optimistically append to local state — shared badge recomputes via useMemo
+        setInventoryData(prev => [...prev, ...res.insertedRows!]);
+      }
+      const successCount = res.insertedRows?.length ?? 0;
+      const failCount    = res.errors?.length ?? 0;
+      if (successCount > 0 && failCount === 0) {
+        setAllocationResult(`✓ Allocated to ${successCount} location${successCount !== 1 ? "s" : ""} successfully.`);
+        setAllocationLocations([]);
+      } else if (successCount > 0 && failCount > 0) {
+        const failedIds = res.errors!.map(e => e.locationId).join(", ");
+        setAllocationResult(`Partial success: ${successCount} inserted, ${failCount} failed (${failedIds}). Check console for details.`);
+      } else {
+        const msg = res.errors?.[0]?.message ?? "All inserts failed.";
+        setAllocationResult(`✗ ${msg}`);
+      }
+    } catch (err: any) {
+      setAllocationResult(`✗ Unexpected error: ${err?.message ?? "Unknown"}`);
+    } finally {
+      setAllocationLoading(false);
+    }
+  };
+
   if (isLoading) return <div className="animate-pulse flex items-center justify-center p-12 text-neutral-400">Loading Inventory Module...</div>;
+
 
   return (
     <div className="space-y-4 sm:space-y-6">
@@ -2044,7 +2096,7 @@ export default function Inventory() {
                                 className="fixed inset-0 z-10"
                                 onClick={() => setOpenMenuId(null)}
                               />
-                              <div className="absolute right-0 top-8 z-20 bg-white border border-neutral-200 rounded-xl shadow-xl py-1 min-w-[160px] animate-in fade-in slide-in-from-top-1 duration-100">
+                              <div className="absolute right-0 top-8 z-20 bg-white border border-neutral-200 rounded-xl shadow-xl py-1 min-w-[200px] animate-in fade-in slide-in-from-top-1 duration-100">
                                 <button
                                   className="w-full text-left px-4 py-2.5 text-sm font-medium text-neutral-700 hover:bg-neutral-50 flex items-center gap-2.5 transition-colors"
                                   onClick={() => openEditDrawer(item)}
@@ -2057,6 +2109,23 @@ export default function Inventory() {
                                 >
                                   <ArrowUp className="h-3.5 w-3.5 text-success-600" /> Adjust Stock
                                 </button>
+                                {/* HQ-only: Allocate to Locations */}
+                                {isHqAdmin(user) && (
+                                  <button
+                                    className="w-full text-left px-4 py-2.5 text-sm font-medium text-violet-700 hover:bg-violet-50 flex items-center gap-2.5 transition-colors"
+                                    onClick={() => {
+                                      setOpenMenuId(null);
+                                      setAllocationItem(item);
+                                      setAllocationLocations([]);
+                                      setAllocationResult(null);
+                                      setCopySupplier(true);
+                                      setCopyCost(true);
+                                      setStartingPar(0);
+                                    }}
+                                  >
+                                    <MapPin className="h-3.5 w-3.5" /> Allocate to Locations
+                                  </button>
+                                )}
                                 <div className="border-t border-neutral-100 my-1" />
                                 <button
                                   className="w-full text-left px-4 py-2.5 text-sm font-medium text-danger-600 hover:bg-danger-50 flex items-center gap-2.5 transition-colors"
@@ -3675,6 +3744,236 @@ export default function Inventory() {
                   <><GitMerge className="h-4 w-4" /> Confirm Merge</>
                 )}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Phase 3A: Allocation Modal ───────────────────────────────────
+           HQ-only. Opened via ⋯ → Allocate to Locations.
+           Creates one new inventory row per selected store location,
+           preserving the canonical item_id.
+      ────────────────────────────────────────────────────────────────────────────── */}
+      {allocationItem && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-[2px] p-4 animate-in fade-in duration-200"
+          onClick={() => { if (!allocationLoading) { setAllocationItem(null); setAllocationResult(null); } }}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl border border-neutral-200 w-full max-w-2xl overflow-hidden animate-in slide-in-from-bottom-4 duration-300"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-neutral-100">
+              <div className="flex items-center gap-2">
+                <MapPin className="h-5 w-5 text-violet-600" />
+                <div>
+                  <h3 className="text-base font-bold text-neutral-900">Allocate to Locations</h3>
+                  <p className="text-xs text-neutral-500 mt-0.5">Creates a linked inventory row at each selected store.</p>
+                </div>
+              </div>
+              <button
+                onClick={() => { setAllocationItem(null); setAllocationResult(null); }}
+                disabled={allocationLoading}
+                className="text-neutral-400 hover:text-neutral-600 hover:bg-neutral-100 p-1.5 rounded-md transition-colors"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {/* Body — two columns */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-0 divide-y sm:divide-y-0 sm:divide-x divide-neutral-100">
+
+              {/* ── Left: HQ item info ── */}
+              <div className="px-5 py-4 space-y-3">
+                <p className="text-[10px] font-semibold text-neutral-400 uppercase tracking-wide">Source Item (HQ)</p>
+                <div className="bg-violet-50 rounded-lg border border-violet-200 p-3 space-y-1.5 text-xs">
+                  <div className="text-sm font-bold text-violet-900">{allocationItem.name}</div>
+                  <div className="flex justify-between text-neutral-600">
+                    <span className="font-medium">Category</span>
+                    <span>{allocationItem.category || "—"}</span>
+                  </div>
+                  <div className="flex justify-between text-neutral-600">
+                    <span className="font-medium">Unit</span>
+                    <span>{allocationItem.baseUnit || allocationItem.unit || "—"}</span>
+                  </div>
+                  <div className="flex justify-between text-neutral-600">
+                    <span className="font-medium">Supplier</span>
+                    <span className="truncate max-w-[120px] text-right">
+                      {allocationItem.preferredSupplierName ?? getSupplierName(allocationItem.supplierId) ?? "—"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-neutral-600">
+                    <span className="font-medium">HQ Cost</span>
+                    <span>${(allocationItem.cost ?? 0).toFixed(2)}/{allocationItem.baseUnit || "unit"}</span>
+                  </div>
+                  <div className="flex justify-between text-neutral-600">
+                    <span className="font-medium">HQ Stock</span>
+                    <span>{allocationItem.inStock ?? 0} {allocationItem.baseUnit || allocationItem.unit}</span>
+                  </div>
+                  <div className="flex justify-between text-neutral-600 border-t border-violet-200 pt-1.5 mt-1">
+                    <span className="font-medium">Currently linked</span>
+                    <span className="font-bold text-violet-800">
+                      {(linkedCountByItemId.get(allocationItem.itemId) ?? 1)} location
+                      {(linkedCountByItemId.get(allocationItem.itemId) ?? 1) !== 1 ? "s" : ""}
+                    </span>
+                  </div>
+                </div>
+
+                {/* ── Options ── */}
+                <p className="text-[10px] font-semibold text-neutral-400 uppercase tracking-wide pt-1">Copy Options</p>
+                <div className="space-y-2">
+                  {[
+                    { label: "Copy supplier", value: copySupplier, set: setCopySupplier },
+                    { label: "Copy cost",     value: copyCost,     set: setCopyCost     },
+                  ].map(({ label, value, set }) => (
+                    <label key={label} className="flex items-center gap-2 text-sm text-neutral-700 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={value}
+                        onChange={(e) => set(e.target.checked)}
+                        className="h-4 w-4 rounded border-neutral-300 text-violet-600 focus:ring-violet-500"
+                      />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold text-neutral-500">Starting par level</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={0}
+                      step={1}
+                      value={startingPar}
+                      onChange={(e) => setStartingPar(Math.max(0, parseFloat(e.target.value) || 0))}
+                      className="w-24 px-2 py-1.5 border border-neutral-200 rounded-md text-sm text-right focus:outline-none focus:ring-1 focus:ring-violet-500"
+                    />
+                    <span className="text-xs text-neutral-400">{allocationItem.baseUnit || allocationItem.unit}</span>
+                  </div>
+                  <p className="text-[10px] text-neutral-400">Starting stock is always 0 regardless.</p>
+                </div>
+              </div>
+
+              {/* ── Right: Location selector ── */}
+              <div className="px-5 py-4 space-y-3">
+                <p className="text-[10px] font-semibold text-neutral-400 uppercase tracking-wide">
+                  Select Locations
+                  {allocationLocations.length > 0 && (
+                    <span className="ml-2 text-violet-600 font-bold">{allocationLocations.length} selected</span>
+                  )}
+                </p>
+
+                {(() => {
+                  const alreadyLinkedIds = new Set(
+                    (rowsByItemId.get(allocationItem.itemId) ?? []).map((r: any) => r.locationId)
+                  );
+                  const eligible = allLocations.filter(
+                    (loc: any) => loc.id !== "LOC-HQ" && !alreadyLinkedIds.has(loc.id)
+                  );
+                  const alreadyLinked = allLocations.filter(
+                    (loc: any) => loc.id !== "LOC-HQ" && alreadyLinkedIds.has(loc.id)
+                  );
+
+                  return (
+                    <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                      {eligible.length === 0 && alreadyLinked.length === 0 && (
+                        <p className="text-sm text-neutral-400 text-center py-6">No store locations found.</p>
+                      )}
+                      {eligible.length === 0 && alreadyLinked.length > 0 && (
+                        <p className="text-sm text-neutral-400 text-center py-4">All store locations already have this product.</p>
+                      )}
+                      {eligible.length > 0 && (
+                        <>
+                          {eligible.length > 1 && (
+                            <button
+                              onClick={() => {
+                                const allIds = eligible.map((l: any) => l.id);
+                                setAllocationLocations(prev =>
+                                  prev.length === allIds.length ? [] : allIds
+                                );
+                              }}
+                              className="text-xs font-semibold text-violet-600 hover:text-violet-800 transition-colors"
+                            >
+                              {allocationLocations.length === eligible.length ? "Deselect all" : "Select all"}
+                            </button>
+                          )}
+                          {eligible.map((loc: any) => (
+                            <label key={loc.id} className="flex items-center gap-3 p-2.5 rounded-lg border border-neutral-200 hover:bg-neutral-50 cursor-pointer transition-colors select-none">
+                              <input
+                                type="checkbox"
+                                checked={allocationLocations.includes(loc.id)}
+                                onChange={(e) => {
+                                  if (e.target.checked) setAllocationLocations(p => [...p, loc.id]);
+                                  else setAllocationLocations(p => p.filter(id => id !== loc.id));
+                                }}
+                                className="h-4 w-4 rounded border-neutral-300 text-violet-600 focus:ring-violet-500 shrink-0"
+                              />
+                              <div className="min-w-0">
+                                <div className="text-sm font-semibold text-neutral-800 truncate">{loc.name}</div>
+                                <div className="text-[10px] text-neutral-400 font-mono">{loc.id}</div>
+                              </div>
+                            </label>
+                          ))}
+                        </>
+                      )}
+                      {alreadyLinked.length > 0 && (
+                        <div className="pt-2 border-t border-neutral-100">
+                          <p className="text-[10px] font-semibold text-neutral-400 uppercase tracking-wide mb-1.5">Already allocated</p>
+                          {alreadyLinked.map((loc: any) => (
+                            <div key={loc.id} className="flex items-center gap-3 p-2.5 rounded-lg bg-neutral-50 border border-neutral-100 opacity-60">
+                              <Link2 className="h-3.5 w-3.5 text-violet-500 shrink-0" />
+                              <div className="min-w-0">
+                                <div className="text-sm font-semibold text-neutral-700 truncate">{loc.name}</div>
+                                <div className="text-[10px] text-neutral-400 font-mono">{loc.id}</div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
+
+            {/* Result message */}
+            {allocationResult && (
+              <div className={`mx-6 mb-3 rounded-lg px-3 py-2 text-xs font-medium ${
+                allocationResult.startsWith("✓")
+                  ? "bg-emerald-50 border border-emerald-200 text-emerald-800"
+                  : allocationResult.startsWith("✗")
+                  ? "bg-red-50 border border-red-200 text-red-700"
+                  : "bg-amber-50 border border-amber-200 text-amber-800"
+              }`}>
+                {allocationResult}
+              </div>
+            )}
+
+            {/* Footer */}
+            <div className="flex items-center justify-between px-6 py-4 border-t border-neutral-100 bg-neutral-50">
+              <p className="text-[10px] text-neutral-400">
+                Starting stock = 0 always • item_id preserved from HQ row
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => { setAllocationItem(null); setAllocationResult(null); }}
+                  disabled={allocationLoading}
+                  className="px-4 py-2 text-sm font-semibold text-neutral-700 bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50 transition-colors"
+                >
+                  {allocationResult?.startsWith("✓") ? "Close" : "Cancel"}
+                </button>
+                <button
+                  onClick={handleAllocate}
+                  disabled={allocationLoading || allocationLocations.length === 0}
+                  className="flex items-center gap-2 px-4 py-2 text-sm font-bold bg-violet-600 text-white rounded-lg hover:bg-violet-700 disabled:opacity-50 transition-colors shadow-sm"
+                >
+                  {allocationLoading
+                    ? <><Loader2 className="h-4 w-4 animate-spin" /> Allocating…</>
+                    : <><MapPin className="h-4 w-4" /> Allocate{allocationLocations.length > 0 ? ` to ${allocationLocations.length}` : ""}</>
+                  }
+                </button>
+              </div>
             </div>
           </div>
         </div>

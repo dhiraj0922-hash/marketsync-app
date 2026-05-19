@@ -431,6 +431,104 @@ export async function insertInventoryItem(
 }
 
 /**
+ * Allocate a source inventory item to one or more store locations.
+ *
+ * Phase 3A — foundation only. No sync, no inheritance.
+ *
+ * Contract:
+ *  - Each new row gets a FRESH crypto.randomUUID() row id (never clones source id).
+ *  - item_id is copied verbatim from sourceItem.itemId (the shared product identity).
+ *  - instock is ALWAYS 0 — stock must be counted/entered per-location after allocation.
+ *  - parlevel is set from options.startingPar (defaults to 0).
+ *  - Supplier (supplierId) and cost are copied only when options flags are true.
+ *  - Safe V1 fields always copied: name, category, itemtype, baseunit, unit,
+ *    purchase_uom, pack_qty, inner_unit_type, inner_unit_size, allowed_recipe_uoms.
+ *
+ * Returns the newly-mapped frontend rows so the caller can append them to
+ * local inventoryData without a full reload.
+ */
+export async function allocateInventoryToLocations(
+  sourceItem: any,
+  locationIds: string[],
+  options: {
+    copySupplier:  boolean;
+    copyCost:      boolean;
+    startingPar:   number;
+  }
+): Promise<{
+  success:       boolean;
+  insertedRows?: any[];  // mapped to frontend shape for immediate state merge
+  errors?:       { locationId: string; message: string }[];
+}> {
+  if (!locationIds || locationIds.length === 0) {
+    return { success: false, errors: [{ locationId: '', message: 'No locations selected.' }] };
+  }
+
+  const canonicalItemId = sourceItem.itemId ?? sourceItem.item_id;
+  if (!canonicalItemId) {
+    return { success: false, errors: [{ locationId: '', message: 'Source item has no shared item_id — allocate from an HQ row with a valid item_id.' }] };
+  }
+
+  const insertedRows: any[] = [];
+  const errors: { locationId: string; message: string }[] = [];
+
+  for (const locationId of locationIds) {
+    const rowId = crypto.randomUUID();
+
+    const row: Record<string, any> = {
+      id:          rowId,
+      item_id:     canonicalItemId,  // ← ALWAYS the source canonical identity
+      location_id: locationId,
+
+      // ── V1 safe fields (always copied) ──
+      name:          sourceItem.name         || '',
+      category:      sourceItem.category     || '',
+      itemtype:      sourceItem.itemType     || '',
+      baseunit:      sourceItem.baseUnit     || sourceItem.unit || '',
+      unit:          sourceItem.unit         || '',
+      purchase_uom:  sourceItem.purchaseUom  ?? null,
+      pack_qty:      sourceItem.packQty      != null ? Number(sourceItem.packQty) : null,
+      inner_unit_type: sourceItem.innerUnitType  ?? null,
+      inner_unit_size: sourceItem.innerUnitSize  != null ? Number(sourceItem.innerUnitSize) : null,
+      inner_unit_uom:  sourceItem.innerUnitUom   ?? null,
+      base_uom:        sourceItem.baseUomNew?.trim() || null,
+      allowed_recipe_uoms: Array.isArray(sourceItem.allowedRecipeUoms) ? sourceItem.allowedRecipeUoms : null,
+      purchaseunits: Array.isArray(sourceItem.purchaseUnits) ? sourceItem.purchaseUnits : [],
+
+      // ── Always reset ──
+      instock:   0,
+      parlevel:  isNaN(options.startingPar) ? 0 : options.startingPar,
+
+      // ── Optional copies ──
+      supplierid:   options.copySupplier && typeof sourceItem.supplierId === 'number' ? sourceItem.supplierId : null,
+      cost:         options.copyCost     && !isNaN(parseFloat(sourceItem.cost)) ? parseFloat(sourceItem.cost) : 0,
+      purchasecost: options.copyCost     && sourceItem.purchaseCost != null ? parseFloat(sourceItem.purchaseCost) || null : null,
+
+      // housekeeping defaults
+      pricetrend:    'steady',
+      priceincrease: false,
+    };
+
+    const { error } = await supabase.from('inventory_items').insert(row);
+    if (error) {
+      console.error(`[allocateInventoryToLocations] insert failed for ${locationId}:`, error);
+      errors.push({ locationId, message: error.message });
+      continue;
+    }
+
+    // Map back to frontend shape for immediate state merge
+    insertedRows.push(mapInventoryToFrontend(row));
+  }
+
+  if (insertedRows.length === 0 && errors.length > 0) {
+    return { success: false, errors };
+  }
+  return { success: true, insertedRows, errors: errors.length > 0 ? errors : undefined };
+}
+
+
+
+/**
  * Hard-delete a single inventory_items row by its UUID primary key.
  *
  * Use this instead of saveInventory(filtered) which calls upsert and never
