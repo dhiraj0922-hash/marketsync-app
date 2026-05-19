@@ -6,8 +6,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
-import { loadRecipes, saveRecipes, loadInventory, saveInventory, upsertRecipe, updateInventoryItemCost, syncLinkedFgCost, loadSuppliers, deleteRecipe, loadSaleItems, createFgFromRecipe } from "@/lib/storage";
+import { loadRecipes, saveRecipes, loadInventory, saveInventory, upsertRecipe, updateInventoryItemCost, syncLinkedFgCost, loadSuppliers, deleteRecipe, loadSaleItems, createFgFromRecipe, updateRecipeNutrition } from "@/lib/storage";
 import { InventoryEditDrawer } from "@/components/InventoryEditDrawer";
+import { NutritionEstimatePanel } from "@/components/NutritionEstimatePanel";
+import { NUTRITION_DISCLAIMER, type NutritionEstimate } from "@/lib/aiNutrition";
 
 import {
   normalizeUnit,
@@ -102,6 +104,10 @@ function RecipesPageContent() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [builderError, setBuilderError] = useState<string | null>(null);
+  const [nutritionEstimate, setNutritionEstimate] = useState<NutritionEstimate | null>(null);
+  const [isEstimatingNutrition, setIsEstimatingNutrition] = useState(false);
+  const [isSavingNutrition, setIsSavingNutrition] = useState(false);
+  const [nutritionError, setNutritionError] = useState<string | null>(null);
 
   // "Add to Finished Goods" state
   // Set of recipe IDs that already have a linked hq_sale_item
@@ -274,6 +280,7 @@ function RecipesPageContent() {
       setTargetMargin(recipe.margin || 80);
       setOutputItemId(recipe.outputItemId || "");
       setIngredients(recipe.ingredients ? [...recipe.ingredients] : []);
+      setNutritionEstimate(recipe.nutritionEstimate ?? null);
     } else {
       setEditingRecipe(null);
       setRecipeName("");
@@ -283,8 +290,10 @@ function RecipesPageContent() {
       setTargetMargin(80);
       setOutputItemId("");
       setIngredients([]);
+      setNutritionEstimate(null);
     }
     setSelectedInvId("");
+    setNutritionError(null);
     setIsBuilderOpen(true);
   };
 
@@ -374,6 +383,95 @@ function RecipesPageContent() {
     setIngredients(updated);
   };
 
+  // HARD RULE: this standalone handler is the only place that starts AI nutrition estimation.
+  // It is called only by the "Estimate Nutrition with AI" button's onClick below.
+  const handleEstimateNutrition = async () => {
+    if (isEstimatingNutrition) return;
+
+    setNutritionError(null);
+    if (!recipeName.trim()) {
+      setNutritionError("Enter a recipe name before estimating nutrition.");
+      return;
+    }
+    if (ingredients.length === 0) {
+      setNutritionError("Add at least one ingredient before estimating nutrition.");
+      return;
+    }
+
+    setIsEstimatingNutrition(true);
+    try {
+      const res = await fetch("/api/ai-nutrition/estimate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          requestId: crypto.randomUUID(),
+          userId: user?.id ?? "",
+          recipe: {
+            name: recipeName,
+            yieldQty,
+            yieldUnit,
+            ingredients: ingredients.map((ing: any) => ({
+              name: ing.name,
+              qty: Number(ing.qty) || 0,
+              unit: ing.unit || "ea",
+            })),
+          },
+        }),
+      });
+      const body = await res.json();
+      if (!res.ok || !body?.success) {
+        throw new Error(body?.error || "Nutrition estimation failed.");
+      }
+      setNutritionEstimate({
+        ...body.data,
+        disclaimer: body.data?.disclaimer || NUTRITION_DISCLAIMER,
+      });
+    } catch (err: any) {
+      setNutritionError(err?.message ?? "Nutrition estimation failed. Please try again.");
+    } finally {
+      setIsEstimatingNutrition(false);
+    }
+  };
+
+  const handleSaveNutrition = async () => {
+    if (!nutritionEstimate || isSavingNutrition) return;
+
+    if (!editingRecipe?.id) {
+      setNutritionError("Compile the recipe once before saving nutrition to it.");
+      return;
+    }
+
+    setIsSavingNutrition(true);
+    setNutritionError(null);
+    try {
+      const approvedEstimate: NutritionEstimate = {
+        ...nutritionEstimate,
+        source: nutritionEstimate.source ?? "manual",
+        approved_by: user?.id ?? undefined,
+        approved_at: new Date().toISOString(),
+        yield_qty: Number(yieldQty) || 1,
+        yield_unit: yieldUnit || "unit",
+        disclaimer: nutritionEstimate.disclaimer || NUTRITION_DISCLAIMER,
+      };
+
+      const res = await updateRecipeNutrition(editingRecipe.id, approvedEstimate);
+      if (!res.success) {
+        const msg = res.error?.message ?? res.error?.detail ?? "Unknown database error.";
+        throw new Error(msg);
+      }
+
+      setNutritionEstimate(approvedEstimate);
+      setRecipes(prev => prev.map(r =>
+        r.id === editingRecipe.id ? { ...r, nutritionEstimate: approvedEstimate } : r
+      ));
+      setEditingRecipe((prev: any) => prev ? { ...prev, nutritionEstimate: approvedEstimate } : prev);
+    } catch (err: any) {
+      setNutritionError(err?.message ?? "Failed to save nutrition estimate.");
+    } finally {
+      setIsSavingNutrition(false);
+    }
+  };
+
   const calculateCost = () => {
     let total = 0;
     let errors = 0;
@@ -446,6 +544,7 @@ function RecipesPageContent() {
         price,
         outputItemId,
         ingredients,
+        nutritionEstimate: editingRecipe?.nutritionEstimate ?? null,
       };
 
       // ── Step 1: upsert the single recipe row ────────────────────────────────
@@ -636,7 +735,19 @@ function RecipesPageContent() {
                 <TableRow key={recipe.id} className="hover:bg-neutral-50/50 group">
                   <TableCell className="pl-6 py-4">
                     <p className="font-semibold text-brand-900">{recipe.name}</p>
-                    <p className="text-xs text-neutral-500 mt-0.5">{recipe.category} • {recipe.id}</p>
+                    <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                      <p className="text-xs text-neutral-500">{recipe.category} • {recipe.id}</p>
+                      {recipe.nutritionEstimate && (
+                        <button
+                          type="button"
+                          onClick={() => openBuilder(recipe)}
+                          className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 font-bold uppercase tracking-wider hover:bg-emerald-100"
+                          title="Open this recipe's nutrition estimate"
+                        >
+                          Nutrition ✓
+                        </button>
+                      )}
+                    </div>
                   </TableCell>
                   <TableCell className="py-4">
                     <Badge variant="neutral" className="bg-white border-neutral-200 text-neutral-700">
@@ -877,6 +988,46 @@ function RecipesPageContent() {
                 <p className="text-[10px] uppercase font-bold text-neutral-400 tracking-wider">Suggested Menu Price</p>
                 <p className="text-2xl font-bold mt-1">${currentPrice.toFixed(2)}</p>
              </div>
+          </div>
+
+          <div className="bg-white p-4 rounded-xl border border-neutral-200 shadow-sm space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 className="font-bold text-neutral-900">Nutrition Estimate</h3>
+                <p className="text-xs text-neutral-500 mt-0.5">{NUTRITION_DISCLAIMER}</p>
+              </div>
+              <button
+                type="button"
+                onClick={handleEstimateNutrition}
+                disabled={isEstimatingNutrition}
+                className="px-3 py-2 bg-violet-600 text-white text-sm font-semibold rounded-lg hover:bg-violet-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2 shrink-0"
+              >
+                {isEstimatingNutrition ? (
+                  <span className="h-3.5 w-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                ) : (
+                  <Sparkles className="h-3.5 w-3.5" />
+                )}
+                {isEstimatingNutrition ? "Asking AI…" : "Estimate Nutrition with AI"}
+              </button>
+            </div>
+
+            {nutritionError && (
+              <div className="text-sm font-semibold text-danger-600 bg-danger-50 border border-danger-100 rounded-lg p-3">
+                {nutritionError}
+              </div>
+            )}
+
+            {nutritionEstimate && (
+              <NutritionEstimatePanel
+                estimate={nutritionEstimate}
+                yieldQty={yieldQty}
+                yieldUnit={yieldUnit}
+                isSaving={isSavingNutrition}
+                onChange={setNutritionEstimate}
+                onDiscard={() => { setNutritionEstimate(null); setNutritionError(null); }}
+                onSave={handleSaveNutrition}
+              />
+            )}
           </div>
 
           <div>

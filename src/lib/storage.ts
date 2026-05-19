@@ -1381,11 +1381,13 @@ const mapRecipeToFrontend = (db: any) => ({
     yieldUnit:       (db.yieldunit ?? '').trim().toLowerCase(),
     theoreticalCost: db.theoreticalcost,
     margin:          db.margin,
-    ingredients:     db.ingredients || []
+    ingredients:     db.ingredients || [],
+    nutritionEstimate: db.nutrition_estimate ?? null,
 });
 
 // Columns to fetch — avoids pulling created_at and any future-added admin columns
-const RECIPE_SELECT = "id,name,category,yieldqty,yieldunit,theoreticalcost,margin,ingredients";
+const RECIPE_SELECT = "id,name,category,yieldqty,yieldunit,theoreticalcost,margin,ingredients,nutrition_estimate";
+const RECIPE_SELECT_LEGACY = "id,name,category,yieldqty,yieldunit,theoreticalcost,margin,ingredients";
 
 const mapRecipeToDB = (r: any) => ({
     id:              String(r.id || ''),
@@ -1402,11 +1404,25 @@ const mapRecipeToDB = (r: any) => ({
 });
 
 export async function loadRecipes() {
-  const { data, error } = await supabase
+  const query = supabase
     .from('recipes')
     .select(RECIPE_SELECT)
     .order('name', { ascending: true })
     .range(0, 4999);  // bypass PostgREST 1000-row default cap
+  let { data, error }: { data: any[] | null; error: any } = await query;
+
+  // Until migration_recipe_nutrition.sql is run, older DBs do not have this
+  // column. Keep recipes usable and surface null estimates instead of hard-failing.
+  if (error && String(error.message || "").includes("nutrition_estimate")) {
+    const fallback = await supabase
+      .from('recipes')
+      .select(RECIPE_SELECT_LEGACY)
+      .order('name', { ascending: true })
+      .range(0, 4999);
+    data = fallback.data;
+    error = fallback.error;
+  }
+
   if (error) return [];
   console.log(`[loadRecipes] fetched ${data?.length ?? 0} rows`);
   return Array.isArray(data) ? data.map(mapRecipeToFrontend) : [];
@@ -1415,6 +1431,24 @@ export async function loadRecipes() {
 export async function saveRecipes(data: any[]) {
   const cleanData = data.map(mapRecipeToDB);
   const { error } = await supabase.from('recipes').upsert(cleanData, { onConflict: 'id' });
+  if (error) return { success: false, error };
+  return { success: true };
+}
+
+/**
+ * Patch only the nutrition_estimate JSONB field on a recipe.
+ *
+ * This intentionally does not call mapRecipeToDB or resave the full recipe;
+ * nutrition approval is a separate user-reviewed action from recipe costing.
+ */
+export async function updateRecipeNutrition(
+  recipeId: string,
+  nutritionEstimate: any
+): Promise<{ success: boolean; error?: any }> {
+  const { error } = await supabase
+    .from('recipes')
+    .update({ nutrition_estimate: nutritionEstimate })
+    .eq('id', recipeId);
   if (error) return { success: false, error };
   return { success: true };
 }
@@ -3187,4 +3221,3 @@ export async function deletePurchaseOption(id: string) {
   }
   return { success: true };
 }
-
