@@ -3107,13 +3107,21 @@ const mapFgCountLine = (db: any): FgCountLineRow => ({
   variance_value: Number(db.variance_value ?? 0),
 });
 
-export async function loadFgCountSessions(): Promise<FgCountSessionRow[]> {
-  const { data, error } = await supabase
+export async function loadFgCountSessions(opts?: {
+  dateFrom?: string;
+  dateTo?: string;
+}): Promise<FgCountSessionRow[]> {
+  let query = supabase
     .from('fg_count_sessions')
     .select('id, count_date, session_name, counted_by, counted_by_name, created_at, updated_at')
     .order('count_date', { ascending: false })
     .order('updated_at', { ascending: false })
     .range(0, 4999);
+
+  if (opts?.dateFrom) query = query.gte('count_date', opts.dateFrom);
+  if (opts?.dateTo) query = query.lte('count_date', opts.dateTo);
+
+  const { data, error } = await query;
 
   if (error) {
     console.error('[loadFgCountSessions] DB error:', error.message);

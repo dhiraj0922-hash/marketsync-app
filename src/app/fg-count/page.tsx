@@ -75,6 +75,8 @@ interface HistorySession {
   lossValue: number;
 }
 
+type HistoryRangePreset = "today" | "7d" | "30d" | "custom";
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const fmt = (n: number) =>
@@ -87,6 +89,13 @@ const todayISO = () => {
   const d = new Date();
   const offsetMs = d.getTimezoneOffset() * 60_000;
   return new Date(d.getTime() - offsetMs).toISOString().slice(0, 10);
+};
+
+const addDaysISO = (dateISO: string, days: number) => {
+  const date = new Date(`${dateISO}T00:00:00`);
+  date.setDate(date.getDate() + days);
+  const offsetMs = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 10);
 };
 
 function varianceLabel(v: number | null) {
@@ -134,10 +143,21 @@ function FgCountContent() {
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [historySessions, setHistorySessions] = useState<HistorySession[]>([]);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const [historyRangePreset, setHistoryRangePreset] = useState<HistoryRangePreset>("7d");
+  const [historyFromDate, setHistoryFromDate] = useState(() => addDaysISO(todayISO(), -6));
+  const [historyToDate, setHistoryToDate] = useState(todayISO);
   const [expandedSession, setExpandedSession] = useState<string | null>(null);
   const sessionIdRef = useRef(`FGC-${Date.now().toString(36).toUpperCase()}`);
   const suppressNextDateLoadRef = useRef(false);
   const countedByLabel = user?.name || user?.email || "Unknown user";
+
+  const resolveHistoryRange = useCallback((preset = historyRangePreset) => {
+    const today = todayISO();
+    if (preset === "today") return { from: today, to: today };
+    if (preset === "30d") return { from: addDaysISO(today, -29), to: today };
+    if (preset === "custom") return { from: historyFromDate, to: historyToDate };
+    return { from: addDaysISO(today, -6), to: today };
+  }, [historyFromDate, historyRangePreset, historyToDate]);
 
   const applySessionLines = useCallback((lines: FgCountLineRow[], sessionId: string | null, nextSessionName?: string | null) => {
     const lineByItem = new Map(lines.map(line => [line.item_id, line]));
@@ -238,11 +258,14 @@ function FgCountContent() {
     return s + (r.variance !== null ? r.variance * r.item.makingCost : 0);
   }, 0);
 
-  const openHistory = async () => {
-    setIsHistoryOpen(true);
+  const loadHistoryRange = useCallback(async () => {
     setIsHistoryLoading(true);
     try {
-      const sessions = await loadFgCountSessions();
+      const range = resolveHistoryRange();
+      const sessions = await loadFgCountSessions({
+        dateFrom: range.from,
+        dateTo: range.to,
+      });
       const loaded = await Promise.all(
         sessions.map(session => loadFgCountSessionById(session.id))
       );
@@ -264,10 +287,21 @@ function FgCountContent() {
             };
           })
       );
+      setExpandedSession(null);
     } finally {
       setIsHistoryLoading(false);
     }
+  }, [resolveHistoryRange]);
+
+  const openHistory = async () => {
+    setIsHistoryOpen(true);
+    await loadHistoryRange();
   };
+
+  useEffect(() => {
+    if (!isHistoryOpen) return;
+    loadHistoryRange();
+  }, [historyRangePreset, historyFromDate, historyToDate, isHistoryOpen, loadHistoryRange]);
 
   const loadHistorySession = async (sessionId: string) => {
     const savedSession = await loadFgCountSessionById(sessionId);
@@ -832,6 +866,63 @@ function FgCountContent() {
         description="Historical variance sessions grouped by count date and session."
       >
         <div className="space-y-3">
+          <div className="bg-white border border-neutral-200 rounded-xl p-3 shadow-sm space-y-3">
+            <div className="flex flex-col sm:flex-row gap-3 sm:items-end">
+              <div className="min-w-[180px]">
+                <label className="text-[10px] uppercase tracking-wider font-bold text-neutral-500 block mb-1">
+                  Date Filter
+                </label>
+                <select
+                  value={historyRangePreset}
+                  onChange={e => setHistoryRangePreset(e.target.value as HistoryRangePreset)}
+                  className="w-full px-3 py-2 border border-neutral-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-1 focus:ring-brand-400"
+                >
+                  <option value="today">Today</option>
+                  <option value="7d">Last 7 Days</option>
+                  <option value="30d">Last 30 Days</option>
+                  <option value="custom">Custom Range</option>
+                </select>
+              </div>
+              {historyRangePreset === "custom" && (
+                <>
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-neutral-500 block mb-1">
+                      From
+                    </label>
+                    <input
+                      type="date"
+                      value={historyFromDate}
+                      onChange={e => setHistoryFromDate(e.target.value)}
+                      className="w-full px-3 py-2 border border-neutral-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-1 focus:ring-brand-400"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-neutral-500 block mb-1">
+                      To
+                    </label>
+                    <input
+                      type="date"
+                      value={historyToDate}
+                      onChange={e => setHistoryToDate(e.target.value)}
+                      className="w-full px-3 py-2 border border-neutral-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-1 focus:ring-brand-400"
+                    />
+                  </div>
+                </>
+              )}
+              <button
+                type="button"
+                onClick={loadHistoryRange}
+                disabled={isHistoryLoading}
+                className="px-3 py-2 text-sm font-semibold bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 disabled:opacity-50 inline-flex items-center gap-1.5"
+              >
+                {isHistoryLoading
+                  ? <Loader2 className="h-4 w-4 animate-spin" />
+                  : <RefreshCw className="h-4 w-4" />}
+                Refresh
+              </button>
+            </div>
+          </div>
+
           {isHistoryLoading ? (
             <div className="flex items-center justify-center p-10 text-neutral-400 gap-2">
               <Loader2 className="h-5 w-5 animate-spin" /> Loading count history…
