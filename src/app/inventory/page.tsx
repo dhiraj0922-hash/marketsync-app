@@ -1915,21 +1915,27 @@ export default function Inventory() {
                       </div>
                     </TableCell>
                     <TableCell className="px-2 sm:px-3 py-2.5 sm:py-4">
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="font-semibold text-neutral-900 text-xs sm:text-sm leading-tight">{item.name}</span>
-                        {item.itemType === 'Preparation' && <Badge variant="warning" className="text-[9px] px-1 py-0 border-none bg-orange-100 text-orange-700">PREP</Badge>}
-                        {item.itemType === 'Finished Good' && <Badge variant="success" className="text-[9px] px-1 py-0 border-none bg-emerald-100 text-emerald-700">FG</Badge>}
+                      <div className="flex flex-col gap-0.5">
+                        {/* Name + type badges on same line */}
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-semibold text-neutral-900 text-xs sm:text-sm leading-tight">{item.name}</span>
+                          {item.itemType === 'Preparation' && <Badge variant="warning" className="text-[9px] px-1 py-0 border-none bg-orange-100 text-orange-700">PREP</Badge>}
+                          {item.itemType === 'Finished Good' && <Badge variant="success" className="text-[9px] px-1 py-0 border-none bg-emerald-100 text-emerald-700">FG</Badge>}
+                        </div>
                         {/* HQ-only: Shared Product badge — shown when ≥ 2 rows share this item_id */}
-                        {isHqAdmin(user) && item.itemId && (linkedCountByItemId.get(item.itemId) ?? 0) > 1 && (
-                          <button
-                            onClick={(e) => { e.stopPropagation(); setSharedLinkedDrawerItem(item); }}
-                            title={`Shared across ${linkedCountByItemId.get(item.itemId)} locations — click to inspect`}
-                            className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[9px] font-bold rounded-full bg-violet-100 text-violet-700 border border-violet-200 hover:bg-violet-200 transition-colors cursor-pointer select-none"
-                          >
-                            <Link2 className="h-2.5 w-2.5" />
-                            Shared &bull; {linkedCountByItemId.get(item.itemId)}
-                          </button>
-                        )}
+                        {isHqAdmin(user) && item.itemId && (linkedCountByItemId.get(item.itemId) ?? 0) > 1 && (() => {
+                          const count = linkedCountByItemId.get(item.itemId)!;
+                          return (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setSharedLinkedDrawerItem(item); }}
+                              title={`Shared across ${count} location rows — click to inspect all`}
+                              className="self-start inline-flex items-center gap-1 px-1.5 py-0.5 text-[9px] font-bold rounded-full bg-violet-100 text-violet-700 border border-violet-200 hover:bg-violet-200 active:bg-violet-300 transition-colors cursor-pointer select-none"
+                            >
+                              <Link2 className="h-2.5 w-2.5 shrink-0" />
+                              Shared &bull; {count} location{count !== 1 ? "s" : ""}
+                            </button>
+                          );
+                        })()}
                       </div>
                     </TableCell>
                     <TableCell className="px-2 sm:px-3 py-2.5 sm:py-4 hidden sm:table-cell">
