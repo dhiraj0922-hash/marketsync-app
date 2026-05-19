@@ -26,7 +26,8 @@
  *       - add new supplier row
  */
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { Drawer } from "@/components/ui/drawer";
 import {
   saveInventory,
@@ -74,27 +75,49 @@ interface SupplierComboboxProps {
 }
 
 function SupplierCombobox({ value, supplierObjects, extraNames = [], onChange, onSelect }: SupplierComboboxProps) {
-  const [query,   setQuery]   = useState(value);
-  const [open,    setOpen]    = useState(false);
-  const wrapRef = useRef<HTMLDivElement>(null);
+  const [query,    setQuery]    = useState(value);
+  const [open,     setOpen]     = useState(false);
+  const [dropPos,  setDropPos]  = useState({ top: 0, left: 0, width: 0 });
+  const inputRef = useRef<HTMLInputElement>(null);
+  const wrapRef  = useRef<HTMLDivElement>(null);
 
   // Keep internal query in sync when parent resets the form
   useEffect(() => { setQuery(value); }, [value]);
+
+  // Measure input position whenever dropdown opens so the portal is correctly anchored.
+  // getBoundingClientRect returns viewport-relative coords, which is exactly what
+  // position:fixed needs — no scrollY/scrollX offsets required.
+  const measureAndOpen = useCallback(() => {
+    if (inputRef.current) {
+      const r = inputRef.current.getBoundingClientRect();
+      setDropPos({
+        top:   r.bottom + 2,
+        left:  r.left,
+        width: r.width,
+      });
+    }
+    setOpen(true);
+  }, []);
 
   // Close on outside click — commit free-text
   useEffect(() => {
     if (!open) return;
     const handler = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
-        const normalized = query.trim().replace(/\s+/g, ' ');
-        if (normalized !== value) {
-          // check if it matches a master supplier
-          const match = supplierObjects.find(s => s.name.toLowerCase() === normalized.toLowerCase());
-          if (match) { onSelect(match.id, match.name); }
-          else { onChange(normalized); onSelect(null, normalized); }
-        }
-        setOpen(false);
+      const target = e.target as Node;
+      // keep open if click is inside our wrapper or the portal dropdown
+      const portalEl = document.getElementById('supplier-combobox-portal');
+      if (
+        (wrapRef.current && wrapRef.current.contains(target)) ||
+        (portalEl && portalEl.contains(target))
+      ) return;
+      // commit free-text on outside click
+      const normalized = query.trim().replace(/\s+/g, ' ');
+      if (normalized !== value) {
+        const match = supplierObjects.find(s => s.name.toLowerCase() === normalized.toLowerCase());
+        if (match) { onSelect(match.id, match.name); }
+        else { onChange(normalized); onSelect(null, normalized); }
       }
+      setOpen(false);
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
@@ -102,13 +125,16 @@ function SupplierCombobox({ value, supplierObjects, extraNames = [], onChange, o
 
   const normalize = (s: string) => s.trim().replace(/\s+/g, ' ');
 
-  // Merge master names + extra free-text names, dedup
+  // Merge master names + extra free-text names, dedup, sort
   const allNames = Array.from(new Set([
     ...supplierObjects.map(s => s.name),
     ...extraNames,
   ])).sort((a, b) => a.localeCompare(b));
 
-  const filtered = allNames.filter(s => s.toLowerCase().includes(query.toLowerCase()));
+  // Show all names when query is empty; filter otherwise
+  const filtered = query.trim()
+    ? allNames.filter(s => s.toLowerCase().includes(query.toLowerCase()))
+    : allNames;
 
   const select = (name: string) => {
     const n = normalize(name);
@@ -131,21 +157,73 @@ function SupplierCombobox({ value, supplierObjects, extraNames = [], onChange, o
     }
   };
 
-  // Whether typed query matches a known master supplier
   const isKnown = supplierObjects.some(s => s.name.toLowerCase() === normalize(query).toLowerCase());
+
+  // Portal dropdown — rendered onto document.body to escape overflow-y-auto clipping
+  const dropdown = open ? createPortal(
+    <div
+      id="supplier-combobox-portal"
+      style={{
+        position: 'fixed',
+        top:   dropPos.top,
+        left:  dropPos.left,
+        width: dropPos.width,
+        zIndex: 9999,
+      }}
+      className="bg-white border border-violet-200 rounded shadow-xl max-h-52 overflow-y-auto"
+    >
+      {allNames.length === 0 ? (
+        <div className="px-3 py-2 text-[11px] text-neutral-400 italic">Loading suppliers…</div>
+      ) : filtered.length === 0 ? (
+        <div className="px-3 py-2 text-[11px] text-neutral-400 italic">
+          No match — press Enter to add "{query}" as new supplier
+        </div>
+      ) : (
+        filtered.map(name => {
+          const ismaster = supplierObjects.some(s => s.name.toLowerCase() === name.toLowerCase());
+          return (
+            <button
+              key={name}
+              type="button"
+              onMouseDown={e => { e.preventDefault(); select(name); }}
+              className={`w-full text-left px-3 py-2 text-xs flex items-center justify-between transition-colors hover:bg-violet-50 ${
+                normalize(name) === normalize(query) ? 'bg-violet-50 font-semibold text-violet-800' : 'text-neutral-800'
+              }`}
+            >
+              <span>{name}</span>
+              {ismaster && (
+                <span className="ml-2 text-[9px] font-bold uppercase text-violet-500 bg-violet-100 px-1.5 py-0.5 rounded shrink-0">master</span>
+              )}
+            </button>
+          );
+        })
+      )}
+      {/* Free-text add option */}
+      {query.trim() && !allNames.some(s => normalize(s) === normalize(query)) && (
+        <button
+          type="button"
+          onMouseDown={e => { e.preventDefault(); select(query); }}
+          className="w-full text-left px-3 py-2 text-[11px] text-violet-600 font-semibold border-t border-violet-100 hover:bg-violet-50"
+        >
+          + Add "{normalize(query)}" as new supplier
+        </button>
+      )}
+    </div>,
+    document.body
+  ) : null;
 
   return (
     <div ref={wrapRef} className="relative">
       <div className="flex items-center gap-1">
         <input
-          autoFocus
+          ref={inputRef}
           type="text"
           value={query}
           placeholder="Search supplier…"
-          onFocus={() => setOpen(true)}
+          onFocus={measureAndOpen}
           onChange={e => {
             setQuery(e.target.value);
-            setOpen(true);
+            measureAndOpen();
           }}
           onKeyDown={handleKeyDown}
           className={`w-full px-2 py-1 border rounded text-xs focus:outline-none focus:ring-1 bg-white ${
@@ -157,52 +235,14 @@ function SupplierCombobox({ value, supplierObjects, extraNames = [], onChange, o
         {query && (
           <button
             type="button"
-            onClick={() => { setQuery(''); onSelect(null, ''); onChange(''); setOpen(true); }}
+            onClick={() => { setQuery(''); onSelect(null, ''); onChange(''); setOpen(false); }}
             className="text-neutral-400 hover:text-neutral-700 shrink-0 text-[10px] font-bold leading-none px-1"
             tabIndex={-1}
             title="Clear"
           >✕</button>
         )}
       </div>
-
-      {open && (
-        <div className="absolute left-0 right-0 top-full mt-0.5 z-[80] bg-white border border-violet-200 rounded shadow-lg max-h-48 overflow-y-auto">
-          {filtered.length === 0 ? (
-            <div className="px-3 py-2 text-[11px] text-neutral-400 italic">
-              No match — press Enter to use "{query}" as new supplier
-            </div>
-          ) : (
-            filtered.map(name => {
-              const ismaster = supplierObjects.some(s => s.name.toLowerCase() === name.toLowerCase());
-              return (
-                <button
-                  key={name}
-                  type="button"
-                  onMouseDown={e => { e.preventDefault(); select(name); }}
-                  className={`w-full text-left px-3 py-1.5 text-xs transition-colors hover:bg-violet-50 ${
-                    normalize(name) === normalize(query) ? 'bg-violet-50 font-semibold text-violet-800' : 'text-neutral-800'
-                  }`}
-                >
-                  <span>{name}</span>
-                  {ismaster && (
-                    <span className="ml-1.5 text-[9px] font-bold uppercase text-violet-500 bg-violet-100 px-1 py-0.5 rounded">master</span>
-                  )}
-                </button>
-              );
-            })
-          )}
-          {/* Free-text option — only when query doesn't exactly match any known name */}
-          {query.trim() && !allNames.some(s => normalize(s) === normalize(query)) && (
-            <button
-              type="button"
-              onMouseDown={e => { e.preventDefault(); select(query); }}
-              className="w-full text-left px-3 py-1.5 text-[11px] text-violet-600 font-semibold border-t border-violet-100 hover:bg-violet-50"
-            >
-              + Add "{normalize(query)}" as new supplier
-            </button>
-          )}
-        </div>
-      )}
+      {dropdown}
     </div>
   );
 }
