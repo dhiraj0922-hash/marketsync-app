@@ -201,6 +201,31 @@ export default function Inventory() {
         );
 
         setInventoryData(mergedInv);
+
+        // ── Dev diagnostic: shared identity audit ─────────────────────────────
+        // Logs the first 5 rows' id vs itemId to reveal whether item_id is populated
+        // in the DB, and shows which item_ids have multiple linked rows.
+        if (process.env.NODE_ENV === 'development') {
+          console.group('[InventoryIdentityDiag] Loaded inventory rows');
+          console.log('Sample rows (first 5):',
+            mergedInv.slice(0, 5).map((r: any) => ({
+              name:     r.name,
+              id:       r.id,
+              itemId:   r.itemId,
+              selfAssigned: String(r.itemId) === String(r.id),
+            }))
+          );
+          const tempMap = new Map<string, number>();
+          mergedInv.forEach((r: any) => {
+            const k = r.itemId ?? '';
+            if (k && String(k) !== String(r.id)) tempMap.set(k, (tempMap.get(k) ?? 0) + 1);
+          });
+          const sharedGroups = Array.from(tempMap.entries()).filter(([, n]) => n > 1);
+          console.log(`Rows with genuine shared itemId (itemId !== id): ${sharedGroups.length} groups`);
+          if (sharedGroups.length > 0) console.table(sharedGroups.map(([k, n]) => ({ itemId: k.slice(0, 20) + '…', count: n })));
+          else console.warn('No shared identity groups found — item_id may be NULL or self-assigned for all rows. Badge will not appear until the DB is backfilled.');
+          console.groupEnd();
+        }
         setActivityData(act);
         setCategories(cats);
         setImportBatches(batches);
@@ -1585,7 +1610,11 @@ export default function Inventory() {
     const m = new Map<string, any[]>();
     for (const row of inventoryData) {
       const key = row.itemId ?? "";
-      if (!key) continue;
+      // Skip rows with no itemId or self-assigned itemId (itemId === id).
+      // A self-assigned row means item_id was NULL in the DB and the mapper
+      // fell back to the row's own id — that row has no real shared identity
+      // and must not be grouped with anything.
+      if (!key || String(key) === String(row.id)) continue;
       if (!m.has(key)) m.set(key, []);
       m.get(key)!.push(row);
     }
