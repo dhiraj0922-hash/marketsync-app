@@ -1,11 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { AlertTriangle, Check, X } from "lucide-react";
 import {
   NUTRITION_DISCLAIMER,
+  calculateServingsPerBatch,
+  derivePerServing,
   derivePerYieldUnit,
   deriveTotalFromPerYieldUnit,
+  ensureServingNutritionFields,
   normalizeMacroSet,
   type NutritionEstimate,
   type NutritionMacroSet,
@@ -53,27 +56,27 @@ export function NutritionEstimatePanel({
   onDiscard,
   onSave,
 }: NutritionEstimatePanelProps) {
-  const [draft, setDraft] = useState<NutritionEstimate>(estimate);
+  const draft = useMemo(() => ensureServingNutritionFields(estimate), [estimate]);
 
-  useEffect(() => {
-    setDraft(estimate);
-  }, [estimate]);
-
-  const effectiveYieldQty = Number(yieldQty) > 0 ? Number(yieldQty) : 1;
-  const effectiveYieldUnit = yieldUnit || draft.yield_unit || "unit";
+  const effectiveYieldQty = Number(draft.yield_qty) > 0 ? Number(draft.yield_qty) : (Number(yieldQty) || 1);
+  const effectiveYieldUnit = draft.yield_unit || yieldUnit || "unit";
+  const servingSizeQty = Number(draft.serving_size_qty) > 0 ? Number(draft.serving_size_qty) : 1;
+  const servingSizeUnit = draft.serving_size_unit || effectiveYieldUnit;
+  const servingsPerBatch = Number(draft.servings_per_batch) > 0 ? Number(draft.servings_per_batch) : 1;
 
   const updateDraft = (next: NutritionEstimate) => {
-    setDraft(next);
-    onChange(next);
+    onChange(ensureServingNutritionFields(next));
   };
 
   const updateTotal = (key: keyof NutritionMacroSet, value: string) => {
     const total = normalizeMacroSet({ ...draft.total, [key]: Number(value) });
+    const nextServings = Number(draft.servings_per_batch) > 0 ? Number(draft.servings_per_batch) : 1;
     updateDraft({
       ...draft,
       source: draft.source ?? "manual",
       total,
       per_yield_unit: derivePerYieldUnit(total, effectiveYieldQty),
+      per_serving: derivePerServing(total, nextServings),
       yield_qty: effectiveYieldQty,
       yield_unit: effectiveYieldUnit,
       disclaimer: draft.disclaimer || NUTRITION_DISCLAIMER,
@@ -82,14 +85,53 @@ export function NutritionEstimatePanel({
 
   const updatePerYieldUnit = (key: keyof NutritionMacroSet, value: string) => {
     const perYieldUnit = normalizeMacroSet({ ...draft.per_yield_unit, [key]: Number(value) });
+    const total = deriveTotalFromPerYieldUnit(perYieldUnit, effectiveYieldQty);
+    const nextServings = Number(draft.servings_per_batch) > 0 ? Number(draft.servings_per_batch) : 1;
     updateDraft({
       ...draft,
       source: draft.source ?? "manual",
-      total: deriveTotalFromPerYieldUnit(perYieldUnit, effectiveYieldQty),
+      total,
       per_yield_unit: perYieldUnit,
+      per_serving: derivePerServing(total, nextServings),
       yield_qty: effectiveYieldQty,
       yield_unit: effectiveYieldUnit,
       disclaimer: draft.disclaimer || NUTRITION_DISCLAIMER,
+    });
+  };
+
+  const updatePerServing = (key: keyof NutritionMacroSet, value: string) => {
+    const perServing = normalizeMacroSet({ ...draft.per_serving, [key]: Number(value) });
+    const total = deriveTotalFromPerYieldUnit(perServing, servingsPerBatch);
+    updateDraft({
+      ...draft,
+      source: draft.source ?? "manual",
+      total,
+      per_yield_unit: derivePerYieldUnit(total, effectiveYieldQty),
+      per_serving: perServing,
+      disclaimer: draft.disclaimer || NUTRITION_DISCLAIMER,
+    });
+  };
+
+  const updateServingSize = (field: "qty" | "unit", value: string) => {
+    const nextQty = field === "qty" ? Number(value) : servingSizeQty;
+    const nextUnit = field === "unit" ? value : servingSizeUnit;
+    const convertedServings = calculateServingsPerBatch(effectiveYieldQty, effectiveYieldUnit, nextQty, nextUnit);
+    const nextServings = convertedServings ?? servingsPerBatch;
+    updateDraft({
+      ...draft,
+      serving_size_qty: Number(nextQty) > 0 ? Number(nextQty) : 0,
+      serving_size_unit: nextUnit,
+      servings_per_batch: nextServings,
+      per_serving: derivePerServing(draft.total, nextServings),
+    });
+  };
+
+  const updateServingsPerBatch = (value: string) => {
+    const nextServings = Number(value) > 0 ? Number(value) : 0;
+    updateDraft({
+      ...draft,
+      servings_per_batch: nextServings,
+      per_serving: derivePerServing(draft.total, nextServings),
     });
   };
 
@@ -112,15 +154,56 @@ export function NutritionEstimatePanel({
       </div>
 
       <div className="p-4 space-y-4">
-        <div className="grid grid-cols-[1fr_120px_120px] gap-2 items-center text-[10px] uppercase tracking-wider font-bold text-neutral-500">
+        <div className="grid grid-cols-3 gap-3 p-3 bg-neutral-50 border border-neutral-100 rounded-lg">
+          <div>
+            <label className="text-[10px] uppercase tracking-wider font-bold text-neutral-500 block mb-1">
+              Serving Size Qty
+            </label>
+            <input
+              type="number"
+              min="0"
+              step="0.1"
+              value={toDisplayNumber(servingSizeQty)}
+              onChange={(e) => updateServingSize("qty", e.target.value)}
+              className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
+            />
+          </div>
+          <div>
+            <label className="text-[10px] uppercase tracking-wider font-bold text-neutral-500 block mb-1">
+              Serving Size Unit
+            </label>
+            <input
+              type="text"
+              value={servingSizeUnit}
+              onChange={(e) => updateServingSize("unit", e.target.value)}
+              className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
+            />
+          </div>
+          <div>
+            <label className="text-[10px] uppercase tracking-wider font-bold text-neutral-500 block mb-1">
+              Servings Per Batch
+            </label>
+            <input
+              type="number"
+              min="0"
+              step="0.1"
+              value={toDisplayNumber(servingsPerBatch)}
+              onChange={(e) => updateServingsPerBatch(e.target.value)}
+              className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
+            />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-[1fr_110px_110px_110px] gap-2 items-center text-[10px] uppercase tracking-wider font-bold text-neutral-500">
           <span>Macro</span>
-          <span className="text-right">Total Recipe</span>
+          <span className="text-right">Total Batch</span>
           <span className="text-right">Per {effectiveYieldUnit}</span>
+          <span className="text-right">Per Serving</span>
         </div>
 
         <div className="space-y-2">
           {MACROS.map((macro) => (
-            <div key={macro.key} className="grid grid-cols-[1fr_120px_120px] gap-2 items-center">
+            <div key={macro.key} className="grid grid-cols-[1fr_110px_110px_110px] gap-2 items-center">
               <div>
                 <p className="text-sm font-semibold text-neutral-900">{macro.label}</p>
                 <p className="text-[10px] text-neutral-400 uppercase">{macro.unit}</p>
@@ -139,6 +222,14 @@ export function NutritionEstimatePanel({
                 step="0.1"
                 value={toDisplayNumber(draft.per_yield_unit?.[macro.key] ?? 0)}
                 onChange={(e) => updatePerYieldUnit(macro.key, e.target.value)}
+                className="w-full p-2 border border-neutral-200 rounded text-sm text-right focus:outline-none focus:ring-1 focus:ring-brand-500"
+              />
+              <input
+                type="number"
+                min="0"
+                step="0.1"
+                value={toDisplayNumber(draft.per_serving?.[macro.key] ?? 0)}
+                onChange={(e) => updatePerServing(macro.key, e.target.value)}
                 className="w-full p-2 border border-neutral-200 rounded text-sm text-right focus:outline-none focus:ring-1 focus:ring-brand-500"
               />
             </div>

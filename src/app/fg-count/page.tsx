@@ -19,14 +19,21 @@
  *   LOG   inventory_movements    (via logMovement → variance type)
  */
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { Fragment, useState, useEffect, useCallback, useRef } from "react";
 import { Card, CardContent } from "@/components/ui/card";
+import { Drawer } from "@/components/ui/drawer";
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
+import { useAuth } from "@/components/AuthProvider";
 import {
   loadSaleItems,
   updateSaleItemStock,
   logMovement,
+  loadFgCountSessions,
+  loadFgCountSessionByDate,
+  loadFgCountSessionById,
+  upsertFgCountSessionWithLines,
   type SaleItem,
+  type FgCountLineRow,
 } from "@/lib/storage";
 import {
   ClipboardCheck,
@@ -41,6 +48,8 @@ import {
   Loader2,
   Filter,
   ChevronDown,
+  History,
+  ChevronRight,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -54,6 +63,18 @@ interface CountRow {
   variance:   number | null; // computed: countNum - item.instock
 }
 
+interface HistorySession {
+  key: string;
+  sessionId: string;
+  date: string;
+  sessionName: string;
+  countedBy: string;
+  items: FgCountLineRow[];
+  varianceValue: number;
+  gainValue: number;
+  lossValue: number;
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const fmt = (n: number) =>
@@ -62,11 +83,28 @@ const fmt = (n: number) =>
 const $fmt = (n: number) =>
   n.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+const todayISO = () => {
+  const d = new Date();
+  const offsetMs = d.getTimezoneOffset() * 60_000;
+  return new Date(d.getTime() - offsetMs).toISOString().slice(0, 10);
+};
+
 function varianceLabel(v: number | null) {
   if (v === null) return null;
   if (v === 0) return { label: "No change", color: "text-neutral-400", icon: <Minus className="h-3.5 w-3.5" /> };
   if (v > 0)   return { label: `+${fmt(v)}`, color: "text-green-600",   icon: <TrendingUp className="h-3.5 w-3.5" /> };
   return          { label: fmt(v),           color: "text-red-500",    icon: <TrendingDown className="h-3.5 w-3.5" /> };
+}
+
+function blankRows(items: SaleItem[]): CountRow[] {
+  return items.map(item => ({
+    item,
+    countInput: "",
+    saved:      false,
+    saving:     false,
+    error:      null,
+    variance:   null,
+  }));
 }
 
 // ─── Page shell ───────────────────────────────────────────────────────────────
@@ -82,33 +120,95 @@ export default function FgCountPage() {
 // ─── Main content ─────────────────────────────────────────────────────────────
 
 function FgCountContent() {
+  const { user } = useAuth();
   const [rows,        setRows]        = useState<CountRow[]>([]);
   const [isLoading,   setIsLoading]   = useState(true);
   const [isSavingAll, setIsSavingAll] = useState(false);
   const [search,      setSearch]      = useState("");
   const [filterCat,   setFilterCat]   = useState("All");
   const [saved,       setSaved]       = useState(0);
+  const [countDate,   setCountDate]   = useState(todayISO);
+  const [sessionName, setSessionName] = useState("");
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [isSessionLoading, setIsSessionLoading] = useState(false);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [historySessions, setHistorySessions] = useState<HistorySession[]>([]);
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const [expandedSession, setExpandedSession] = useState<string | null>(null);
+  const sessionIdRef = useRef(`FGC-${Date.now().toString(36).toUpperCase()}`);
+  const suppressNextDateLoadRef = useRef(false);
+  const countedByLabel = user?.name || user?.email || "Unknown user";
+
+  const applySessionLines = useCallback((lines: FgCountLineRow[], sessionId: string | null, nextSessionName?: string | null) => {
+    const lineByItem = new Map(lines.map(line => [line.item_id, line]));
+    setRows(prev => prev.map(row => {
+      const line = lineByItem.get(row.item.id);
+      if (!line) {
+        return { ...row, countInput: "", saved: false, saving: false, error: null, variance: null };
+      }
+      const variance = line.physical_qty - row.item.instock;
+      return {
+        ...row,
+        countInput: String(line.physical_qty),
+        saved:      true,
+        saving:     false,
+        error:      null,
+        variance,
+      };
+    }));
+    setSaved(lines.length);
+    setActiveSessionId(sessionId);
+    if (sessionId) sessionIdRef.current = sessionId;
+    if (nextSessionName !== undefined) setSessionName(nextSessionName ?? "");
+  }, []);
+
+  const loadSessionForDate = useCallback(async (date: string) => {
+    if (!date) return;
+    setIsSessionLoading(true);
+    setRows(prev => prev.map(row => ({
+      ...row,
+      countInput: "",
+      saved: false,
+      saving: false,
+      error: null,
+      variance: null,
+    })));
+    setSaved(0);
+    setActiveSessionId(null);
+    sessionIdRef.current = `FGC-${Date.now().toString(36).toUpperCase()}`;
+
+    try {
+      const savedSession = await loadFgCountSessionByDate(date);
+      if (savedSession) {
+        applySessionLines(savedSession.lines, savedSession.session.id, savedSession.session.session_name);
+      } else {
+        setSessionName("");
+      }
+    } finally {
+      setIsSessionLoading(false);
+    }
+  }, [applySessionLines]);
 
   // ── Load ───────────────────────────────────────────────────────────────────
   const load = useCallback(async () => {
     setIsLoading(true);
     const items = await loadSaleItems();
     const active = items.filter(i => i.isActive);
-    setRows(
-      active.map(item => ({
-        item,
-        countInput: "",  // blank = not yet entered
-        saved:      false,
-        saving:     false,
-        error:      null,
-        variance:   null,
-      }))
-    );
+    setRows(blankRows(active));
     setSaved(0);
+    sessionIdRef.current = `FGC-${Date.now().toString(36).toUpperCase()}`;
     setIsLoading(false);
   }, []);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    if (isLoading || rows.length === 0) return;
+    if (suppressNextDateLoadRef.current) {
+      suppressNextDateLoadRef.current = false;
+      return;
+    }
+    loadSessionForDate(countDate);
+  }, [countDate, isLoading, rows.length, loadSessionForDate]);
 
   // ── Derived ────────────────────────────────────────────────────────────────
   const categories = ["All", ...Array.from(new Set(rows.map(r => r.item.category ?? "Uncategorised"))).sort()];
@@ -138,6 +238,46 @@ function FgCountContent() {
     return s + (r.variance !== null ? r.variance * r.item.makingCost : 0);
   }, 0);
 
+  const openHistory = async () => {
+    setIsHistoryOpen(true);
+    setIsHistoryLoading(true);
+    try {
+      const sessions = await loadFgCountSessions();
+      const loaded = await Promise.all(
+        sessions.map(session => loadFgCountSessionById(session.id))
+      );
+      setHistorySessions(
+        loaded
+          .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
+          .map(entry => {
+            const varianceValue = entry.lines.reduce((sum, line) => sum + line.variance_value, 0);
+            return {
+              key: entry.session.id,
+              sessionId: entry.session.id,
+              date: entry.session.count_date,
+              sessionName: entry.session.session_name?.trim() || "Unnamed Session",
+              countedBy: entry.session.counted_by_name || entry.session.counted_by || "Unknown user",
+              items: entry.lines,
+              varianceValue,
+              gainValue: entry.lines.reduce((sum, line) => sum + Math.max(0, line.variance_value), 0),
+              lossValue: entry.lines.reduce((sum, line) => sum + Math.abs(Math.min(0, line.variance_value)), 0),
+            };
+          })
+      );
+    } finally {
+      setIsHistoryLoading(false);
+    }
+  };
+
+  const loadHistorySession = async (sessionId: string) => {
+    const savedSession = await loadFgCountSessionById(sessionId);
+    if (!savedSession) return;
+    suppressNextDateLoadRef.current = true;
+    setCountDate(savedSession.session.count_date);
+    applySessionLines(savedSession.lines, savedSession.session.id, savedSession.session.session_name);
+    setIsHistoryOpen(false);
+  };
+
   // ── Input change ───────────────────────────────────────────────────────────
   const handleInput = (itemId: string, val: string) => {
     setRows(prev => prev.map(r => {
@@ -150,8 +290,59 @@ function FgCountContent() {
     }));
   };
 
+  const handleCountDateChange = (date: string) => {
+    setCountDate(date);
+    setRows(prev => prev.map(row => ({
+      ...row,
+      countInput: "",
+      saved: false,
+      saving: false,
+      error: null,
+      variance: null,
+    })));
+    setSaved(0);
+  };
+
+  const persistCountLines = async (countRows: CountRow[]) => {
+    const sessionId = activeSessionId ?? sessionIdRef.current;
+    sessionIdRef.current = sessionId;
+    setActiveSessionId(sessionId);
+
+    return upsertFgCountSessionWithLines({
+      session: {
+        id: sessionId,
+        countDate,
+        sessionName: sessionName.trim() || null,
+        countedBy: user?.id ?? null,
+        countedByName: countedByLabel,
+      },
+      lines: countRows.map(row => {
+        const physicalQty = parseFloat(row.countInput);
+        const varianceQty = physicalQty - row.item.instock;
+        const unitCost = row.item.makingCost || 0;
+        return {
+          itemId: row.item.id,
+          itemName: row.item.name,
+          unit: row.item.baseUnit,
+          systemQty: row.item.instock,
+          physicalQty,
+          varianceQty,
+          unitCost,
+          varianceValue: varianceQty * unitCost,
+        };
+      }),
+    });
+  };
+
   // ── Save single row ────────────────────────────────────────────────────────
   const saveRow = async (row: CountRow): Promise<boolean> => {
+    if (!countDate) {
+      setRows(prev => prev.map(r =>
+        r.item.id === row.item.id ? { ...r, error: "Count date is required" } : r
+      ));
+      return false;
+    }
+
     const num = parseFloat(row.countInput);
     if (isNaN(num) || num < 0) {
       setRows(prev => prev.map(r =>
@@ -161,17 +352,26 @@ function FgCountContent() {
     }
 
     const delta = num - row.item.instock;
-    if (delta === 0) {
-      // No change — mark saved without DB write
-      setRows(prev => prev.map(r =>
-        r.item.id === row.item.id ? { ...r, saved: true, error: null } : r
-      ));
-      return true;
-    }
-
     setRows(prev => prev.map(r =>
       r.item.id === row.item.id ? { ...r, saving: true, error: null } : r
     ));
+
+    const persistResult = await persistCountLines([row]);
+    if (!persistResult.success) {
+      setRows(prev => prev.map(r =>
+        r.item.id === row.item.id
+          ? { ...r, saving: false, error: persistResult.error?.message ?? "Session save failed" }
+          : r
+      ));
+      return false;
+    }
+
+    if (delta === 0) {
+      setRows(prev => prev.map(r =>
+        r.item.id === row.item.id ? { ...r, saving: false, saved: true, error: null } : r
+      ));
+      return true;
+    }
 
     // Write stock
     const res = await updateSaleItemStock(row.item.id, delta);
@@ -188,6 +388,7 @@ function FgCountContent() {
     // Log variance movement (fire-and-forget)
     // item_id for hq_sale_items is the sale item id itself — used as movement reference.
     // location_id = LOC-HQ (commissary stock).
+    const varianceValue = delta * row.item.makingCost;
     logMovement({
       locationId:    "LOC-HQ",
       itemId:        row.item.id,
@@ -195,7 +396,21 @@ function FgCountContent() {
       quantity:      Math.abs(delta),
       unitCost:      row.item.makingCost > 0 ? row.item.makingCost : null,
       referenceType: "fg_count",
-      notes:         `FG count: system ${fmt(row.item.instock)} → counted ${fmt(num)} (${delta > 0 ? "+" : ""}${fmt(delta)}) — ${row.item.name}`,
+      referenceId:   sessionIdRef.current,
+      notes:         JSON.stringify({
+        kind: "fg_count_session",
+        count_date: countDate,
+        session_name: sessionName.trim() || null,
+        counted_by: user?.id ?? null,
+        counted_by_name: countedByLabel,
+        item_name: row.item.name,
+        unit: row.item.baseUnit,
+        system_qty: row.item.instock,
+        physical_qty: num,
+        variance_qty: delta,
+        variance_value: varianceValue,
+        display_note: `FG count: system ${fmt(row.item.instock)} -> counted ${fmt(num)} (${delta > 0 ? "+" : ""}${fmt(delta)}) - ${row.item.name}`,
+      }),
     });
 
     // Update local row with new stock value
@@ -270,6 +485,12 @@ function FgCountContent() {
         </div>
         <div className="flex items-center gap-2">
           <button
+            onClick={openHistory}
+            className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium bg-white border border-neutral-200 text-neutral-600 rounded-lg hover:bg-neutral-50 transition-colors"
+          >
+            <History className="h-4 w-4" /> FG Count History
+          </button>
+          <button
             onClick={load}
             className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium bg-white border border-neutral-200 text-neutral-600 rounded-lg hover:bg-neutral-50 transition-colors"
           >
@@ -277,7 +498,7 @@ function FgCountContent() {
           </button>
           <button
             onClick={saveAll}
-            disabled={isSavingAll || visible.every(r => r.countInput === "" || r.saved)}
+            disabled={!countDate || isSessionLoading || isSavingAll || visible.every(r => r.countInput === "" || r.saved)}
             className="flex items-center gap-1.5 px-4 py-2 text-sm font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50 transition-colors shadow-sm"
           >
             {isSavingAll
@@ -286,6 +507,53 @@ function FgCountContent() {
           </button>
         </div>
       </div>
+      {isSessionLoading && (
+        <div className="flex items-center gap-2 text-sm text-neutral-500 bg-neutral-50 border border-neutral-200 rounded-lg px-3 py-2">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Loading count sheet for {countDate}…
+        </div>
+      )}
+
+      {/* ── Session controls ───────────────────────────────────────────── */}
+      <Card className="shadow-sm">
+        <CardContent className="py-4 px-4 grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div>
+            <label className="text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1.5 block">
+              Count Date <span className="text-red-500">*</span>
+            </label>
+            <input
+              type="date"
+              value={countDate}
+              onChange={e => handleCountDateChange(e.target.value)}
+              className="w-full px-3 py-2 border border-neutral-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-1 focus:ring-brand-400"
+              required
+            />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1.5 block">
+              Session Name
+            </label>
+            <input
+              type="text"
+              value={sessionName}
+              onChange={e => setSessionName(e.target.value)}
+              placeholder="Night Closing Count, Weekly Audit, etc."
+              className="w-full px-3 py-2 border border-neutral-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-1 focus:ring-brand-400"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1.5 block">
+              Counted By
+            </label>
+            <input
+              type="text"
+              value={countedByLabel}
+              readOnly
+              className="w-full px-3 py-2 border border-neutral-200 rounded-lg text-sm bg-neutral-50 text-neutral-600"
+            />
+          </div>
+        </CardContent>
+      </Card>
 
       {/* ── Count summary cards ─────────────────────────────────────────── */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -556,6 +824,134 @@ function FgCountContent() {
           </div>
         )}
       </Card>
+
+      <Drawer
+        isOpen={isHistoryOpen}
+        onClose={() => setIsHistoryOpen(false)}
+        title="FG Count History"
+        description="Historical variance sessions grouped by count date and session."
+      >
+        <div className="space-y-3">
+          {isHistoryLoading ? (
+            <div className="flex items-center justify-center p-10 text-neutral-400 gap-2">
+              <Loader2 className="h-5 w-5 animate-spin" /> Loading count history…
+            </div>
+          ) : historySessions.length === 0 ? (
+            <div className="bg-white border border-neutral-200 rounded-xl p-8 text-center text-sm text-neutral-400">
+              No FG count variance history found yet.
+            </div>
+          ) : (
+            <div className="bg-white border border-neutral-200 rounded-xl overflow-hidden shadow-sm">
+              <table className="w-full text-sm">
+                <thead className="bg-neutral-50 border-b border-neutral-100">
+                  <tr>
+                    {["", "Date", "Session Name", "Counted By", "Items Counted", "Variance Value", "Gain / Loss"].map(h => (
+                      <th key={h} className="px-3 py-2.5 text-left text-xs font-semibold text-neutral-500 uppercase tracking-wider">
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-neutral-100">
+                  {historySessions.map(session => {
+                    const open = expandedSession === session.key;
+                    return (
+                      <Fragment key={session.key}>
+                        <tr
+                          key={session.key}
+                          onClick={() => loadHistorySession(session.sessionId)}
+                          className="hover:bg-neutral-50 cursor-pointer"
+                          title="Load this count session"
+                        >
+                          <td className="px-3 py-3 w-8">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setExpandedSession(open ? null : session.key);
+                              }}
+                              className="p-1 rounded hover:bg-neutral-100 text-neutral-500"
+                            >
+                              {open
+                                ? <ChevronDown className="h-4 w-4" />
+                                : <ChevronRight className="h-4 w-4" />}
+                            </button>
+                          </td>
+                          <td className="px-3 py-3 font-medium text-neutral-900 whitespace-nowrap">{session.date}</td>
+                          <td className="px-3 py-3 text-neutral-700">{session.sessionName}</td>
+                          <td className="px-3 py-3 text-neutral-500">{session.countedBy}</td>
+                          <td className="px-3 py-3 font-mono tabular-nums text-neutral-700">{session.items.length}</td>
+                          <td className={`px-3 py-3 font-mono tabular-nums font-semibold ${
+                            session.varianceValue > 0
+                              ? "text-green-700"
+                              : session.varianceValue < 0
+                              ? "text-red-600"
+                              : "text-neutral-400"
+                          }`}>
+                            {session.varianceValue > 0 ? "+" : ""}{$fmt(session.varianceValue)}
+                          </td>
+                          <td className="px-3 py-3 text-xs">
+                            <span className="text-green-700 font-semibold">+{$fmt(session.gainValue)}</span>
+                            <span className="text-neutral-300 px-1">/</span>
+                            <span className="text-red-600 font-semibold">-{$fmt(session.lossValue)}</span>
+                          </td>
+                        </tr>
+                        {open && (
+                          <tr key={`${session.key}-items`} className="bg-neutral-50/60">
+                            <td colSpan={7} className="px-3 py-3">
+                              <div className="overflow-x-auto rounded-lg border border-neutral-200 bg-white">
+                                <table className="w-full text-xs">
+                                  <thead className="bg-neutral-50 border-b border-neutral-100">
+                                    <tr>
+                                      {["Item", "System Qty", "Physical Qty", "Variance Qty", "Variance Value"].map(h => (
+                                        <th key={h} className="px-3 py-2 text-left font-semibold text-neutral-500 uppercase tracking-wider">
+                                          {h}
+                                        </th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-neutral-50">
+                                    {session.items.map(line => {
+                                      return (
+                                        <tr key={line.id}>
+                                          <td className="px-3 py-2">
+                                            <p className="font-semibold text-neutral-900">{line.item_name || line.item_id || "Unknown item"}</p>
+                                            <p className="text-[10px] text-neutral-400 font-mono">{line.item_id}</p>
+                                          </td>
+                                          <td className="px-3 py-2 font-mono tabular-nums text-neutral-600">
+                                            {fmt(line.system_qty)} {line.unit ?? ""}
+                                          </td>
+                                          <td className="px-3 py-2 font-mono tabular-nums text-neutral-600">
+                                            {fmt(line.physical_qty)} {line.unit ?? ""}
+                                          </td>
+                                          <td className={`px-3 py-2 font-mono tabular-nums font-semibold ${
+                                            line.variance_qty > 0 ? "text-green-700" : line.variance_qty < 0 ? "text-red-600" : "text-neutral-400"
+                                          }`}>
+                                            {line.variance_qty > 0 ? "+" : ""}{fmt(line.variance_qty)} {line.unit ?? ""}
+                                          </td>
+                                          <td className={`px-3 py-2 font-mono tabular-nums font-semibold ${
+                                            line.variance_value > 0 ? "text-green-700" : line.variance_value < 0 ? "text-red-600" : "text-neutral-400"
+                                          }`}>
+                                            {line.variance_value > 0 ? "+" : ""}{$fmt(line.variance_value)}
+                                          </td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </Drawer>
     </div>
   );
 }

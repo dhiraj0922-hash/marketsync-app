@@ -32,6 +32,7 @@ import {
   LineChart,
   Line
 } from "recharts";
+import { findInventoryItem } from "@/lib/utils";
 
 // Mock Data
 const usageData = [
@@ -289,7 +290,7 @@ export default function Dashboard() {
           let maxProducible = Infinity;
           if (recipe) {
              recipe.ingredients.forEach((ing: any) => {
-                const rawItem = inventoryItems.find(i => i.id === ing.inventoryId);
+                const rawItem = findInventoryItem(inventoryItems, ing.inventoryId);
                 if (rawItem) {
                    const batchesPossible = rawItem.inStock / ing.qty; 
                    const possibleYield = batchesPossible * recipe.yieldQty;

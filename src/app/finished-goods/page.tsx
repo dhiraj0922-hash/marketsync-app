@@ -50,6 +50,7 @@ import {
   resolveEffectiveBaseUom,
 } from "@/lib/units";
 import { FgImportModal } from "@/components/FgImportModal";
+import { findInventoryItem, warnInventoryIdentity, auditInventoryIdentity } from "@/lib/utils";
 
 // ─── Classification helpers ───────────────────────────────────────────────────
 //
@@ -232,9 +233,7 @@ export default function FinishedGoods() {
       // Recalculate theoretical cost using the canonical costing engine
       let theoreticalCost = 0;
       for (const ing of newIngredients) {
-        const invItem = inventoryData.find((i: any) =>
-          i.id?.toString() === ing.inventoryId?.toString()
-        );
+        const invItem = findInventoryItem(inventoryData, ing.inventoryId?.toString());
         if (!invItem) continue;
         const result = computeIngredientLineCost(
           Number(ing.qty ?? ing.quantity ?? 0),
@@ -289,7 +288,11 @@ export default function FinishedGoods() {
           loadProductionHistory(),
         ]);
         setRecipes(Array.isArray(rec) ? rec : []);
-        setInventoryData(Array.isArray(inv) ? inv : []);
+        const invArray = Array.isArray(inv) ? inv : [];
+        setInventoryData(invArray);
+        // Dev-mode identity audit — no-op in production
+        auditInventoryIdentity(invArray);
+        invArray.forEach((item: any) => warnInventoryIdentity(item));
         setSaleItems(Array.isArray(si) ? si : []);
         setRequisitions(Array.isArray(req) ? req : []);
         setProductionHistory(Array.isArray(hist) ? hist : []);
@@ -840,7 +843,7 @@ export default function FinishedGoods() {
       for (const plan of deductionPlan) {
         await logMovement({
           locationId:    plan.rawItem.locationId ?? "LOC-HQ",
-          itemId:        plan.rowId,
+          itemId:        String(plan.rawItem?.itemId || plan.rowId),
           movementType:  "production_consumption",
           quantity:      plan.normalizedQty,
           unitCost:      plan.rawItem.cost ?? null,
@@ -1384,8 +1387,9 @@ export default function FinishedGoods() {
                     i.itemType !== "Finished Good" && i.itemType !== "Preparation"
                   );
                   // Prioritise: same unit AND same category as original ingredient's item
-                  const effectiveOriginal = inventoryData.find((i: any) =>
-                    i.id.toString() === (recipe?.ingredients?.[ing.ingIdx]?.inventoryId ?? "").toString()
+                  const effectiveOriginal = findInventoryItem(
+                    inventoryData,
+                    recipe?.ingredients?.[ing.ingIdx]?.inventoryId?.toString()
                   );
                   const sameGroup = candidatesAll.filter((i: any) =>
                     i.id.toString() !== effectiveOriginal?.id?.toString() &&

@@ -9,7 +9,7 @@ import { Drawer } from "@/components/ui/drawer";
 import { loadRecipes, saveRecipes, loadInventory, saveInventory, upsertRecipe, updateInventoryItemCost, syncLinkedFgCost, loadSuppliers, deleteRecipe, loadSaleItems, createFgFromRecipe, updateRecipeNutrition } from "@/lib/storage";
 import { InventoryEditDrawer } from "@/components/InventoryEditDrawer";
 import { NutritionEstimatePanel } from "@/components/NutritionEstimatePanel";
-import { NUTRITION_DISCLAIMER, type NutritionEstimate } from "@/lib/aiNutrition";
+import { NUTRITION_DISCLAIMER, ensureServingNutritionFields, type NutritionEstimate } from "@/lib/aiNutrition";
 
 import {
   normalizeUnit,
@@ -444,15 +444,15 @@ function RecipesPageContent() {
     setIsSavingNutrition(true);
     setNutritionError(null);
     try {
-      const approvedEstimate: NutritionEstimate = {
+      const approvedEstimate: NutritionEstimate = ensureServingNutritionFields({
         ...nutritionEstimate,
         source: nutritionEstimate.source ?? "manual",
         approved_by: user?.id ?? undefined,
         approved_at: new Date().toISOString(),
-        yield_qty: Number(yieldQty) || 1,
-        yield_unit: yieldUnit || "unit",
+        yield_qty: Number(nutritionEstimate.yield_qty) || Number(yieldQty) || 1,
+        yield_unit: nutritionEstimate.yield_unit || yieldUnit || "unit",
         disclaimer: nutritionEstimate.disclaimer || NUTRITION_DISCLAIMER,
-      };
+      });
 
       const res = await updateRecipeNutrition(editingRecipe.id, approvedEstimate);
       if (!res.success) {

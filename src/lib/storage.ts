@@ -3044,6 +3044,229 @@ export interface ProductionMovementRow {
   notes:          string | null;
 }
 
+export interface FgCountMovementRow {
+  id:             number;
+  created_at:     string;
+  item_id:        string | null;
+  movement_type:  string;
+  quantity:       number;
+  unit_cost:      number | null;
+  total_cost:     number | null;
+  reference_id:   string | null;
+  notes:          string | null;
+}
+
+export interface FgCountSessionRow {
+  id: string;
+  count_date: string;
+  session_name: string | null;
+  counted_by: string | null;
+  counted_by_name: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FgCountLineRow {
+  id: string;
+  session_id: string;
+  item_id: string;
+  item_name: string | null;
+  unit: string | null;
+  system_qty: number;
+  physical_qty: number;
+  variance_qty: number;
+  unit_cost: number;
+  variance_value: number;
+}
+
+export interface FgCountSessionWithLines {
+  session: FgCountSessionRow;
+  lines: FgCountLineRow[];
+}
+
+const mapFgCountSession = (db: any): FgCountSessionRow => ({
+  id:              db.id ?? '',
+  count_date:      db.count_date ?? '',
+  session_name:    db.session_name ?? null,
+  counted_by:      db.counted_by ?? null,
+  counted_by_name: db.counted_by_name ?? null,
+  created_at:      db.created_at ?? '',
+  updated_at:      db.updated_at ?? '',
+});
+
+const mapFgCountLine = (db: any): FgCountLineRow => ({
+  id:             db.id ?? '',
+  session_id:     db.session_id ?? '',
+  item_id:        db.item_id ?? '',
+  item_name:      db.item_name ?? null,
+  unit:           db.unit ?? null,
+  system_qty:     Number(db.system_qty ?? 0),
+  physical_qty:   Number(db.physical_qty ?? 0),
+  variance_qty:   Number(db.variance_qty ?? 0),
+  unit_cost:      Number(db.unit_cost ?? 0),
+  variance_value: Number(db.variance_value ?? 0),
+});
+
+export async function loadFgCountSessions(): Promise<FgCountSessionRow[]> {
+  const { data, error } = await supabase
+    .from('fg_count_sessions')
+    .select('id, count_date, session_name, counted_by, counted_by_name, created_at, updated_at')
+    .order('count_date', { ascending: false })
+    .order('updated_at', { ascending: false })
+    .range(0, 4999);
+
+  if (error) {
+    console.error('[loadFgCountSessions] DB error:', error.message);
+    return [];
+  }
+  return (data ?? []).map(mapFgCountSession);
+}
+
+export async function loadFgCountSessionByDate(countDate: string): Promise<FgCountSessionWithLines | null> {
+  const { data: session, error } = await supabase
+    .from('fg_count_sessions')
+    .select('id, count_date, session_name, counted_by, counted_by_name, created_at, updated_at')
+    .eq('count_date', countDate)
+    .order('updated_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.error('[loadFgCountSessionByDate] DB error:', error.message);
+    return null;
+  }
+  if (!session) return null;
+
+  const { data: lines, error: lineError } = await supabase
+    .from('fg_count_lines')
+    .select('id, session_id, item_id, item_name, unit, system_qty, physical_qty, variance_qty, unit_cost, variance_value')
+    .eq('session_id', session.id)
+    .range(0, 4999);
+
+  if (lineError) {
+    console.error('[loadFgCountSessionByDate] line DB error:', lineError.message);
+    return { session: mapFgCountSession(session), lines: [] };
+  }
+
+  return {
+    session: mapFgCountSession(session),
+    lines: (lines ?? []).map(mapFgCountLine),
+  };
+}
+
+export async function loadFgCountSessionById(sessionId: string): Promise<FgCountSessionWithLines | null> {
+  const { data: session, error } = await supabase
+    .from('fg_count_sessions')
+    .select('id, count_date, session_name, counted_by, counted_by_name, created_at, updated_at')
+    .eq('id', sessionId)
+    .maybeSingle();
+
+  if (error || !session) {
+    if (error) console.error('[loadFgCountSessionById] DB error:', error.message);
+    return null;
+  }
+
+  const { data: lines, error: lineError } = await supabase
+    .from('fg_count_lines')
+    .select('id, session_id, item_id, item_name, unit, system_qty, physical_qty, variance_qty, unit_cost, variance_value')
+    .eq('session_id', sessionId)
+    .range(0, 4999);
+
+  if (lineError) {
+    console.error('[loadFgCountSessionById] line DB error:', lineError.message);
+    return { session: mapFgCountSession(session), lines: [] };
+  }
+
+  return {
+    session: mapFgCountSession(session),
+    lines: (lines ?? []).map(mapFgCountLine),
+  };
+}
+
+export async function upsertFgCountSessionWithLines(params: {
+  session: {
+    id: string;
+    countDate: string;
+    sessionName: string | null;
+    countedBy: string | null;
+    countedByName: string | null;
+  };
+  lines: Array<{
+    itemId: string;
+    itemName: string;
+    unit: string;
+    systemQty: number;
+    physicalQty: number;
+    varianceQty: number;
+    unitCost: number;
+    varianceValue: number;
+  }>;
+}): Promise<{ success: boolean; error?: any }> {
+  const now = new Date().toISOString();
+  const { error: sessionError } = await supabase
+    .from('fg_count_sessions')
+    .upsert({
+      id:              params.session.id,
+      count_date:      params.session.countDate,
+      session_name:    params.session.sessionName,
+      counted_by:      params.session.countedBy,
+      counted_by_name: params.session.countedByName,
+      updated_at:      now,
+    }, { onConflict: 'id' });
+
+  if (sessionError) return { success: false, error: sessionError };
+
+  const lineRows = params.lines.map(line => ({
+    id:             `${params.session.id}:${line.itemId}`,
+    session_id:     params.session.id,
+    item_id:        line.itemId,
+    item_name:      line.itemName,
+    unit:           line.unit,
+    system_qty:     line.systemQty,
+    physical_qty:   line.physicalQty,
+    variance_qty:   line.varianceQty,
+    unit_cost:      line.unitCost,
+    variance_value: line.varianceValue,
+    updated_at:     now,
+  }));
+
+  if (lineRows.length === 0) return { success: true };
+
+  const { error: lineError } = await supabase
+    .from('fg_count_lines')
+    .upsert(lineRows, { onConflict: 'session_id,item_id' });
+
+  if (lineError) return { success: false, error: lineError };
+  return { success: true };
+}
+
+export async function loadFgCountMovements(): Promise<FgCountMovementRow[]> {
+  const { data, error } = await supabase
+    .from('inventory_movements')
+    .select('id, created_at, item_id, movement_type, quantity, unit_cost, total_cost, reference_id, notes')
+    .eq('reference_type', 'fg_count')
+    .in('movement_type', ['count_variance_gain', 'count_variance_loss'])
+    .order('created_at', { ascending: false })
+    .range(0, 4999);
+
+  if (error) {
+    console.error('[loadFgCountMovements] DB error:', error.message);
+    return [];
+  }
+
+  return (data ?? []).map((r: any): FgCountMovementRow => ({
+    id:            Number(r.id ?? 0),
+    created_at:    r.created_at ?? '',
+    item_id:       r.item_id ?? null,
+    movement_type: r.movement_type ?? '',
+    quantity:      Number(r.quantity ?? 0),
+    unit_cost:     r.unit_cost  != null ? Number(r.unit_cost)  : null,
+    total_cost:    r.total_cost != null ? Number(r.total_cost) : null,
+    reference_id:  r.reference_id ?? null,
+    notes:         r.notes ?? null,
+  }));
+}
+
 export async function loadProductionMovements(opts?: {
   dateFrom?: string;   // ISO date "YYYY-MM-DD"
   dateTo?:   string;

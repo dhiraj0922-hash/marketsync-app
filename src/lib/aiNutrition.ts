@@ -1,3 +1,5 @@
+import { normalizeUnit } from "@/lib/units";
+
 export const NUTRITION_DISCLAIMER =
   "Estimated nutrition only. Verify before using on packaging.";
 
@@ -28,6 +30,10 @@ export interface NutritionEstimate extends NutritionEstimateAiResponse {
   approved_at?: string;
   yield_qty: number;
   yield_unit: string;
+  serving_size_qty?: number;
+  serving_size_unit?: string;
+  servings_per_batch?: number;
+  per_serving?: NutritionMacroSet;
   disclaimer: string;
 }
 
@@ -78,6 +84,53 @@ export function deriveTotalFromPerYieldUnit(perYieldUnit: NutritionMacroSet, yie
     acc[key] = cleanNumber(perYieldUnit[key] * multiplier);
     return acc;
   }, {} as NutritionMacroSet);
+}
+
+export function derivePerServing(total: NutritionMacroSet, servingsPerBatch: number): NutritionMacroSet {
+  const divisor = Number(servingsPerBatch) > 0 ? Number(servingsPerBatch) : 1;
+  return MACRO_KEYS.reduce((acc, key) => {
+    acc[key] = cleanNumber(total[key] / divisor);
+    return acc;
+  }, {} as NutritionMacroSet);
+}
+
+export function calculateServingsPerBatch(
+  yieldQty: number,
+  yieldUnit: string,
+  servingSizeQty: number,
+  servingSizeUnit: string
+): number | null {
+  if (Number(yieldQty) <= 0 || Number(servingSizeQty) <= 0) return null;
+  try {
+    const totalInServingUnit = normalizeUnit(Number(yieldQty), yieldUnit, servingSizeUnit);
+    if (!Number.isFinite(totalInServingUnit) || totalInServingUnit <= 0) return null;
+    return cleanNumber(totalInServingUnit / Number(servingSizeQty));
+  } catch {
+    return null;
+  }
+}
+
+export function ensureServingNutritionFields(estimate: NutritionEstimate): NutritionEstimate {
+  const yieldQty = Number(estimate.yield_qty) > 0 ? Number(estimate.yield_qty) : 1;
+  const yieldUnit = estimate.yield_unit || "unit";
+  const servingSizeQty = Number(estimate.serving_size_qty) > 0 ? Number(estimate.serving_size_qty) : 1;
+  const servingSizeUnit = estimate.serving_size_unit || yieldUnit;
+  const convertedServings = calculateServingsPerBatch(yieldQty, yieldUnit, servingSizeQty, servingSizeUnit);
+  const servingsPerBatch = Number(estimate.servings_per_batch) > 0
+    ? Number(estimate.servings_per_batch)
+    : convertedServings ?? yieldQty;
+
+  return {
+    ...estimate,
+    yield_qty: yieldQty,
+    yield_unit: yieldUnit,
+    serving_size_qty: servingSizeQty,
+    serving_size_unit: servingSizeUnit,
+    servings_per_batch: servingsPerBatch,
+    per_yield_unit: estimate.per_yield_unit ?? derivePerYieldUnit(estimate.total, yieldQty),
+    per_serving: estimate.per_serving ?? derivePerServing(estimate.total, servingsPerBatch),
+    disclaimer: estimate.disclaimer || NUTRITION_DISCLAIMER,
+  };
 }
 
 export function buildNutritionPrompt(recipe: NutritionEstimateRecipeInput): string {
@@ -147,6 +200,10 @@ export function attachNutritionMetadata(
     per_yield_unit: aiResponse.per_yield_unit,
     yield_qty: Number(recipe.yieldQty) || 1,
     yield_unit: recipe.yieldUnit || "unit",
+    serving_size_qty: 1,
+    serving_size_unit: recipe.yieldUnit || "unit",
+    servings_per_batch: Number(recipe.yieldQty) || 1,
+    per_serving: derivePerServing(aiResponse.total, Number(recipe.yieldQty) || 1),
     confidence: aiResponse.confidence,
     assumptions: aiResponse.assumptions,
     warnings: aiResponse.warnings,
