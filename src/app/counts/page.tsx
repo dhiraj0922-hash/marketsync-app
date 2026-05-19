@@ -120,7 +120,25 @@ export default function Counts() {
     setCountType(count.type);
     setCountLocation(count.location);
     setNotes(count.notes || "");
-    setCountItems(count.items || []);
+    // Re-enrich items loaded from DB — legacy snapshots lack category/supplierName/storageArea/parLevel.
+    // Safe-default every field so filteredCountItems memo never calls .toLowerCase() on undefined.
+    const enriched = (count.items || []).map((item: any) => ({
+      ...item,
+      name:         String(item.name         ?? ""),
+      unit:         String(item.unit         ?? "ea"),
+      cost:         Number(item.cost         ?? 0),
+      category:     String(item.category     ?? "Uncategorized"),
+      supplierName: String(item.supplierName ?? "Unknown"),
+      storageArea:  String(item.storageArea  ?? "General"),
+      parLevel:     Number(item.parLevel     ?? 0),
+      theoreticalQty: Number(item.theoreticalQty ?? 0),
+      physicalQty:  item.physicalQty ?? "",
+      variance:     Number(item.variance     ?? 0),
+      varianceValue:Number(item.varianceValue?? 0),
+    }));
+    setCountItems(enriched);
+    setCfSearch(""); setCfCategory("All"); setCfSupplier("All");
+    setCfStorage("All"); setCfStatus("All"); setCfSort("alpha");
     setStep(2);
     setDrawerOpen(true);
   };
@@ -132,21 +150,20 @@ export default function Counts() {
         : inventoryData;
       const liveSnapshot = scopedInv.map((inv: any) => ({
         id: inv.id,
-        name: inv.name,
-        unit: inv.unit,
-        cost: inv.cost,
-        category: inv.category || "Uncategorized",
-        supplierName: inv.preferredSupplierName || (inv.supplierId ? `Supplier #${inv.supplierId}` : "Unknown"),
-        storageArea: inv.itemType || "General",
-        parLevel: inv.parLevel ?? 0,
-        theoreticalQty: inv.inStock,
+        name: String(inv.name ?? ""),
+        unit: String(inv.unit ?? "ea"),
+        cost: Number(inv.cost ?? 0),
+        category:     String(inv.category     ?? "Uncategorized"),
+        supplierName: String(inv.preferredSupplierName ?? (inv.supplierId ? `Supplier #${inv.supplierId}` : "Unknown")),
+        storageArea:  String(inv.itemType      ?? "General"),
+        parLevel:     Number(inv.parLevel      ?? 0),
+        theoreticalQty: Number(inv.inStock     ?? 0),
         physicalQty: "",
         variance: 0,
         varianceValue: 0
       }));
       setCountItems(liveSnapshot);
     }
-    // reset filters when opening a new count
     setCfSearch(""); setCfCategory("All"); setCfSupplier("All");
     setCfStorage("All"); setCfStatus("All"); setCfSort("alpha");
     setStep(2);
@@ -172,28 +189,29 @@ export default function Counts() {
   const currentTotalVariance = countItems.reduce((sum, item) => sum + (item.varianceValue || 0), 0);
 
   // ── Derived filter option lists ───────────────────────────────────────────
-  const cfCategories = useMemo(() => ["All", ...Array.from(new Set(countItems.map(i => i.category || "Uncategorized"))).sort()], [countItems]);
-  const cfSuppliers  = useMemo(() => ["All", ...Array.from(new Set(countItems.map(i => i.supplierName || "Unknown"))).sort()], [countItems]);
-  const cfStorages   = useMemo(() => ["All", ...Array.from(new Set(countItems.map(i => i.storageArea || "General"))).sort()], [countItems]);
+  const cfCategories = useMemo(() => ["All", ...Array.from(new Set(countItems.map(i => String(i.category ?? "Uncategorized")))).sort((a,b) => a.localeCompare(b))], [countItems]);
+  const cfSuppliers  = useMemo(() => ["All", ...Array.from(new Set(countItems.map(i => String(i.supplierName ?? "Unknown")))).sort((a,b) => a.localeCompare(b))], [countItems]);
+  const cfStorages   = useMemo(() => ["All", ...Array.from(new Set(countItems.map(i => String(i.storageArea  ?? "General")))).sort((a,b) => a.localeCompare(b))], [countItems]);
 
   // ── Filtered + sorted view ────────────────────────────────────────────────
   const filteredCountItems = useMemo(() => {
     let rows = [...countItems];
-    const q = cfSearch.toLowerCase().trim();
-    if (q)                      rows = rows.filter(i => i.name.toLowerCase().includes(q));
-    if (cfCategory !== "All")  rows = rows.filter(i => (i.category || "Uncategorized") === cfCategory);
-    if (cfSupplier !== "All")  rows = rows.filter(i => (i.supplierName || "Unknown") === cfSupplier);
-    if (cfStorage  !== "All")  rows = rows.filter(i => (i.storageArea || "General") === cfStorage);
-    if (cfStatus === "Counted")   rows = rows.filter(i => i.physicalQty !== "");
-    if (cfStatus === "Uncounted") rows = rows.filter(i => i.physicalQty === "");
-    if (cfStatus === "Short")     rows = rows.filter(i => i.physicalQty !== "" && i.variance < 0);
-    if (cfStatus === "Over")      rows = rows.filter(i => i.physicalQty !== "" && i.variance > 0);
-    // sort
-    if (cfSort === "alpha")     rows.sort((a, b) => a.name.localeCompare(b.name));
-    if (cfSort === "var-high")  rows.sort((a, b) => Math.abs(b.varianceValue) - Math.abs(a.varianceValue));
-    if (cfSort === "var-low")   rows.sort((a, b) => Math.abs(a.varianceValue) - Math.abs(b.varianceValue));
-    if (cfSort === "low-stock") rows.sort((a, b) => (a.theoreticalQty - a.parLevel) - (b.theoreticalQty - b.parLevel));
-    if (cfSort === "cost-high") rows.sort((a, b) => b.cost - a.cost);
+    // Safe string coercion — every field may be null/undefined on legacy DB snapshots
+    const q = cfSearch.trim().toLowerCase();
+    if (q) rows = rows.filter(i => String(i.name ?? "").toLowerCase().includes(q));
+    if (cfCategory !== "All") rows = rows.filter(i => String(i.category     ?? "Uncategorized") === cfCategory);
+    if (cfSupplier !== "All") rows = rows.filter(i => String(i.supplierName ?? "Unknown")       === cfSupplier);
+    if (cfStorage  !== "All") rows = rows.filter(i => String(i.storageArea  ?? "General")        === cfStorage);
+    if (cfStatus === "Counted")   rows = rows.filter(i => (i.physicalQty ?? "") !== "");
+    if (cfStatus === "Uncounted") rows = rows.filter(i => (i.physicalQty ?? "") === "");
+    if (cfStatus === "Short")     rows = rows.filter(i => (i.physicalQty ?? "") !== "" && Number(i.variance ?? 0) < 0);
+    if (cfStatus === "Over")      rows = rows.filter(i => (i.physicalQty ?? "") !== "" && Number(i.variance ?? 0) > 0);
+    // Safe sort — guard against null name / numeric fields
+    if (cfSort === "alpha")     rows.sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")));
+    if (cfSort === "var-high")  rows.sort((a, b) => Math.abs(Number(b.varianceValue ?? 0)) - Math.abs(Number(a.varianceValue ?? 0)));
+    if (cfSort === "var-low")   rows.sort((a, b) => Math.abs(Number(a.varianceValue ?? 0)) - Math.abs(Number(b.varianceValue ?? 0)));
+    if (cfSort === "low-stock") rows.sort((a, b) => (Number(a.theoreticalQty ?? 0) - Number(a.parLevel ?? 0)) - (Number(b.theoreticalQty ?? 0) - Number(b.parLevel ?? 0)));
+    if (cfSort === "cost-high") rows.sort((a, b) => Number(b.cost ?? 0) - Number(a.cost ?? 0));
     return rows;
   }, [countItems, cfSearch, cfCategory, cfSupplier, cfStorage, cfStatus, cfSort]);
 
@@ -608,15 +626,20 @@ export default function Counts() {
                           </TableRow>
                         )}
                         {filteredCountItems.map((item) => {
-                          const isShort = item.variance < 0;
-                          const isOver = item.variance > 0;
-                          const hasInput = item.physicalQty !== "";
+                          const cost         = Number(item.cost         ?? 0);
+                          const variance     = Number(item.variance     ?? 0);
+                          const varianceValue= Number(item.varianceValue?? 0);
+                          const parLevel     = Number(item.parLevel     ?? 0);
+                          const theoreticalQty = Number(item.theoreticalQty ?? 0);
+                          const isShort = variance < 0;
+                          const isOver  = variance > 0;
+                          const hasInput = (item.physicalQty ?? "") !== "";
                           return (
                             <TableRow key={item.id} className="hover:bg-neutral-50 border-b border-neutral-100 last:border-0">
                                <TableCell className="py-3 px-4">
                                   <div className="font-semibold text-neutral-900 text-sm">{item.name}</div>
                                   <div className="text-[10px] text-neutral-500 flex items-center gap-1.5 mt-0.5">
-                                    <span>${item.cost.toFixed(2)}/{item.unit}</span>
+                                    <span>${cost.toFixed(2)}/{item.unit}</span>
                                     {item.category && item.category !== "Uncategorized" && (
                                       <span className="px-1 py-0.5 bg-neutral-100 rounded">{item.category}</span>
                                     )}
@@ -626,8 +649,8 @@ export default function Counts() {
                                   </div>
                                </TableCell>
                                <TableCell className="py-3 px-4 text-center">
-                                  <span className="text-sm font-medium text-neutral-500">{item.theoreticalQty}</span>
-                                  {item.parLevel > 0 && item.theoreticalQty < item.parLevel && (
+                                  <span className="text-sm font-medium text-neutral-500">{theoreticalQty}</span>
+                                  {parLevel > 0 && theoreticalQty < parLevel && (
                                     <div className="text-[9px] text-warning-600 font-semibold">Below par</div>
                                   )}
                                </TableCell>
@@ -645,10 +668,10 @@ export default function Counts() {
                                   {hasInput ? (
                                     <div className="flex flex-col items-end">
                                       <span className={`text-sm font-bold ${isShort ? 'text-danger-600' : isOver ? 'text-success-600' : 'text-neutral-500'}`}>
-                                        {item.variance > 0 ? "+" : ""}{item.variance} {item.unit}
+                                        {variance > 0 ? "+" : ""}{variance} {item.unit}
                                       </span>
                                       <span className={`text-[10px] ${isShort ? 'text-danger-500' : isOver ? 'text-success-500' : 'text-neutral-400'}`}>
-                                        {item.varianceValue > 0 ? "+" : ""}${item.varianceValue.toFixed(2)}
+                                        {varianceValue > 0 ? "+" : ""}${varianceValue.toFixed(2)}
                                       </span>
                                     </div>
                                   ) : (
