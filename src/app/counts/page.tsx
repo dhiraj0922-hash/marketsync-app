@@ -89,6 +89,34 @@ export default function Counts() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ── Derived filter option lists (MUST be before any early return) ────────
+  const cfCategories = useMemo(() => ["All", ...Array.from(new Set(countItems.map(i => String(i.category ?? "Uncategorized")))).sort((a,b) => a.localeCompare(b))], [countItems]);
+  const cfSuppliers  = useMemo(() => ["All", ...Array.from(new Set(countItems.map(i => String(i.supplierName ?? "Unknown")))).sort((a,b) => a.localeCompare(b))], [countItems]);
+  const cfStorages   = useMemo(() => ["All", ...Array.from(new Set(countItems.map(i => String(i.storageArea  ?? "General")))).sort((a,b) => a.localeCompare(b))], [countItems]);
+
+  // ── Filtered + sorted view (MUST be before any early return) ─────────────
+  const filteredCountItems = useMemo(() => {
+    let rows = [...countItems];
+    const q = cfSearch.trim().toLowerCase();
+    if (q) rows = rows.filter(i => String(i.name ?? "").toLowerCase().includes(q));
+    if (cfCategory !== "All") rows = rows.filter(i => String(i.category     ?? "Uncategorized") === cfCategory);
+    if (cfSupplier !== "All") rows = rows.filter(i => String(i.supplierName ?? "Unknown")       === cfSupplier);
+    if (cfStorage  !== "All") rows = rows.filter(i => String(i.storageArea  ?? "General")        === cfStorage);
+    if (cfStatus === "Counted")   rows = rows.filter(i => (i.physicalQty ?? "") !== "");
+    if (cfStatus === "Uncounted") rows = rows.filter(i => (i.physicalQty ?? "") === "");
+    if (cfStatus === "Short")     rows = rows.filter(i => (i.physicalQty ?? "") !== "" && Number(i.variance ?? 0) < 0);
+    if (cfStatus === "Over")      rows = rows.filter(i => (i.physicalQty ?? "") !== "" && Number(i.variance ?? 0) > 0);
+    if (cfSort === "alpha")     rows.sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")));
+    if (cfSort === "var-high")  rows.sort((a, b) => Math.abs(Number(b.varianceValue ?? 0)) - Math.abs(Number(a.varianceValue ?? 0)));
+    if (cfSort === "var-low")   rows.sort((a, b) => Math.abs(Number(a.varianceValue ?? 0)) - Math.abs(Number(b.varianceValue ?? 0)));
+    if (cfSort === "low-stock") rows.sort((a, b) => (Number(a.theoreticalQty ?? 0) - Number(a.parLevel ?? 0)) - (Number(b.theoreticalQty ?? 0) - Number(b.parLevel ?? 0)));
+    if (cfSort === "cost-high") rows.sort((a, b) => Number(b.cost ?? 0) - Number(a.cost ?? 0));
+    return rows;
+  }, [countItems, cfSearch, cfCategory, cfSupplier, cfStorage, cfStatus, cfSort]);
+
+  const activeFilterCount = [cfSearch, cfCategory !== "All" ? cfCategory : "", cfSupplier !== "All" ? cfSupplier : "", cfStorage !== "All" ? cfStorage : "", cfStatus !== "All" ? cfStatus : ""].filter(Boolean).length;
+  const clearAllFilters = () => { setCfSearch(""); setCfCategory("All"); setCfSupplier("All"); setCfStorage("All"); setCfStatus("All"); setCfSort("alpha"); };
+
   if (isLoading) return <div className="animate-pulse flex p-12 text-neutral-400 justify-center">Loading Active Counts...</div>;
 
   const totalVarianceMTD = counts
@@ -188,35 +216,6 @@ export default function Counts() {
 
   const currentTotalVariance = countItems.reduce((sum, item) => sum + (item.varianceValue || 0), 0);
 
-  // ── Derived filter option lists ───────────────────────────────────────────
-  const cfCategories = useMemo(() => ["All", ...Array.from(new Set(countItems.map(i => String(i.category ?? "Uncategorized")))).sort((a,b) => a.localeCompare(b))], [countItems]);
-  const cfSuppliers  = useMemo(() => ["All", ...Array.from(new Set(countItems.map(i => String(i.supplierName ?? "Unknown")))).sort((a,b) => a.localeCompare(b))], [countItems]);
-  const cfStorages   = useMemo(() => ["All", ...Array.from(new Set(countItems.map(i => String(i.storageArea  ?? "General")))).sort((a,b) => a.localeCompare(b))], [countItems]);
-
-  // ── Filtered + sorted view ────────────────────────────────────────────────
-  const filteredCountItems = useMemo(() => {
-    let rows = [...countItems];
-    // Safe string coercion — every field may be null/undefined on legacy DB snapshots
-    const q = cfSearch.trim().toLowerCase();
-    if (q) rows = rows.filter(i => String(i.name ?? "").toLowerCase().includes(q));
-    if (cfCategory !== "All") rows = rows.filter(i => String(i.category     ?? "Uncategorized") === cfCategory);
-    if (cfSupplier !== "All") rows = rows.filter(i => String(i.supplierName ?? "Unknown")       === cfSupplier);
-    if (cfStorage  !== "All") rows = rows.filter(i => String(i.storageArea  ?? "General")        === cfStorage);
-    if (cfStatus === "Counted")   rows = rows.filter(i => (i.physicalQty ?? "") !== "");
-    if (cfStatus === "Uncounted") rows = rows.filter(i => (i.physicalQty ?? "") === "");
-    if (cfStatus === "Short")     rows = rows.filter(i => (i.physicalQty ?? "") !== "" && Number(i.variance ?? 0) < 0);
-    if (cfStatus === "Over")      rows = rows.filter(i => (i.physicalQty ?? "") !== "" && Number(i.variance ?? 0) > 0);
-    // Safe sort — guard against null name / numeric fields
-    if (cfSort === "alpha")     rows.sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")));
-    if (cfSort === "var-high")  rows.sort((a, b) => Math.abs(Number(b.varianceValue ?? 0)) - Math.abs(Number(a.varianceValue ?? 0)));
-    if (cfSort === "var-low")   rows.sort((a, b) => Math.abs(Number(a.varianceValue ?? 0)) - Math.abs(Number(b.varianceValue ?? 0)));
-    if (cfSort === "low-stock") rows.sort((a, b) => (Number(a.theoreticalQty ?? 0) - Number(a.parLevel ?? 0)) - (Number(b.theoreticalQty ?? 0) - Number(b.parLevel ?? 0)));
-    if (cfSort === "cost-high") rows.sort((a, b) => Number(b.cost ?? 0) - Number(a.cost ?? 0));
-    return rows;
-  }, [countItems, cfSearch, cfCategory, cfSupplier, cfStorage, cfStatus, cfSort]);
-
-  const activeFilterCount = [cfSearch, cfCategory !== "All" ? cfCategory : "", cfSupplier !== "All" ? cfSupplier : "", cfStorage !== "All" ? cfStorage : "", cfStatus !== "All" ? cfStatus : ""].filter(Boolean).length;
-  const clearAllFilters = () => { setCfSearch(""); setCfCategory("All"); setCfSupplier("All"); setCfStorage("All"); setCfStatus("All"); setCfSort("alpha"); };
 
   const saveCountSession = async (status: "Draft" | "Submitted" | "Approved") => {
     let newCountsList = [...counts];
