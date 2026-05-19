@@ -1,11 +1,11 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Drawer } from "@/components/ui/drawer";
-import { Calendar, CheckCircle2, Clock, Smartphone, Play, Save, Send, ShieldCheck, FileEdit, Calculator, ArrowRight } from "lucide-react";
+import { Calendar, CheckCircle2, Clock, Smartphone, Play, Save, Send, ShieldCheck, FileEdit, Calculator, ArrowRight, X, Search, SlidersHorizontal } from "lucide-react";
 import { loadCounts, saveCounts, loadInventory, saveInventory, loadLocations } from "@/lib/storage";
 import { useAuth } from "@/components/AuthProvider";
 import { isHqAdmin, resolveLocationId } from "@/lib/roles";
@@ -38,6 +38,14 @@ export default function Counts() {
   const [countItems, setCountItems] = useState<any[]>([]);
   const [notes, setNotes] = useState("");
   const [step, setStep] = useState<1|2>(1);
+
+  // ── Filter & Sort state (Step 2 count table) ─────────────────────────────
+  const [cfSearch,   setCfSearch]   = useState("");
+  const [cfCategory, setCfCategory] = useState("All");
+  const [cfSupplier, setCfSupplier] = useState("All");
+  const [cfStorage,  setCfStorage]  = useState("All");
+  const [cfStatus,   setCfStatus]   = useState("All"); // All | Counted | Uncounted | Short | Over
+  const [cfSort,     setCfSort]     = useState("alpha"); // alpha | var-high | var-low | low-stock | cost-high | updated
 
   const [isLoading, setIsLoading] = useState(true);
 
@@ -119,7 +127,6 @@ export default function Counts() {
 
   const beginCounting = () => {
     if (countItems.length === 0) {
-      // Scope snapshot to this user's location so only relevant items are counted
       const scopedInv = writeLocationId
         ? inventoryData.filter((inv: any) => inv.locationId === writeLocationId)
         : inventoryData;
@@ -128,6 +135,10 @@ export default function Counts() {
         name: inv.name,
         unit: inv.unit,
         cost: inv.cost,
+        category: inv.category || "Uncategorized",
+        supplierName: inv.preferredSupplierName || (inv.supplierId ? `Supplier #${inv.supplierId}` : "Unknown"),
+        storageArea: inv.itemType || "General",
+        parLevel: inv.parLevel ?? 0,
         theoreticalQty: inv.inStock,
         physicalQty: "",
         variance: 0,
@@ -135,6 +146,9 @@ export default function Counts() {
       }));
       setCountItems(liveSnapshot);
     }
+    // reset filters when opening a new count
+    setCfSearch(""); setCfCategory("All"); setCfSupplier("All");
+    setCfStorage("All"); setCfStatus("All"); setCfSort("alpha");
     setStep(2);
   };
 
@@ -156,6 +170,35 @@ export default function Counts() {
   };
 
   const currentTotalVariance = countItems.reduce((sum, item) => sum + (item.varianceValue || 0), 0);
+
+  // ── Derived filter option lists ───────────────────────────────────────────
+  const cfCategories = useMemo(() => ["All", ...Array.from(new Set(countItems.map(i => i.category || "Uncategorized"))).sort()], [countItems]);
+  const cfSuppliers  = useMemo(() => ["All", ...Array.from(new Set(countItems.map(i => i.supplierName || "Unknown"))).sort()], [countItems]);
+  const cfStorages   = useMemo(() => ["All", ...Array.from(new Set(countItems.map(i => i.storageArea || "General"))).sort()], [countItems]);
+
+  // ── Filtered + sorted view ────────────────────────────────────────────────
+  const filteredCountItems = useMemo(() => {
+    let rows = [...countItems];
+    const q = cfSearch.toLowerCase().trim();
+    if (q)                      rows = rows.filter(i => i.name.toLowerCase().includes(q));
+    if (cfCategory !== "All")  rows = rows.filter(i => (i.category || "Uncategorized") === cfCategory);
+    if (cfSupplier !== "All")  rows = rows.filter(i => (i.supplierName || "Unknown") === cfSupplier);
+    if (cfStorage  !== "All")  rows = rows.filter(i => (i.storageArea || "General") === cfStorage);
+    if (cfStatus === "Counted")   rows = rows.filter(i => i.physicalQty !== "");
+    if (cfStatus === "Uncounted") rows = rows.filter(i => i.physicalQty === "");
+    if (cfStatus === "Short")     rows = rows.filter(i => i.physicalQty !== "" && i.variance < 0);
+    if (cfStatus === "Over")      rows = rows.filter(i => i.physicalQty !== "" && i.variance > 0);
+    // sort
+    if (cfSort === "alpha")     rows.sort((a, b) => a.name.localeCompare(b.name));
+    if (cfSort === "var-high")  rows.sort((a, b) => Math.abs(b.varianceValue) - Math.abs(a.varianceValue));
+    if (cfSort === "var-low")   rows.sort((a, b) => Math.abs(a.varianceValue) - Math.abs(b.varianceValue));
+    if (cfSort === "low-stock") rows.sort((a, b) => (a.theoreticalQty - a.parLevel) - (b.theoreticalQty - b.parLevel));
+    if (cfSort === "cost-high") rows.sort((a, b) => b.cost - a.cost);
+    return rows;
+  }, [countItems, cfSearch, cfCategory, cfSupplier, cfStorage, cfStatus, cfSort]);
+
+  const activeFilterCount = [cfSearch, cfCategory !== "All" ? cfCategory : "", cfSupplier !== "All" ? cfSupplier : "", cfStorage !== "All" ? cfStorage : "", cfStatus !== "All" ? cfStatus : ""].filter(Boolean).length;
+  const clearAllFilters = () => { setCfSearch(""); setCfCategory("All"); setCfSupplier("All"); setCfStorage("All"); setCfStatus("All"); setCfSort("alpha"); };
 
   const saveCountSession = async (status: "Draft" | "Submitted" | "Approved") => {
     let newCountsList = [...counts];
@@ -444,44 +487,153 @@ export default function Counts() {
                 </div>
              </div>
            ) : (
-             <div className="space-y-4">
-                <div className="flex justify-between items-end mb-2">
-                  <div className="text-sm font-medium text-neutral-700">Displaying <span className="text-brand-600 font-bold">{countItems.length}</span> Items</div>
-                  <div className="text-sm text-neutral-500 bg-neutral-100 px-3 py-1.5 rounded-lg border border-neutral-200 font-medium">
-                     Running Variance: <span className={currentTotalVariance < 0 ? 'text-danger-600 font-bold' : currentTotalVariance > 0 ? 'text-success-600 font-bold' : 'text-neutral-900'}>{currentTotalVariance > 0 ? "+" : ""}${currentTotalVariance.toFixed(2)}</span>
-                  </div>
-                </div>
+             <div className="space-y-0">
 
-                <div className="border border-neutral-200 rounded-lg bg-white overflow-hidden shadow-sm">
-                   <Table>
-                      <TableHeader className="bg-neutral-50 border-b border-neutral-200 text-xs text-neutral-500 uppercase tracking-wider">
-                         <TableRow>
-                           <TableHead className="py-2">Item</TableHead>
-                           <TableHead className="py-2 text-center">Expected</TableHead>
-                           <TableHead className="py-2 w-[120px]">Physical Count</TableHead>
-                           <TableHead className="py-2 text-right">Variance Ext.</TableHead>
-                         </TableRow>
-                      </TableHeader>
+               {/* ──────────────────────────────── Sticky Filter Bar ─────────────────────────────────────────────────────────── */}
+               <div className="sticky top-0 z-20 bg-white border-b border-neutral-200 pb-3 pt-1 mb-3 space-y-2 shadow-sm">
+
+                 {/* Row 1: search + sort */}
+                 <div className="flex gap-2">
+                   <div className="relative flex-1">
+                     <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-neutral-400 pointer-events-none" />
+                     <input
+                       type="text"
+                       placeholder="Search items..."
+                       value={cfSearch}
+                       onChange={e => setCfSearch(e.target.value)}
+                       className="w-full pl-8 pr-3 py-2 text-sm border border-neutral-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-brand-500 bg-neutral-50"
+                     />
+                     {cfSearch && (
+                       <button onClick={() => setCfSearch("")} className="absolute right-2 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600">
+                         <X className="h-3.5 w-3.5" />
+                       </button>
+                     )}
+                   </div>
+                   <select
+                     value={cfSort}
+                     onChange={e => setCfSort(e.target.value)}
+                     className="px-3 py-2 text-xs font-semibold border border-neutral-200 rounded-lg bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500 text-neutral-700"
+                   >
+                     <option value="alpha">A → Z</option>
+                     <option value="var-high">Highest Variance</option>
+                     <option value="var-low">Lowest Variance</option>
+                     <option value="low-stock">Low Stock First</option>
+                     <option value="cost-high">Highest Cost</option>
+                   </select>
+                 </div>
+
+                 {/* Row 2: dropdown filters */}
+                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                   <select value={cfCategory} onChange={e => setCfCategory(e.target.value)}
+                     className="px-2 py-1.5 text-xs border border-neutral-200 rounded-lg bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500 text-neutral-700">
+                     {cfCategories.map(c => <option key={c} value={c}>{c === "All" ? "All Categories" : c}</option>)}
+                   </select>
+                   <select value={cfSupplier} onChange={e => setCfSupplier(e.target.value)}
+                     className="px-2 py-1.5 text-xs border border-neutral-200 rounded-lg bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500 text-neutral-700">
+                     {cfSuppliers.map(s => <option key={s} value={s}>{s === "All" ? "All Suppliers" : s}</option>)}
+                   </select>
+                   <select value={cfStorage} onChange={e => setCfStorage(e.target.value)}
+                     className="px-2 py-1.5 text-xs border border-neutral-200 rounded-lg bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500 text-neutral-700">
+                     {cfStorages.map(s => <option key={s} value={s}>{s === "All" ? "All Storage Areas" : s}</option>)}
+                   </select>
+                   <select value={cfStatus} onChange={e => setCfStatus(e.target.value)}
+                     className="px-2 py-1.5 text-xs border border-neutral-200 rounded-lg bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500 text-neutral-700">
+                     {["All","Counted","Uncounted","Short","Over"].map(s => <option key={s} value={s}>{s === "All" ? "All Statuses" : s}</option>)}
+                   </select>
+                 </div>
+
+                 {/* Active filter badges + summary */}
+                 <div className="flex items-center justify-between flex-wrap gap-2 pt-0.5">
+                   <div className="flex items-center gap-1.5 flex-wrap">
+                     <span className="text-[10px] font-semibold text-neutral-400 uppercase tracking-wide flex items-center gap-1">
+                       <SlidersHorizontal className="h-3 w-3" />
+                       {filteredCountItems.length} of {countItems.length}
+                     </span>
+                     {cfSearch && (
+                       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-brand-100 text-brand-700 border border-brand-200">
+                         "{cfSearch}" <button onClick={() => setCfSearch("")}><X className="h-2.5 w-2.5" /></button>
+                       </span>
+                     )}
+                     {cfCategory !== "All" && (
+                       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-violet-100 text-violet-700 border border-violet-200">
+                         {cfCategory} <button onClick={() => setCfCategory("All")}><X className="h-2.5 w-2.5" /></button>
+                       </span>
+                     )}
+                     {cfSupplier !== "All" && (
+                       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-100 text-emerald-700 border border-emerald-200">
+                         {cfSupplier} <button onClick={() => setCfSupplier("All")}><X className="h-2.5 w-2.5" /></button>
+                       </span>
+                     )}
+                     {cfStorage !== "All" && (
+                       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-700 border border-amber-200">
+                         {cfStorage} <button onClick={() => setCfStorage("All")}><X className="h-2.5 w-2.5" /></button>
+                       </span>
+                     )}
+                     {cfStatus !== "All" && (
+                       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-neutral-200 text-neutral-700 border border-neutral-300">
+                         {cfStatus} <button onClick={() => setCfStatus("All")}><X className="h-2.5 w-2.5" /></button>
+                       </span>
+                     )}
+                   </div>
+                   <div className="flex items-center gap-3">
+                     {activeFilterCount > 0 && (
+                       <button onClick={clearAllFilters} className="text-[10px] font-semibold text-danger-600 hover:text-danger-800 transition-colors">
+                         Clear all
+                       </button>
+                     )}
+                     <div className="text-xs text-neutral-500 bg-neutral-100 px-2.5 py-1 rounded-lg border border-neutral-200 font-medium whitespace-nowrap">
+                       Variance: <span className={currentTotalVariance < 0 ? 'text-danger-600 font-bold' : currentTotalVariance > 0 ? 'text-success-600 font-bold' : 'text-neutral-700'}>{currentTotalVariance > 0 ? "+" : ""}${currentTotalVariance.toFixed(2)}</span>
+                     </div>
+                   </div>
+                 </div>
+               </div>
+
+               {/* ──────────────────────────────── Count Table ────────────────────────────────────────────────────────── */}
+               <div className="border border-neutral-200 rounded-lg bg-white overflow-hidden shadow-sm">
+                  <Table>
+                     <TableHeader className="bg-neutral-50 border-b border-neutral-200 text-xs text-neutral-500 uppercase tracking-wider">
+                        <TableRow>
+                          <TableHead className="py-2">Item</TableHead>
+                          <TableHead className="py-2 text-center">Expected</TableHead>
+                          <TableHead className="py-2 w-[120px]">Physical Count</TableHead>
+                          <TableHead className="py-2 text-right">Variance Ext.</TableHead>
+                        </TableRow>
+                     </TableHeader>
                       <TableBody>
-                        {countItems.map((item) => {
+                        {filteredCountItems.length === 0 && (
+                          <TableRow>
+                            <TableCell colSpan={4} className="text-center py-8 text-sm text-neutral-400 italic">
+                              No items match the current filters.
+                            </TableCell>
+                          </TableRow>
+                        )}
+                        {filteredCountItems.map((item) => {
                           const isShort = item.variance < 0;
                           const isOver = item.variance > 0;
                           const hasInput = item.physicalQty !== "";
-                          
                           return (
                             <TableRow key={item.id} className="hover:bg-neutral-50 border-b border-neutral-100 last:border-0">
                                <TableCell className="py-3 px-4">
                                   <div className="font-semibold text-neutral-900 text-sm">{item.name}</div>
-                                  <div className="text-[10px] text-neutral-500">${item.cost.toFixed(2)} / {item.unit}</div>
+                                  <div className="text-[10px] text-neutral-500 flex items-center gap-1.5 mt-0.5">
+                                    <span>${item.cost.toFixed(2)}/{item.unit}</span>
+                                    {item.category && item.category !== "Uncategorized" && (
+                                      <span className="px-1 py-0.5 bg-neutral-100 rounded">{item.category}</span>
+                                    )}
+                                    {item.storageArea && item.storageArea !== "General" && (
+                                      <span className="px-1 py-0.5 bg-amber-50 text-amber-700 rounded">{item.storageArea}</span>
+                                    )}
+                                  </div>
                                </TableCell>
                                <TableCell className="py-3 px-4 text-center">
                                   <span className="text-sm font-medium text-neutral-500">{item.theoreticalQty}</span>
+                                  {item.parLevel > 0 && item.theoreticalQty < item.parLevel && (
+                                    <div className="text-[9px] text-warning-600 font-semibold">Below par</div>
+                                  )}
                                </TableCell>
                                <TableCell className="py-3 px-4">
-                                  <input 
-                                    type="number"
-                                    min="0"
-                                    step="0.1"
+                                  <input
+                                    type="number" min="0" step="0.1"
                                     disabled={activeCount?.status === "Approved"}
                                     className={`w-full border rounded p-2 text-sm text-center font-semibold focus:outline-none focus:ring-2 ${hasInput && isShort ? 'border-danger-300 focus:ring-danger-500 bg-danger-50' : hasInput && isOver ? 'border-brand-300 focus:ring-brand-500 bg-brand-50' : 'border-neutral-300 focus:ring-neutral-500 bg-white'}`}
                                     placeholder="Qty..."
