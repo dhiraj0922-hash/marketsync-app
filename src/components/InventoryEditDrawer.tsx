@@ -159,15 +159,29 @@ function SupplierCombobox({ value, supplierObjects, extraNames = [], onChange, o
 
   const isKnown = supplierObjects.some(s => s.name.toLowerCase() === normalize(query).toLowerCase());
 
-  // Portal dropdown — rendered onto document.body to escape overflow-y-auto clipping
-  const dropdown = open ? createPortal(
+  // Keep portal anchored when the drawer scrolls
+  useEffect(() => {
+    if (!open) return;
+    const onScroll = () => {
+      if (inputRef.current) {
+        const r = inputRef.current.getBoundingClientRect();
+        setDropPos({ top: r.bottom + 2, left: r.left, width: r.width });
+      }
+    };
+    window.addEventListener('scroll', onScroll, true); // capture phase catches inner scroll
+    return () => window.removeEventListener('scroll', onScroll, true);
+  }, [open]);
+
+  // Portal dropdown — rendered onto document.body to escape overflow-y-auto clipping.
+  // Guard: don't render until we have a real measured width (avoids flash at 0,0).
+  const dropdown = (open && dropPos.width > 0) ? createPortal(
     <div
       id="supplier-combobox-portal"
       style={{
         position: 'fixed',
-        top:   dropPos.top,
-        left:  dropPos.left,
-        width: dropPos.width,
+        top:    dropPos.top,
+        left:   dropPos.left,
+        width:  Math.max(dropPos.width, 200),   // min 200px so narrow inputs still look good
         zIndex: 9999,
       }}
       className="bg-white border border-violet-200 rounded shadow-xl max-h-52 overflow-y-auto"
