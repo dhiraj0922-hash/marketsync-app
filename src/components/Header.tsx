@@ -92,7 +92,7 @@ export function Header() {
             </button>
 
             {locationOpen && (
-              <div className="absolute left-0 mt-2 w-64 bg-white border border-neutral-200 rounded-xl shadow-xl overflow-hidden z-50">
+              <div className="stockiq-location-menu absolute left-0 mt-2 w-64 overflow-hidden rounded-xl border border-zinc-800 bg-[#111111] shadow-2xl shadow-black/40 z-50">
                 {/* All Locations (read-only) option */}
                 <button
                   onClick={() => {
@@ -100,17 +100,17 @@ export function Header() {
                     setActiveLocation(null);
                     setLocationOpen(false);
                   }}
-                  className={`w-full text-left px-4 py-3 text-sm flex items-center justify-between transition-colors ${
-                    !activeLocation ? "bg-neutral-50 font-semibold text-neutral-900" : "hover:bg-neutral-50 text-neutral-700"
+                  className={`stockiq-location-menu-item w-full text-left px-4 py-3 text-sm flex items-center justify-between transition-colors ${
+                    !activeLocation ? "bg-blue-600/20 font-semibold text-white" : "text-zinc-200 hover:bg-zinc-800/80 hover:text-white"
                   }`}
                 >
                   <span>All Locations (HQ View)</span>
-                  {!activeLocation && <Check className="h-3.5 w-3.5 text-brand-600" />}
+                  {!activeLocation && <Check className="h-3.5 w-3.5 text-blue-400" />}
                 </button>
 
                 {locations.length > 0 && (
-                  <div className="border-t border-neutral-100">
-                    <p className="px-4 pt-2 pb-1 text-[10px] font-bold text-neutral-400 uppercase tracking-wider">
+                  <div className="border-t border-zinc-800">
+                    <p className="stockiq-location-menu-label px-4 pt-2 pb-1 text-[10px] font-bold text-zinc-500 uppercase tracking-wider">
                       Select Active Location
                     </p>
                     {locations.map((loc) => (
@@ -121,15 +121,15 @@ export function Header() {
                           setActiveLocation(loc);
                           setLocationOpen(false);
                         }}
-                        className={`w-full text-left px-4 py-2.5 text-sm flex items-center justify-between transition-colors ${
+                        className={`stockiq-location-menu-item w-full text-left px-4 py-2.5 text-sm flex items-center justify-between transition-colors ${
                           activeLocation?.id === loc.id
-                            ? "bg-brand-50 text-brand-700 font-semibold"
-                            : "hover:bg-neutral-50 text-neutral-700"
+                            ? "bg-blue-600/20 text-white font-semibold"
+                            : "text-zinc-200 hover:bg-zinc-800/80 hover:text-white"
                         }`}
                       >
                         <span>{loc.name}</span>
                         {activeLocation?.id === loc.id && (
-                          <Check className="h-3.5 w-3.5 text-brand-600" />
+                          <Check className="h-3.5 w-3.5 text-blue-400" />
                         )}
                       </button>
                     ))}
@@ -137,7 +137,7 @@ export function Header() {
                 )}
 
                 {locations.length === 0 && (
-                  <p className="px-4 py-3 text-xs text-neutral-400 italic border-t border-neutral-100">
+                  <p className="border-t border-zinc-800 px-4 py-3 text-xs italic text-zinc-500">
                     No locations found in DB.
                   </p>
                 )}
