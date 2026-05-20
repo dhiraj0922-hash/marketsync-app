@@ -12,6 +12,7 @@ import { Drawer } from "@/components/ui/drawer";
 import { Search, Plus, Upload, MoreHorizontal, ShoppingCart, History, Save, Trash2, ArrowDown, ArrowUp, AlertTriangle, X, Download, Loader2, Link2, ChevronDown, ChevronRight, GitMerge, MapPin } from "lucide-react";
 import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId, logMovement, deleteInventoryItem, deleteSaleItemByNameOrId, insertPurchaseOptions, loadPurchaseOptions, savePurchaseOptions, deletePurchaseOption, updateInventoryRowItemId, allocateInventoryToLocations, loadLocations } from "@/lib/storage";
 import { normalizeInventoryName } from "@/lib/inventoryIdentity";
+import { SupplierCombobox } from "@/components/InventoryEditDrawer";
 
 export default function Inventory() {
   const router = useRouter();
@@ -116,7 +117,7 @@ export default function Inventory() {
   const [isSavingPurchOpt, setIsSavingPurchOpt] = useState<string | null>(null);
   const [addingPurchOpt, setAddingPurchOpt] = useState(false);
   const [newPurchOpt, setNewPurchOpt] = useState<any>({
-    supplierName: '', supplierProductName: '', purchaseUom: 'ea',
+    supplierId: null, supplierName: '', supplierProductName: '', purchaseUom: 'ea',
     packQty: '', packUom: '', unitPrice: '', isPreferred: false,
   });
 
@@ -684,7 +685,7 @@ export default function Inventory() {
     const syncPrice = preferredRow?.unitPrice ?? lowestRow?.unitPrice ?? null;
     if (syncPrice !== null) setEditPurchaseCost(String(syncPrice));
     setAddingPurchOpt(false);
-    setNewPurchOpt({ supplierName: '', supplierProductName: '', purchaseUom: 'ea', packQty: '', packUom: '', unitPrice: '', isPreferred: false });
+    setNewPurchOpt({ supplierId: null, supplierName: '', supplierProductName: '', purchaseUom: 'ea', packQty: '', packUom: '', unitPrice: '', isPreferred: false });
   };
 
   // ── Delete Item ───────────────────────────────────────────────────────────
@@ -2733,11 +2734,16 @@ export default function Inventory() {
                   <div className="grid grid-cols-2 gap-2 mb-1.5">
                     <div>
                       <label className="text-[10px] text-neutral-400 font-semibold uppercase block mb-0.5">Supplier Name</label>
-                      <input
-                        type="text"
-                        value={row.supplierName}
-                        onChange={e => updatePurchOptField(row.id, 'supplierName', e.target.value)}
-                        className="w-full px-2 py-1 border border-neutral-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-brand-400"
+                      <SupplierCombobox
+                        value={row.supplierName ?? ''}
+                        supplierObjects={suppliersData
+                          .filter((s: any) => s.id != null && s.name)
+                          .map((s: any) => ({ id: Number(s.id), name: String(s.name) }))}
+                        onChange={name => updatePurchOptField(row.id, 'supplierName', name)}
+                        onSelect={(id, name) => {
+                          updatePurchOptField(row.id, 'supplierName', name);
+                          if (id !== null) updatePurchOptField(row.id, 'supplierId', id);
+                        }}
                       />
                     </div>
                     <div>
@@ -2800,14 +2806,20 @@ export default function Inventory() {
                   <div className="grid grid-cols-2 gap-2">
                     <div>
                       <label className="text-[10px] text-neutral-500 font-semibold uppercase block mb-0.5">Supplier Name *</label>
-                      <input
-                        autoFocus
-                        type="text"
+                      <SupplierCombobox
                         value={newPurchOpt.supplierName}
-                        onChange={e => setNewPurchOpt((p: any) => ({ ...p, supplierName: e.target.value }))}
-                        className="w-full px-2 py-1 border border-neutral-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-violet-400"
-                        placeholder="Supplier Co."
+                        supplierObjects={suppliersData
+                          .filter((s: any) => s.id != null && s.name)
+                          .map((s: any) => ({ id: Number(s.id), name: String(s.name) }))}
+                        onChange={name => setNewPurchOpt((p: any) => ({ ...p, supplierName: name }))}
+                        onSelect={(id, name) => setNewPurchOpt((p: any) => ({ ...p, supplierId: id, supplierName: name }))}
                       />
+                      {newPurchOpt.supplierId && (
+                        <p className="text-[9px] text-violet-500 mt-0.5">✓ Linked to master supplier</p>
+                      )}
+                      {newPurchOpt.supplierName && !newPurchOpt.supplierId && (
+                        <p className="text-[9px] text-amber-500 mt-0.5">New supplier — not in master list</p>
+                      )}
                     </div>
                     <div>
                       <label className="text-[10px] text-neutral-500 font-semibold uppercase block mb-0.5">Supplier Product Name</label>

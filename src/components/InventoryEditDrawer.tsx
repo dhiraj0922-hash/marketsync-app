@@ -74,7 +74,7 @@ interface SupplierComboboxProps {
   onSelect: (id: number | null, name: string) => void;
 }
 
-function SupplierCombobox({ value, supplierObjects, extraNames = [], onChange, onSelect }: SupplierComboboxProps) {
+export function SupplierCombobox({ value, supplierObjects, extraNames = [], onChange, onSelect }: SupplierComboboxProps) {
   const [query,    setQuery]    = useState(value);
   const [open,     setOpen]     = useState(false);
   const [dropPos,  setDropPos]  = useState({ top: 0, left: 0, width: 0 });
