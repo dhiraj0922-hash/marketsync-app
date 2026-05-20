@@ -82,6 +82,17 @@ export default function Inventory() {
   const [importBatches, setImportBatches] = useState<any[]>([]);
   const [isHistoryDrawerOpen, setIsHistoryDrawerOpen] = useState(false);
 
+  // ── HQ Correction state ──────────────────────────────────────────────────────
+  type CorrectionModal = {
+    log: any;        // the original log entry
+    logIdx: number;  // index in activityData[selectedItem.id]
+    mode: 'edit' | 'void';
+  };
+  const [correctionModal, setCorrectionModal] = useState<CorrectionModal | null>(null);
+  const [corrReason, setCorrReason]   = useState('');
+  const [corrNewQty, setCorrNewQty]   = useState('');
+  const [isCorrSaving, setIsCorrSaving] = useState(false);
+
   // ── Supplier Import State ────────────────────────────────────────────────────
   const supplierFileInputRef = useRef<HTMLInputElement>(null);
   const [isSupplierImportDrawerOpen, setIsSupplierImportDrawerOpen] = useState(false);
@@ -778,6 +789,7 @@ export default function Inventory() {
     const newInventory = inventoryData.map(i => i.id === selectedItem.id ? updatedItem : i);
 
     const logEntry = {
+      id: `log-${Date.now()}-${Math.random().toString(36).slice(2,7)}`,
       date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
       time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
       type: adjType,
@@ -823,6 +835,128 @@ export default function Inventory() {
     setAdjQty("");
     setAdjNotes("");
   };
+
+  // ── Commit Correction (Edit mode) ──────────────────────────────────────────
+  // Creates a delta correction movement without rewriting history.
+  const commitCorrection = async () => {
+    if (!correctionModal || !selectedItem) return;
+    if (!corrReason) { alert('Reason is required.'); return; }
+    const { log, logIdx } = correctionModal;
+
+    const origNumStr = String(log.qty ?? '0').replace(/[^0-9.\-]/g, '');
+    const origNum = parseFloat(origNumStr) || 0;
+    const newNum  = parseFloat(corrNewQty);
+    if (isNaN(newNum)) { alert('Enter a valid new quantity.'); return; }
+    const delta = newNum - origNum;
+    if (delta === 0) { alert('New quantity is the same as original — no correction needed.'); return; }
+
+    setIsCorrSaving(true);
+    try {
+      const movItemId = selectedItem.itemId ?? selectedItem.id;
+      const movLocId  = selectedItem.locationId ?? resolveLocationId(user);
+      await logMovement({
+        locationId:    movLocId,
+        itemId:        String(movItemId),
+        movementType:  delta > 0 ? 'correction_in' : 'correction_out',
+        quantity:      Math.abs(delta),
+        unitCost:      selectedItem.cost ?? null,
+        referenceType: 'correction',
+        notes:         `Correction of entry #${log.id ?? logIdx}: ${corrReason}. Original ${origNum}, corrected to ${newNum}.`,
+      });
+
+      const updatedItem = { ...selectedItem, inStock: selectedItem.inStock + delta, updatedAt: Date.now() };
+      const newInventory = inventoryData.map((i: any) => i.id === selectedItem.id ? updatedItem : i);
+      const res = await saveInventory([updatedItem]);
+      if (!res.success) throw new Error(res.error?.message ?? 'Save failed');
+      setInventoryData(newInventory);
+      setSelectedItem(updatedItem);
+
+      const now = new Date();
+      const corrEntry = {
+        id: `corr-${Date.now()}`,
+        date: now.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        time: now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+        type: delta > 0 ? 'Add' : 'Remove',
+        qty: `${delta > 0 ? '+' : ''}${delta} ${selectedItem.unit}`,
+        notes: `Correction — ${corrReason}. Original entry: ${log.qty}.`,
+        user: user?.email ?? 'HQ',
+        isCorrectionOf: log.id ?? logIdx,
+      };
+      const existing = activityData[selectedItem.id] || [];
+      const patchedExisting = existing.map((e: any, i: number) =>
+        (e.id !== undefined ? e.id === log.id : i === logIdx) ? { ...e, corrected: true } : e
+      );
+      const newActivityData = { ...activityData, [selectedItem.id]: [corrEntry, ...patchedExisting] };
+      setActivityData(newActivityData);
+      await saveInventoryActivity(newActivityData);
+      setCorrectionModal(null); setCorrReason(''); setCorrNewQty('');
+    } catch (err: any) {
+      alert(`Correction failed: ${err?.message ?? String(err)}`);
+    } finally {
+      setIsCorrSaving(false);
+    }
+  };
+
+  // ── Commit Void (Reverse mode) ─────────────────────────────────────────────
+  // Creates an equal-opposite movement and marks the original as voided.
+  const commitVoid = async () => {
+    if (!correctionModal || !selectedItem) return;
+    if (!corrReason) { alert('Reason is required.'); return; }
+    const { log, logIdx } = correctionModal;
+
+    const origNumStr = String(log.qty ?? '0').replace(/[^0-9.\-]/g, '');
+    const origNum = parseFloat(origNumStr) || 0;
+    const isAdd = log.type === 'Add';
+    const signedOriginal = isAdd ? Math.abs(origNum) : -Math.abs(origNum);
+    const reversal = -signedOriginal;
+
+    setIsCorrSaving(true);
+    try {
+      const movItemId = selectedItem.itemId ?? selectedItem.id;
+      const movLocId  = selectedItem.locationId ?? resolveLocationId(user);
+      await logMovement({
+        locationId:    movLocId,
+        itemId:        String(movItemId),
+        movementType:  reversal > 0 ? 'correction_in' : 'correction_out',
+        quantity:      Math.abs(reversal),
+        unitCost:      selectedItem.cost ?? null,
+        referenceType: 'void',
+        notes:         `Void of entry #${log.id ?? logIdx}: ${corrReason}.`,
+      });
+
+      const updatedItem = { ...selectedItem, inStock: selectedItem.inStock + reversal, updatedAt: Date.now() };
+      const newInventory = inventoryData.map((i: any) => i.id === selectedItem.id ? updatedItem : i);
+      const res = await saveInventory([updatedItem]);
+      if (!res.success) throw new Error(res.error?.message ?? 'Save failed');
+      setInventoryData(newInventory);
+      setSelectedItem(updatedItem);
+
+      const now = new Date();
+      const voidEntry = {
+        id: `void-${Date.now()}`,
+        date: now.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        time: now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+        type: reversal > 0 ? 'Add' : 'Remove',
+        qty: `${reversal > 0 ? '+' : ''}${reversal} ${selectedItem.unit}`,
+        notes: `Void — ${corrReason}. Reversed entry: ${log.qty}.`,
+        user: user?.email ?? 'HQ',
+        isVoidOf: log.id ?? logIdx,
+      };
+      const existing = activityData[selectedItem.id] || [];
+      const patchedExisting = existing.map((e: any, i: number) =>
+        (e.id !== undefined ? e.id === log.id : i === logIdx) ? { ...e, voided: true } : e
+      );
+      const newActivityData = { ...activityData, [selectedItem.id]: [voidEntry, ...patchedExisting] };
+      setActivityData(newActivityData);
+      await saveInventoryActivity(newActivityData);
+      setCorrectionModal(null); setCorrReason(''); setCorrNewQty('');
+    } catch (err: any) {
+      alert(`Void failed: ${err?.message ?? String(err)}`);
+    } finally {
+      setIsCorrSaving(false);
+    }
+  };
+
 
   const saveUnitInfo = async () => {
     if (!selectedItem) return;
@@ -2360,19 +2494,72 @@ export default function Inventory() {
                 {(!activityData[selectedItem.id] || activityData[selectedItem.id].length === 0) ? (
                   <p className="text-xs text-neutral-500 italic">No historical adjustments logged for this item yet.</p>
                 ) : (
-                  activityData[selectedItem.id].map((log, idx) => (
-                    <div key={idx} className="flex items-start justify-between bg-neutral-50 rounded-lg p-3 border border-neutral-100">
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${log.type === 'Add' ? 'bg-success-100 text-success-700' : log.type === 'Remove' ? 'bg-warning-100 text-warning-700' : log.type === 'Par Update' ? 'bg-brand-100 text-brand-700' : 'bg-danger-100 text-danger-700'}`}>{log.type}</span>
-                          <span className="text-sm font-bold text-neutral-900">{log.type === 'Par Update' ? `${log.qty} net shift` : log.baseTransacted ? `${log.baseTransacted > 0 ? '+' : ''}${log.baseTransacted} ${selectedItem.baseUnit || selectedItem.unit} (${log.qty})` : `${log.qty > 0 ? '+' : ''}${log.qty} ${selectedItem.unit}`}</span>
+                  activityData[selectedItem.id].map((log: any, idx: number) => (
+                    <div key={log.id ?? idx} className={`flex items-start justify-between rounded-lg p-3 border ${log.voided ? 'bg-red-50 border-red-100 opacity-60' : log.corrected ? 'bg-amber-50 border-amber-100 opacity-75' : 'bg-neutral-50 border-neutral-100'}`}>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${
+                            log.type === 'Add'        ? 'bg-success-100 text-success-700' :
+                            log.type === 'Remove'     ? 'bg-warning-100 text-warning-700' :
+                            log.type === 'Par Update' ? 'bg-brand-100 text-brand-700'    :
+                                                        'bg-danger-100 text-danger-700'
+                          }`}>{log.type}</span>
+                          <span className="text-sm font-bold text-neutral-900">
+                            {log.type === 'Par Update'
+                              ? `${log.qty} net shift`
+                              : log.baseTransacted
+                                ? `${log.baseTransacted > 0 ? '+' : ''}${log.baseTransacted} ${selectedItem.baseUnit || selectedItem.unit} (${log.qty})`
+                                : `${String(log.qty).startsWith('-') ? '' : (log.type === 'Add' ? '+' : '-')}${log.qty}`
+                            }
+                          </span>
+                          {log.voided && (
+                            <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-red-100 text-red-700 border border-red-200">⊘ Voided</span>
+                          )}
+                          {log.corrected && (
+                            <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 border border-amber-200">✎ Corrected</span>
+                          )}
+                          {log.isCorrectionOf !== undefined && (
+                            <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 border border-violet-200">Δ Correction</span>
+                          )}
+                          {log.isVoidOf !== undefined && (
+                            <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 border border-rose-200">↺ Reversal</span>
+                          )}
                         </div>
                         {log.notes && <p className="text-[11px] font-medium text-neutral-600 mt-1">{log.notes}</p>}
-                        {log.user && <p className="text-[10px] text-neutral-400 uppercase tracking-wide mt-1">- Authenticated via {log.user}</p>}
+                        {log.user  && <p className="text-[10px] text-neutral-400 uppercase tracking-wide mt-1">- Authenticated via {log.user}</p>}
                       </div>
-                      <div className="text-right flex flex-col">
+                      <div className="flex flex-col items-end gap-1 ml-3 shrink-0">
                         <span className="text-xs font-medium text-neutral-700">{log.date}</span>
                         <span className="text-[10px] text-neutral-400">{log.time}</span>
+                        {/* HQ-only correction controls — hidden for already-voided/corrected entries */}
+                        {isHqAdmin(user) && !log.voided && !log.isCorrectionOf && !log.isVoidOf && (
+                          <div className="flex gap-1 mt-1">
+                            {!log.corrected && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setCorrectionModal({ log, logIdx: idx, mode: 'edit' });
+                                  setCorrReason('');
+                                  setCorrNewQty(String(log.qty ?? '').replace(/[^0-9.\-]/g, ''));
+                                }}
+                                className="px-2 py-0.5 text-[10px] font-semibold rounded border border-violet-300 text-violet-700 hover:bg-violet-50 transition-colors"
+                                title="Correct this entry"
+                              >✎ Correct</button>
+                            )}
+                            {!log.voided && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setCorrectionModal({ log, logIdx: idx, mode: 'void' });
+                                  setCorrReason('');
+                                  setCorrNewQty('');
+                                }}
+                                className="px-2 py-0.5 text-[10px] font-semibold rounded border border-red-300 text-red-600 hover:bg-red-50 transition-colors"
+                                title="Void / reverse this entry"
+                              >⊘ Void</button>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
                   ))
@@ -2382,6 +2569,128 @@ export default function Inventory() {
           </div>
         )}
       </Drawer>
+
+      {/* ── HQ Correction / Void Modal ───────────────────────────────────────── */}
+      {correctionModal && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-[2px]">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden">
+            {/* Header */}
+            <div className={`px-6 py-4 ${correctionModal.mode === 'void' ? 'bg-red-600' : 'bg-violet-700'}`}>
+              <h2 className="text-base font-bold text-white">
+                {correctionModal.mode === 'void' ? '⊘ Void / Reverse Entry' : '✎ Correct Entry'}
+              </h2>
+              <p className="text-xs text-white/80 mt-0.5">
+                {correctionModal.mode === 'void'
+                  ? 'Creates an equal-opposite movement. Original record is preserved.'
+                  : 'Creates a delta correction movement. Original record is preserved.'}
+              </p>
+            </div>
+
+            <div className="px-6 py-5 space-y-4">
+              {/* Original entry info */}
+              <div className="bg-neutral-50 border border-neutral-200 rounded-lg px-4 py-3">
+                <p className="text-[10px] font-bold uppercase text-neutral-400 mb-1">Original Entry</p>
+                <div className="flex items-center gap-2">
+                  <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${
+                    correctionModal.log.type === 'Add' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
+                  }`}>{correctionModal.log.type}</span>
+                  <span className="text-sm font-semibold text-neutral-800">{correctionModal.log.qty}</span>
+                  <span className="text-[10px] text-neutral-400">{correctionModal.log.date} {correctionModal.log.time}</span>
+                </div>
+                {correctionModal.log.notes && (
+                  <p className="text-xs text-neutral-500 mt-1 italic">{correctionModal.log.notes}</p>
+                )}
+              </div>
+
+              {/* Reason — mandatory */}
+              <div>
+                <label className="text-xs font-semibold text-neutral-700 block mb-1">
+                  Reason <span className="text-red-500">*</span>
+                </label>
+                <select
+                  value={corrReason}
+                  onChange={e => setCorrReason(e.target.value)}
+                  className="w-full px-3 py-2 border border-neutral-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 bg-white"
+                >
+                  <option value="">— Select reason —</option>
+                  <option value="Wrong entry">Wrong entry</option>
+                  <option value="Duplicate entry">Duplicate entry</option>
+                  <option value="Unit mistake">Unit mistake</option>
+                  <option value="Count correction">Count correction</option>
+                  <option value="Other">Other</option>
+                </select>
+              </div>
+
+              {/* New qty — only for edit/correct mode */}
+              {correctionModal.mode === 'edit' && (
+                <div>
+                  <label className="text-xs font-semibold text-neutral-700 block mb-1">
+                    Corrected Quantity <span className="text-neutral-400 font-normal">(numeric, same unit)</span>
+                  </label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={corrNewQty}
+                    onChange={e => setCorrNewQty(e.target.value)}
+                    placeholder="e.g. 2000"
+                    className="w-full px-3 py-2 border border-neutral-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-400"
+                  />
+                  {corrNewQty && !isNaN(parseFloat(corrNewQty)) && (() => {
+                    const origNum = parseFloat(String(correctionModal.log.qty ?? '0').replace(/[^0-9.\-]/g, '')) || 0;
+                    const delta = parseFloat(corrNewQty) - origNum;
+                    if (delta === 0) return null;
+                    return (
+                      <p className={`text-xs font-semibold mt-1 ${delta > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                        → Will create a <strong>{delta > 0 ? `+${delta}` : delta}</strong> correction movement
+                      </p>
+                    );
+                  })()}
+                </div>
+              )}
+
+              {correctionModal.mode === 'void' && (() => {
+                const origNum = parseFloat(String(correctionModal.log.qty ?? '0').replace(/[^0-9.\-]/g, '')) || 0;
+                const isAdd = correctionModal.log.type === 'Add';
+                const reversal = isAdd ? -Math.abs(origNum) : Math.abs(origNum);
+                return (
+                  <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3">
+                    <p className="text-xs text-red-700 font-semibold">
+                      Will create a <strong>{reversal > 0 ? `+${reversal}` : reversal}</strong> reversal movement and mark original as Voided.
+                    </p>
+                  </div>
+                );
+              })()}
+
+              {/* Disclaimer */}
+              <p className="text-[10px] text-neutral-400 italic">
+                ⚠ Original history is never deleted. This creates a new audit trail entry in inventory_movements.
+              </p>
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 pb-5 flex gap-3">
+              <button
+                type="button"
+                onClick={() => { setCorrectionModal(null); setCorrReason(''); setCorrNewQty(''); }}
+                className="flex-1 px-4 py-2 text-sm font-medium bg-neutral-100 text-neutral-700 border border-neutral-200 rounded-lg hover:bg-neutral-200 transition-colors"
+              >Cancel</button>
+              <button
+                type="button"
+                disabled={isCorrSaving || !corrReason}
+                onClick={correctionModal.mode === 'void' ? commitVoid : commitCorrection}
+                className={`flex-1 px-4 py-2 text-sm font-bold rounded-lg text-white transition-colors flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed ${
+                  correctionModal.mode === 'void' ? 'bg-red-600 hover:bg-red-700' : 'bg-violet-700 hover:bg-violet-800'
+                }`}
+              >
+                {isCorrSaving
+                  ? <><div className="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Saving…</>
+                  : correctionModal.mode === 'void' ? '⊘ Confirm Void' : '✎ Confirm Correction'
+                }
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Edit Item Drawer ─────────────────────────────────────────────────── */}
       <Drawer
