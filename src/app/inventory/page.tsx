@@ -418,6 +418,23 @@ export default function Inventory() {
   const displayStart = filteredInventory.length === 0 ? 0 : pageStart + 1;
   const displayEnd   = pageEnd;
 
+  const activeSkuCount = inventoryData.length;
+  const inventoryValue = inventoryData.reduce(
+    (sum, item) => sum + (Number(item.inStock) || 0) * (Number(item.preferredCost ?? item.cost) || 0),
+    0
+  );
+  const lowStockCount = inventoryData.filter(item => {
+    const par = Number(item.parLevel) || 0;
+    if (par <= 0) return false;
+    const ratio = (Number(item.inStock) || 0) / par;
+    return ratio >= 0.3 && ratio <= 0.7;
+  }).length;
+  const criticalStockCount = inventoryData.filter(item => {
+    const par = Number(item.parLevel) || 0;
+    if (par <= 0) return false;
+    return ((Number(item.inStock) || 0) / par) < 0.3;
+  }).length;
+
   const clearFilters = () => {
     setSearchQuery("");
     setFilterStatus("All");
@@ -1873,20 +1890,77 @@ export default function Inventory() {
     }
   };
 
-  if (isLoading) return <div className="animate-pulse flex items-center justify-center p-12 text-neutral-400">Loading Inventory Module...</div>;
+  if (isLoading) return (
+    <div className="-m-6 flex min-h-[calc(100vh-4rem)] items-center justify-center bg-[#070707] p-12 text-zinc-500">
+      <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+      Loading Inventory Module...
+    </div>
+  );
 
+
+  // ── Pre-compute correction modal values (Turbopack-safe, outside JSX) ──────
+  const _corrOrigNum = correctionModal
+    ? parseFloat(String(correctionModal.log.qty ?? '0').replace(/[^0-9.\-]/g, '')) || 0
+    : 0;
+  const _corrDelta = correctionModal && corrNewQty && !isNaN(parseFloat(corrNewQty))
+    ? parseFloat(corrNewQty) - _corrOrigNum
+    : null;
+  const _voidReversal = correctionModal
+    ? (correctionModal.log.type === 'Add' ? -Math.abs(_corrOrigNum) : Math.abs(_corrOrigNum))
+    : 0;
 
   return (
-    <div className="space-y-4 sm:space-y-6">
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+
+    <div className="-m-6 min-h-[calc(100vh-4rem)] bg-[#070707] p-6 text-zinc-100">
+      <style>{`
+        body .flex.bg-neutral-50.text-neutral-900.min-h-screen {
+          background: #070707 !important;
+          color: #e4e4e7 !important;
+        }
+        body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] {
+          background: #111111 !important;
+          border-color: #262626 !important;
+        }
+        body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] a,
+        body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] button {
+          color: #a1a1aa !important;
+        }
+        body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] a[class*="bg-brand-50"],
+        body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] a:hover {
+          background: #2563eb !important;
+          color: #ffffff !important;
+        }
+        body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] svg {
+          color: currentColor !important;
+        }
+        body header[class*="bg-white"][class*="border-b"] {
+          background: #111111 !important;
+          border-color: #262626 !important;
+          box-shadow: none !important;
+        }
+        body header[class*="bg-white"] h1,
+        body header[class*="bg-white"] button,
+        body header[class*="bg-white"] span {
+          color: #e4e4e7 !important;
+        }
+        body header[class*="bg-white"] input,
+        body header[class*="bg-white"] [role="button"] {
+          background: #171717 !important;
+          border-color: #262626 !important;
+          color: #e4e4e7 !important;
+        }
+      `}</style>
+      <div className="mx-auto max-w-[1408px] space-y-5">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <h2 className="text-xl sm:text-2xl font-bold tracking-tight">Inventory Items</h2>
-          <p className="text-neutral-500 text-xs sm:text-sm mt-0.5">Manage your ingredient list and maintain optimal par levels.</p>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-zinc-500">Inventory</p>
+          <h2 className="mt-2 text-2xl font-semibold tracking-tight text-white">Inventory Items</h2>
+          <p className="mt-1 text-sm text-zinc-500">Manage your ingredient list and maintain optimal par levels.</p>
         </div>
-        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
           <button
             onClick={() => setIsHistoryDrawerOpen(true)}
-            className="flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs sm:text-sm font-medium bg-neutral-100 border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-200 shadow-sm"
+            className="flex items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-[#151515] px-3 py-2 text-xs font-medium text-zinc-300 shadow-sm transition-colors hover:bg-[#1f1f1f] sm:text-sm"
           >
             <History className="h-3.5 w-3.5" />
             <span className="hidden xs:inline sm:inline">History</span>
@@ -1897,7 +1971,7 @@ export default function Inventory() {
               setImportErrors([]);
               setIsImportDrawerOpen(true);
             }}
-            className="flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs sm:text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 shadow-sm"
+            className="flex items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-[#151515] px-3 py-2 text-xs font-medium text-zinc-300 shadow-sm transition-colors hover:bg-[#1f1f1f] sm:text-sm"
           >
             <Upload className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">Import Inventory</span>
@@ -1911,7 +1985,7 @@ export default function Inventory() {
               setSupplierImportSummary(null);
               setIsSupplierImportDrawerOpen(true);
             }}
-            className="flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs sm:text-sm font-medium bg-violet-600 text-white rounded-lg hover:bg-violet-700 shadow-sm transition-colors"
+            className="flex items-center justify-center gap-1.5 rounded-lg bg-violet-600 px-3 py-2 text-xs font-semibold text-white shadow-lg shadow-violet-600/20 transition-colors hover:bg-violet-500 sm:text-sm"
           >
             <Upload className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">Import Suppliers</span>
@@ -1919,45 +1993,72 @@ export default function Inventory() {
           </button>
           <button
             onClick={() => setIsAddDrawerOpen(true)}
-            className="flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs sm:text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 shadow-sm transition-colors"
+            className="flex items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white shadow-lg shadow-blue-600/20 transition-colors hover:bg-blue-500 sm:text-sm"
           >
             <Plus className="h-3.5 w-3.5" /> Add Item
           </button>
         </div>
       </div>
 
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {[
+          { label: "Active SKUs", value: activeSkuCount.toLocaleString(), helper: `${filteredInventory.length.toLocaleString()} match filters`, icon: <ShoppingCart className="h-5 w-5" />, tone: "blue" },
+          { label: "Inventory Value", value: `$${inventoryValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, helper: "Stock × preferred cost", icon: <Download className="h-5 w-5" />, tone: "emerald" },
+          { label: "Low Stock", value: lowStockCount.toLocaleString(), helper: "30-70% of par level", icon: <AlertTriangle className="h-5 w-5" />, tone: "amber" },
+          { label: "Critical", value: criticalStockCount.toLocaleString(), helper: "Below 30% of par level", icon: <AlertTriangle className="h-5 w-5" />, tone: "red" },
+        ].map(metric => (
+          <Card key={metric.label} className="rounded-xl border-white/10 bg-[#111111] shadow-[0_18px_50px_rgba(0,0,0,0.28)]">
+            <CardContent className="flex items-start justify-between p-4">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">{metric.label}</p>
+                <p className="mt-3 text-2xl font-semibold tracking-tight text-white">{metric.value}</p>
+                <p className="mt-1 text-xs text-zinc-600">{metric.helper}</p>
+              </div>
+              <div className={`rounded-lg p-2 ${
+                metric.tone === "emerald" ? "bg-emerald-500/15 text-emerald-300" :
+                metric.tone === "amber" ? "bg-amber-500/15 text-amber-300" :
+                metric.tone === "red" ? "bg-red-500/15 text-red-300" :
+                "bg-blue-500/15 text-blue-300"
+              }`}>
+                {metric.icon}
+              </div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+
       {/* ── HQ-only: Duplicate Detection Panel ──────────────────────────────── */}
       {isHqAdmin(user) && duplicateGroups.length > 0 && (
-        <div className="rounded-xl border border-amber-200 bg-amber-50 overflow-hidden">
+        <div className="overflow-hidden rounded-xl border border-amber-500/20 bg-amber-500/10">
           <button
-            className="w-full flex items-center justify-between px-4 py-3 text-sm font-semibold text-amber-800 hover:bg-amber-100 transition-colors"
+            className="flex w-full items-center justify-between px-4 py-3 text-sm font-semibold text-amber-200 transition-colors hover:bg-amber-500/10"
             onClick={() => setShowDuplicatePanel(p => !p)}
           >
             <span className="flex items-center gap-2">
-              <AlertTriangle className="h-4 w-4 text-amber-500" />
+              <AlertTriangle className="h-4 w-4 text-amber-300" />
               Potential Duplicate Products
-              <span className="ml-1 text-[10px] font-bold bg-amber-200 text-amber-800 px-2 py-0.5 rounded-full">
+              <span className="ml-1 rounded-full bg-amber-400/20 px-2 py-0.5 text-[10px] font-bold text-amber-100">
                 {duplicateGroups.length}
               </span>
             </span>
             {showDuplicatePanel
-              ? <ChevronDown className="h-4 w-4 text-amber-500" />
-              : <ChevronRight className="h-4 w-4 text-amber-500" />
+              ? <ChevronDown className="h-4 w-4 text-amber-300" />
+              : <ChevronRight className="h-4 w-4 text-amber-300" />
             }
           </button>
 
           {showDuplicatePanel && (
             <div className="px-4 pb-4 space-y-3">
-              <p className="text-xs text-amber-700">
+              <p className="text-xs text-amber-200/80">
                 These product names normalize to the same canonical form but have different shared identities (item_id).
                 This may indicate accidental duplicate entries. Review and merge the identity if appropriate.
               </p>
               {duplicateGroups.map((group) => (
-                <div key={group.normalizedName} className="bg-white rounded-lg border border-amber-200 p-3 space-y-2">
+                <div key={group.normalizedName} className="space-y-2 rounded-lg border border-amber-500/20 bg-[#111111] p-3">
                   <div className="flex items-center gap-2">
-                    <span className="text-xs font-bold text-amber-800 uppercase tracking-wide">Canonical form:</span>
-                    <span className="font-mono text-xs bg-amber-100 text-amber-900 px-2 py-0.5 rounded">&quot;{group.normalizedName}&quot;</span>
-                    <span className="text-[10px] text-amber-600">{group.candidates.length} distinct item_ids</span>
+                    <span className="text-xs font-bold uppercase tracking-wide text-amber-200">Canonical form:</span>
+                    <span className="rounded bg-amber-400/10 px-2 py-0.5 font-mono text-xs text-amber-100">&quot;{group.normalizedName}&quot;</span>
+                    <span className="text-[10px] text-amber-300/80">{group.candidates.length} distinct item_ids</span>
                   </div>
                   <div className="space-y-1.5">
                     {group.candidates.map((candidate, ci) => {
@@ -1965,15 +2066,15 @@ export default function Inventory() {
                       const isCanonical = ci === 0; // first (oldest by sort) treated as canonical
                       return (
                         <div key={candidate.itemId} className={`flex flex-col sm:flex-row sm:items-center gap-2 p-2 rounded-lg text-xs ${
-                          isCanonical ? 'bg-violet-50 border border-violet-200' : 'bg-neutral-50 border border-neutral-200'
+                          isCanonical ? 'border border-violet-500/30 bg-violet-500/10' : 'border border-white/10 bg-[#171717]'
                         }`}>
                           <div className="flex-1 min-w-0">
-                            <span className="font-semibold text-neutral-800">{repRow?.name ?? "(no name)"}</span>
-                            {isCanonical && <span className="ml-2 text-[10px] font-bold text-violet-600 bg-violet-100 px-1.5 py-0.5 rounded">CANONICAL</span>}
-                            <div className="text-[10px] text-neutral-500 font-mono mt-0.5 truncate">
+                            <span className="font-semibold text-zinc-100">{repRow?.name ?? "(no name)"}</span>
+                            {isCanonical && <span className="ml-2 rounded bg-violet-500/20 px-1.5 py-0.5 text-[10px] font-bold text-violet-200">CANONICAL</span>}
+                            <div className="mt-0.5 truncate font-mono text-[10px] text-zinc-500">
                               item_id: {candidate.itemId.slice(0, 18)}…
                             </div>
-                            <div className="text-[10px] text-neutral-500 mt-0.5">
+                            <div className="mt-0.5 text-[10px] text-zinc-500">
                               {candidate.rows.length} location{candidate.rows.length !== 1 ? 's' : ''}
                               {' · '}
                               Cost: ${(repRow?.cost ?? 0).toFixed(2)}/{repRow?.baseUnit ?? repRow?.unit ?? 'unit'}
@@ -1982,7 +2083,7 @@ export default function Inventory() {
                           <div className="flex items-center gap-1.5 shrink-0">
                             <button
                               onClick={() => setSharedLinkedDrawerItem(repRow)}
-                              className="flex items-center gap-1 px-2 py-1 text-[10px] font-semibold bg-white border border-neutral-200 text-neutral-700 rounded-md hover:bg-neutral-50 transition-colors shadow-sm"
+                              className="flex items-center gap-1 rounded-md border border-white/10 bg-[#202020] px-2 py-1 text-[10px] font-semibold text-zinc-200 shadow-sm transition-colors hover:bg-[#2a2a2a]"
                             >
                               <Link2 className="h-3 w-3" /> View Linked
                             </button>
@@ -1996,7 +2097,7 @@ export default function Inventory() {
                                   canonicalName:   group.candidates[0].rows[0]?.name ?? "",
                                   locationId:      repRow.locationId ?? "LOC-HQ",
                                 })}
-                                className="flex items-center gap-1 px-2 py-1 text-[10px] font-semibold bg-violet-600 text-white rounded-md hover:bg-violet-700 transition-colors shadow-sm"
+                                className="flex items-center gap-1 rounded-md bg-violet-600 px-2 py-1 text-[10px] font-semibold text-white shadow-sm transition-colors hover:bg-violet-500"
                               >
                                 <GitMerge className="h-3 w-3" /> Merge
                               </button>
@@ -2013,23 +2114,23 @@ export default function Inventory() {
         </div>
       )}
 
-      <Card className="shadow-sm border-neutral-200 overflow-hidden">
-        <CardHeader className="flex flex-col space-y-2 sm:space-y-0 sm:flex-row sm:items-center justify-between py-3 sm:py-4 px-3 sm:px-4 border-b border-neutral-100 bg-white">
+      <Card className="overflow-hidden rounded-xl border-white/10 bg-[#111111] shadow-[0_18px_50px_rgba(0,0,0,0.32)]">
+        <CardHeader className="flex flex-col justify-between gap-3 border-b border-white/10 bg-[#111111] px-4 py-4 sm:flex-row sm:items-center">
           <div className="relative w-full sm:w-[360px]">
             <div className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none">
-              <Search className="h-3.5 w-3.5 text-neutral-400" />
+              <Search className="h-3.5 w-3.5 text-zinc-500" />
             </div>
             <input
               type="text"
               placeholder="Search items…"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-8 pr-3 py-1.5 border border-neutral-200 rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 focus:border-brand-500 w-full bg-neutral-50 hover:bg-white transition-colors"
+              className="w-full rounded-lg border border-white/10 bg-[#171717] py-2 pl-8 pr-3 text-sm text-zinc-100 transition-colors placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-blue-500"
             />
           </div>
           <div className="flex flex-wrap gap-1.5">
             <select
-              className="px-2 py-1.5 text-xs sm:text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm"
+              className="rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-xs font-medium text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500 sm:text-sm"
               value={filterStatus}
               onChange={(e) => setFilterStatus(e.target.value)}
             >
@@ -2039,7 +2140,7 @@ export default function Inventory() {
               <option value="Critical">Critical</option>
             </select>
             <select
-              className="px-2 py-1.5 text-xs sm:text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm"
+              className="rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-xs font-medium text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500 sm:text-sm"
               value={filterCategory}
               onChange={(e) => setFilterCategory(e.target.value)}
             >
@@ -2047,7 +2148,7 @@ export default function Inventory() {
               {uniqueCategories.map(c => <option key={c as string} value={c as string}>{c as string}</option>)}
             </select>
             <select
-              className="px-2 py-1.5 text-xs sm:text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm"
+              className="rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-xs font-medium text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500 sm:text-sm"
               value={filterSupplier}
               onChange={(e) => setFilterSupplier(e.target.value)}
             >
@@ -2058,7 +2159,7 @@ export default function Inventory() {
             {(searchQuery || filterStatus !== 'All' || filterCategory !== 'All' || filterSupplier !== 'All') && (
               <button
                 onClick={clearFilters}
-                className="text-xs font-semibold text-brand-600 hover:text-brand-700 hover:bg-brand-50 rounded-lg px-2 transition-colors"
+                className="rounded-lg px-2 text-xs font-semibold text-blue-300 transition-colors hover:bg-blue-500/10 hover:text-blue-200"
               >
                 Clear
               </button>
@@ -2067,13 +2168,13 @@ export default function Inventory() {
         </CardHeader>
         <CardContent className="p-0">
           {selectedItemIds.length > 0 && (
-            <div className="bg-brand-50 border-b border-brand-100 p-3 px-6 flex justify-between items-center transition-all">
-              <span className="text-sm font-semibold text-brand-800">{selectedItemIds.length} operational node{selectedItemIds.length !== 1 ? 's' : ''} targeted</span>
+            <div className="flex items-center justify-between border-b border-blue-500/20 bg-blue-500/10 p-3 px-6 transition-all">
+              <span className="text-sm font-semibold text-blue-100">{selectedItemIds.length} operational node{selectedItemIds.length !== 1 ? 's' : ''} targeted</span>
               <div className="flex gap-4 items-center">
-                <button onClick={() => setSelectedItemIds([])} className="text-xs font-semibold text-brand-700 hover:text-brand-900 transition-colors">Clear Targets</button>
+                <button onClick={() => setSelectedItemIds([])} className="text-xs font-semibold text-blue-200 transition-colors hover:text-white">Clear Targets</button>
                 <button
                   onClick={() => setIsDeleteModalOpen(true)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold bg-danger-600 text-white rounded hover:bg-danger-700 transition-colors shadow-sm"
+                  className="flex items-center gap-1.5 rounded bg-red-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm transition-colors hover:bg-red-500"
                 >
                   <Trash2 className="h-3 w-3" /> Execute Purge
                 </button>
@@ -2082,12 +2183,12 @@ export default function Inventory() {
           )}
           <div className="overflow-x-auto">
           <Table className="text-xs sm:text-sm">
-            <TableHeader className="bg-neutral-50/80 text-xs text-neutral-500 uppercase tracking-wider border-b border-neutral-200">
+            <TableHeader className="border-b border-white/10 bg-[#161616] text-xs uppercase tracking-[0.16em] text-zinc-500">
               <TableRow>
                 <TableHead className="w-[36px] pl-3 sm:pl-6 pr-1 py-2 sm:py-3">
                   <input
                     type="checkbox"
-                    className="h-3.5 w-3.5 sm:h-4 sm:w-4 rounded border-neutral-300 text-brand-600 focus:ring-brand-500 cursor-pointer"
+                    className="h-3.5 w-3.5 cursor-pointer rounded border-white/20 bg-[#171717] text-blue-600 focus:ring-blue-500 sm:h-4 sm:w-4"
                     checked={filteredInventory.length > 0 && selectedItemIds.length === filteredInventory.length}
                     onChange={(e) => {
                       if (e.target.checked) setSelectedItemIds(filteredInventory.map(i => i.id));
@@ -2095,13 +2196,13 @@ export default function Inventory() {
                     }}
                   />
                 </TableHead>
-                <TableHead className="px-2 sm:px-3 py-2 sm:py-3 font-semibold cursor-pointer select-none hover:text-brand-600 transition-colors" onClick={() => { setSortDirection(sortKey === 'name' && sortDirection === 'asc' ? 'desc' : 'asc'); setSortKey('name') }}>Item Name</TableHead>
-                <TableHead className="px-2 sm:px-3 py-2 sm:py-3 font-semibold cursor-pointer select-none hover:text-brand-600 transition-colors hidden sm:table-cell" onClick={() => { setSortDirection(sortKey === 'category' && sortDirection === 'asc' ? 'desc' : 'asc'); setSortKey('category') }}>Category</TableHead>
-                <TableHead className="py-2 sm:py-3 font-semibold text-neutral-500 hidden md:table-cell">Unit</TableHead>
-                <TableHead className="py-2 sm:py-3 font-semibold cursor-pointer select-none hover:text-brand-600 transition-colors hidden lg:table-cell" onClick={() => { setSortDirection(sortKey === 'supplier' && sortDirection === 'asc' ? 'desc' : 'asc'); setSortKey('supplier') }}>Preferred Supplier</TableHead>
-                <TableHead className="py-2 sm:py-3 font-semibold text-neutral-500">Stock &amp; Par</TableHead>
-                <TableHead className="py-2 sm:py-3 font-semibold text-neutral-500 hidden sm:table-cell">Cost / Unit</TableHead>
-                <TableHead className="py-2 sm:py-3 font-semibold text-neutral-500">Status</TableHead>
+                <TableHead className="px-2 py-2 font-semibold transition-colors hover:text-blue-300 sm:px-3 sm:py-3 cursor-pointer select-none" onClick={() => { setSortDirection(sortKey === 'name' && sortDirection === 'asc' ? 'desc' : 'asc'); setSortKey('name') }}>Item Name</TableHead>
+                <TableHead className="hidden px-2 py-2 font-semibold transition-colors hover:text-blue-300 sm:table-cell sm:px-3 sm:py-3 cursor-pointer select-none" onClick={() => { setSortDirection(sortKey === 'category' && sortDirection === 'asc' ? 'desc' : 'asc'); setSortKey('category') }}>Category</TableHead>
+                <TableHead className="hidden py-2 font-semibold text-zinc-500 sm:py-3 md:table-cell">Unit</TableHead>
+                <TableHead className="hidden py-2 font-semibold transition-colors hover:text-blue-300 sm:py-3 lg:table-cell cursor-pointer select-none" onClick={() => { setSortDirection(sortKey === 'supplier' && sortDirection === 'asc' ? 'desc' : 'asc'); setSortKey('supplier') }}>Preferred Supplier</TableHead>
+                <TableHead className="py-2 font-semibold text-zinc-500 sm:py-3">Stock &amp; Par</TableHead>
+                <TableHead className="hidden py-2 font-semibold text-zinc-500 sm:table-cell sm:py-3">Cost / Unit</TableHead>
+                <TableHead className="py-2 font-semibold text-zinc-500 sm:py-3">Status</TableHead>
                 <TableHead className="px-2 sm:px-4 py-2 sm:py-3 text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
@@ -2114,14 +2215,14 @@ export default function Inventory() {
                 return (
                   <TableRow
                     key={item.id}
-                    className={`hover:bg-neutral-50/50 cursor-pointer transition-colors ${selectedItemIds.includes(item.id) ? 'bg-brand-50/30' : ''}`}
+                    className={`cursor-pointer border-b border-white/5 transition-colors hover:bg-[#171717] ${selectedItemIds.includes(item.id) ? 'bg-blue-500/10' : 'bg-[#111111]'}`}
                     onClick={() => openItemDrawer(item)}
                   >
                     <TableCell className="pl-3 sm:pl-6 pr-1 py-2.5 sm:py-4">
                       <div onClick={e => e.stopPropagation()}>
                         <input
                           type="checkbox"
-                          className="h-3.5 w-3.5 rounded border-neutral-300 text-brand-600 focus:ring-brand-500 cursor-pointer"
+                          className="h-3.5 w-3.5 cursor-pointer rounded border-white/20 bg-[#171717] text-blue-600 focus:ring-blue-500"
                           checked={selectedItemIds.includes(item.id)}
                           onChange={(e) => {
                             if (e.target.checked) setSelectedItemIds([...selectedItemIds, item.id]);
@@ -2134,9 +2235,9 @@ export default function Inventory() {
                       <div className="flex flex-col gap-0.5">
                         {/* Name + type badges on same line */}
                         <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="font-semibold text-neutral-900 text-xs sm:text-sm leading-tight">{item.name}</span>
-                          {item.itemType === 'Preparation' && <Badge variant="warning" className="text-[9px] px-1 py-0 border-none bg-orange-100 text-orange-700">PREP</Badge>}
-                          {item.itemType === 'Finished Good' && <Badge variant="success" className="text-[9px] px-1 py-0 border-none bg-emerald-100 text-emerald-700">FG</Badge>}
+                          <span className="text-xs font-semibold leading-tight text-zinc-100 sm:text-sm">{item.name}</span>
+                          {item.itemType === 'Preparation' && <Badge variant="warning" className="border-none bg-orange-500/15 px-1 py-0 text-[9px] text-orange-300">PREP</Badge>}
+                          {item.itemType === 'Finished Good' && <Badge variant="success" className="border-none bg-emerald-500/15 px-1 py-0 text-[9px] text-emerald-300">FG</Badge>}
                         </div>
                         {/* HQ-only: Shared Product badge — shown when ≥ 2 rows share this item_id */}
                         {isHqAdmin(user) && item.itemId && (linkedCountByItemId.get(item.itemId) ?? 0) > 1 && (() => {
@@ -2145,7 +2246,7 @@ export default function Inventory() {
                             <button
                               onClick={(e) => { e.stopPropagation(); setSharedLinkedDrawerItem(item); }}
                               title={`Shared across ${count} location rows — click to inspect all`}
-                              className="self-start inline-flex items-center gap-1 px-1.5 py-0.5 text-[9px] font-bold rounded-full bg-violet-100 text-violet-700 border border-violet-200 hover:bg-violet-200 active:bg-violet-300 transition-colors cursor-pointer select-none"
+                              className="inline-flex cursor-pointer select-none items-center gap-1 self-start rounded-full border border-violet-500/20 bg-violet-500/10 px-1.5 py-0.5 text-[9px] font-bold text-violet-200 transition-colors hover:bg-violet-500/20"
                             >
                               <Link2 className="h-2.5 w-2.5 shrink-0" />
                               Shared &bull; {count} location{count !== 1 ? "s" : ""}
@@ -2155,13 +2256,13 @@ export default function Inventory() {
                       </div>
                     </TableCell>
                     <TableCell className="px-2 sm:px-3 py-2.5 sm:py-4 hidden sm:table-cell">
-                      <span className="text-[10px] sm:text-xs font-semibold px-1.5 sm:px-2 py-0.5 sm:py-1 bg-neutral-100 text-neutral-600 border border-neutral-200 rounded-md whitespace-nowrap">{item.category}</span>
+                      <span className="whitespace-nowrap rounded-md border border-white/10 bg-[#1a1a1a] px-1.5 py-0.5 text-[10px] font-semibold text-zinc-400 sm:px-2 sm:py-1 sm:text-xs">{item.category}</span>
                     </TableCell>
                     <TableCell className="py-2.5 sm:py-4 hidden md:table-cell">
                       <div className="flex flex-col gap-0.5">
-                        <span className="text-xs font-semibold text-neutral-500 uppercase tracking-wider">{item.baseUnit || item.unit}</span>
+                        <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400">{item.baseUnit || item.unit}</span>
                         {item.purchaseUnits && item.purchaseUnits.length > 0 && (
-                          <span className="text-[10px] text-neutral-400">
+                          <span className="text-[10px] text-zinc-600">
                             Buy: {item.purchaseUnits.find((u: any) => u.isPrimary)?.name || item.purchaseUnits[0].name}
                           </span>
                         )}
@@ -2171,25 +2272,25 @@ export default function Inventory() {
                       {(() => {
                         const displayName = item.preferredSupplierName ?? getSupplierName(item.supplierId);
                         console.log('[ListRow supplier]', { id: item.id, name: item.name, preferredSupplierName: item.preferredSupplierName, supplierId: item.supplierId, displayed: displayName });
-                        return <span className="text-xs sm:text-sm font-medium text-neutral-700 truncate max-w-[120px] block">{displayName}</span>;
+                        return <span className="block max-w-[120px] truncate text-xs font-medium text-zinc-300 sm:text-sm">{displayName}</span>;
                       })()}
                     </TableCell>
                     <TableCell className="py-2.5 sm:py-4">
                       <div className="flex flex-col gap-0.5">
                         <div className="flex items-baseline gap-0.5">
-                          <span className={`text-xs sm:text-sm font-bold ${isCritical ? "text-danger-600" : isLowStock ? "text-warning-600" : "text-neutral-900"}`}>
+                          <span className={`text-xs font-bold sm:text-sm ${isCritical ? "text-red-400" : isLowStock ? "text-amber-300" : "text-zinc-100"}`}>
                             {item.inStock}
                           </span>
-                          <span className="text-[10px] text-neutral-500">/ {item.parLevel} {item.baseUnit || item.unit}</span>
+                          <span className="text-[10px] text-zinc-600">/ {item.parLevel} {item.baseUnit || item.unit}</span>
                         </div>
                         {item.purchaseUnits && item.purchaseUnits.length > 0 && (() => {
                           const pUnit = item.purchaseUnits.find((u: any) => u.isPrimary) || item.purchaseUnits[0];
                           const pStock = (item.inStock / pUnit.conversion).toFixed(1);
-                          return <span className="text-[10px] text-brand-600 font-semibold block">{pStock} {pUnit.name}s</span>
+                          return <span className="block text-[10px] font-semibold text-blue-300">{pStock} {pUnit.name}s</span>
                         })()}
                       </div>
                     </TableCell>
-                    <TableCell className="py-2.5 sm:py-4 text-xs sm:text-sm text-neutral-700 hidden sm:table-cell">
+                    <TableCell className="hidden py-2.5 text-xs text-zinc-300 sm:table-cell sm:py-4 sm:text-sm">
                       ${(item.preferredCost ?? item.cost ?? 0).toFixed(2)}
                     </TableCell>
                     <TableCell className="py-2.5 sm:py-4">
@@ -2209,7 +2310,7 @@ export default function Inventory() {
                         {(isLowStock || isCritical) && (
                           <button
                             onClick={(e) => handleQuickReorder(item, e)}
-                            className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 bg-brand-50 hover:bg-brand-100 text-brand-700 text-xs font-semibold rounded-md transition-colors shadow-sm border border-brand-200"
+                            className="hidden items-center gap-1.5 rounded-md border border-blue-500/20 bg-blue-500/10 px-2.5 py-1.5 text-xs font-semibold text-blue-200 shadow-sm transition-colors hover:bg-blue-500/20 sm:flex"
                           >
                             <ShoppingCart className="h-3 w-3" />
                             <span className="hidden md:inline">Quick Reorder</span>
@@ -2218,7 +2319,7 @@ export default function Inventory() {
                         {/* Three-dot action menu */}
                         <div className="relative">
                           <button
-                            className="p-1.5 text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100 rounded-md transition-colors"
+                            className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-white/10 hover:text-zinc-100"
                             onClick={() => setOpenMenuId(openMenuId === item.id ? null : item.id)}
                             aria-label="Item actions"
                           >
@@ -2231,23 +2332,23 @@ export default function Inventory() {
                                 className="fixed inset-0 z-10"
                                 onClick={() => setOpenMenuId(null)}
                               />
-                              <div className="absolute right-0 top-8 z-20 bg-white border border-neutral-200 rounded-xl shadow-xl py-1 min-w-[200px] animate-in fade-in slide-in-from-top-1 duration-100">
+                              <div className="absolute right-0 top-8 z-20 min-w-[200px] animate-in rounded-xl border border-white/10 bg-[#151515] py-1 shadow-2xl shadow-black/50 fade-in slide-in-from-top-1 duration-100">
                                 <button
-                                  className="w-full text-left px-4 py-2.5 text-sm font-medium text-neutral-700 hover:bg-neutral-50 flex items-center gap-2.5 transition-colors"
+                                  className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm font-medium text-zinc-200 transition-colors hover:bg-white/10"
                                   onClick={() => openEditDrawer(item)}
                                 >
-                                  <Save className="h-3.5 w-3.5 text-brand-600" /> Edit Item
+                                  <Save className="h-3.5 w-3.5 text-blue-300" /> Edit Item
                                 </button>
                                 <button
-                                  className="w-full text-left px-4 py-2.5 text-sm font-medium text-neutral-700 hover:bg-neutral-50 flex items-center gap-2.5 transition-colors"
+                                  className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm font-medium text-zinc-200 transition-colors hover:bg-white/10"
                                   onClick={() => { setOpenMenuId(null); openItemDrawer(item); }}
                                 >
-                                  <ArrowUp className="h-3.5 w-3.5 text-success-600" /> Adjust Stock
+                                  <ArrowUp className="h-3.5 w-3.5 text-emerald-300" /> Adjust Stock
                                 </button>
                                 {/* HQ-only: Allocate to Locations */}
                                 {isHqAdmin(user) && (
                                   <button
-                                    className="w-full text-left px-4 py-2.5 text-sm font-medium text-violet-700 hover:bg-violet-50 flex items-center gap-2.5 transition-colors"
+                                    className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm font-medium text-violet-200 transition-colors hover:bg-violet-500/10"
                                     onClick={() => {
                                       setOpenMenuId(null);
                                       setAllocationItem(item);
@@ -2261,9 +2362,9 @@ export default function Inventory() {
                                     <MapPin className="h-3.5 w-3.5" /> Allocate to Locations
                                   </button>
                                 )}
-                                <div className="border-t border-neutral-100 my-1" />
+                                <div className="my-1 border-t border-white/10" />
                                 <button
-                                  className="w-full text-left px-4 py-2.5 text-sm font-medium text-danger-600 hover:bg-danger-50 flex items-center gap-2.5 transition-colors"
+                                  className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm font-medium text-red-300 transition-colors hover:bg-red-500/10"
                                   onClick={() => handleDeleteItem(item)}
                                 >
                                   <Trash2 className="h-3.5 w-3.5" /> Delete Item
@@ -2278,7 +2379,7 @@ export default function Inventory() {
                 );
               }) : (
                 <TableRow>
-                  <TableCell colSpan={6} className="text-center py-10 text-neutral-500 text-sm">
+                  <TableCell colSpan={6} className="py-10 text-center text-sm text-zinc-500">
                     No inventory items match your active filters.
                   </TableCell>
                 </TableRow>
@@ -2288,8 +2389,8 @@ export default function Inventory() {
           </div>{/* /overflow-x-auto */}
 
           {/* ── Pagination controls ─────────────────────────────────────── */}
-          <div className="flex items-center justify-between px-4 py-3 border-t border-neutral-100 bg-white">
-            <span className="text-xs text-neutral-500 select-none">
+          <div className="flex items-center justify-between border-t border-white/10 bg-[#111111] px-4 py-3">
+            <span className="select-none text-xs text-zinc-500">
               {filteredInventory.length === 0
                 ? "No items"
                 : `Showing ${displayStart}–${displayEnd} of ${filteredInventory.length} items`}
@@ -2299,18 +2400,18 @@ export default function Inventory() {
                 id="inventory-pagination-prev"
                 onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
                 disabled={safeCurrentPage <= 1}
-                className="px-3 py-1.5 text-xs font-semibold rounded-md border border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                className="rounded-md border border-white/10 bg-[#171717] px-3 py-1.5 text-xs font-semibold text-zinc-300 transition-colors hover:bg-[#202020] disabled:cursor-not-allowed disabled:opacity-40"
               >
                 ← Previous
               </button>
-              <span className="text-xs text-neutral-500 select-none">
+              <span className="select-none text-xs text-zinc-500">
                 Page {safeCurrentPage} of {totalPages}
               </span>
               <button
                 id="inventory-pagination-next"
                 onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
                 disabled={safeCurrentPage >= totalPages}
-                className="px-3 py-1.5 text-xs font-semibold rounded-md border border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                className="rounded-md border border-white/10 bg-[#171717] px-3 py-1.5 text-xs font-semibold text-zinc-300 transition-colors hover:bg-[#202020] disabled:cursor-not-allowed disabled:opacity-40"
               >
                 Next →
               </button>
@@ -2635,31 +2736,22 @@ export default function Inventory() {
                     placeholder="e.g. 2000"
                     className="w-full px-3 py-2 border border-neutral-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-400"
                   />
-                  {corrNewQty && !isNaN(parseFloat(corrNewQty)) && (() => {
-                    const origNum = parseFloat(String(correctionModal.log.qty ?? '0').replace(/[^0-9.\-]/g, '')) || 0;
-                    const delta = parseFloat(corrNewQty) - origNum;
-                    if (delta === 0) return null;
-                    return (
-                      <p className={`text-xs font-semibold mt-1 ${delta > 0 ? 'text-green-600' : 'text-red-600'}`}>
-                        → Will create a <strong>{delta > 0 ? `+${delta}` : delta}</strong> correction movement
-                      </p>
-                    );
-                  })()}
+                  {_corrDelta !== null && _corrDelta !== 0 && (
+                    <p className={`text-xs font-semibold mt-1 ${_corrDelta > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                      → Will create a <strong>{_corrDelta > 0 ? `+${_corrDelta}` : _corrDelta}</strong> correction movement
+                    </p>
+                  )}
+
                 </div>
               )}
 
-              {correctionModal.mode === 'void' && (() => {
-                const origNum = parseFloat(String(correctionModal.log.qty ?? '0').replace(/[^0-9.\-]/g, '')) || 0;
-                const isAdd = correctionModal.log.type === 'Add';
-                const reversal = isAdd ? -Math.abs(origNum) : Math.abs(origNum);
-                return (
-                  <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3">
-                    <p className="text-xs text-red-700 font-semibold">
-                      Will create a <strong>{reversal > 0 ? `+${reversal}` : reversal}</strong> reversal movement and mark original as Voided.
-                    </p>
-                  </div>
-                );
-              })()}
+              {correctionModal.mode === 'void' && (
+                <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3">
+                  <p className="text-xs text-red-700 font-semibold">
+                    Will create a <strong>{_voidReversal > 0 ? `+${_voidReversal}` : _voidReversal}</strong> reversal movement and mark original as Voided.
+                  </p>
+                </div>
+              )}
 
               {/* Disclaimer */}
               <p className="text-[10px] text-neutral-400 italic">
@@ -2691,6 +2783,8 @@ export default function Inventory() {
           </div>
         </div>
       )}
+
+
 
       {/* ── Edit Item Drawer ─────────────────────────────────────────────────── */}
       <Drawer
@@ -4300,6 +4394,7 @@ export default function Inventory() {
         </div>
       )}
 
+      </div>
     </div>
   );
 }

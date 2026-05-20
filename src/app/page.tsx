@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -118,6 +118,14 @@ export default function Dashboard() {
   const [bulkDrafts, setBulkDrafts] = useState<Record<string, any[]>>({});
   const [dynamicUsageData, setDynamicUsageData] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+
+  // ── Live Inventory Snapshot drawer state ─────────────────────────────────
+  const [snapshotOpen, setSnapshotOpen]   = useState(false);
+  const [snapSearch,   setSnapSearch]     = useState('');
+  const [snapFilter,   setSnapFilter]     = useState<'instock'|'low'|'negative'|'dead'|'highval'>('instock');
+  const [snapSort,     setSnapSort]       = useState<'value_desc'|'value_asc'|'alpha'|'stock_asc'|'updated'>('value_desc');
+  const [snapGroupOpen, setSnapGroupOpen] = useState<Record<string,boolean>>({});
+
 
   useEffect(() => {
     runAutomationEngine();
@@ -549,14 +557,20 @@ export default function Dashboard() {
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-4">
+        <div
+          className="cursor-pointer group"
+          onClick={() => setSnapshotOpen(true)}
+          title="Click to open Live Inventory Snapshot"
+        >
         <DashboardMetricCard
           label="Inventory Value"
           value={`$${totalInventoryValue.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`}
-          helper={isCleanSlate ? "Opening balance" : "Across active inventory"}
+          helper={isCleanSlate ? "Opening balance" : "Click to view live snapshot"}
           icon={DollarSign}
           tone="brand"
           trend={!isCleanSlate && <span className="inline-flex items-center gap-1 text-emerald-400"><TrendingUp className="h-3.5 w-3.5" />+2.4%</span>}
         />
+        </div>
         <DashboardMetricCard
           label="Logged Variance"
           value={<span className={varianceTotal < 0 ? 'text-red-400' : 'text-white'}>${Math.abs(varianceTotal).toFixed(2)}</span>}
@@ -928,6 +942,337 @@ export default function Dashboard() {
           )}
         </div>
       </Drawer>
+
+      {/* ════════════════════════════════════════════════════════════════════════
+          LIVE INVENTORY SNAPSHOT DRAWER
+          Opens when Inventory Value card is clicked. HQ operational tool.
+      ════════════════════════════════════════════════════════════════════════ */}
+      {snapshotOpen && (() => {
+        // ── memoised data (IIFE so hooks stay unconditional) ──────────────────
+        const CATEGORY_ORDER = ['Proteins','Vegetables','Dairy','Packaging','Beverages','Spices','Finished Goods'];
+        const CATEGORY_COLORS: Record<string,string> = {
+          'Proteins':'#6366f1','Vegetables':'#22c55e','Dairy':'#f59e0b',
+          'Packaging':'#ec4899','Beverages':'#3b82f6','Spices':'#f97316',
+          'Finished Goods':'#a855f7','Other':'#71717a',
+        };
+
+        const activeItems = inventoryItems.filter((i:any) => !i.archived);
+
+        // Compute value per item
+        const withVal = activeItems.map((i:any) => ({
+          ...i,
+          _value: (Number(i.inStock)||0) * (Number(i.cost)||0),
+          _isLow:  (Number(i.inStock)||0) < (Number(i.parLevel)||0),
+          _isNeg:  (Number(i.inStock)||0) < 0,
+          _isDead: (Number(i.inStock)||0) === 0,
+        }));
+
+        // Filter by tab
+        const tabFiltered = withVal.filter((i:any) => {
+          switch(snapFilter){
+            case 'instock':  return i.inStock > 0;
+            case 'low':      return i._isLow && !i._isNeg;
+            case 'negative': return i._isNeg;
+            case 'dead':     return i._isDead;
+            case 'highval':  return i._value >= 500;
+            default:         return true;
+          }
+        });
+
+        // Filter by search
+        const searchLower = snapSearch.toLowerCase();
+        const searched = searchLower
+          ? tabFiltered.filter((i:any) =>
+              (i.name||'').toLowerCase().includes(searchLower) ||
+              (i.preferredSupplierName||i.supplier||'').toLowerCase().includes(searchLower)
+            )
+          : tabFiltered;
+
+        // Sort
+        const sorted = [...searched].sort((a:any, b:any) => {
+          switch(snapSort){
+            case 'value_desc': return b._value - a._value;
+            case 'value_asc':  return a._value - b._value;
+            case 'alpha':      return (a.name||'').localeCompare(b.name||'');
+            case 'stock_asc':  return (a.inStock||0) - (b.inStock||0);
+            case 'updated':    return (b.updatedAt||0) - (a.updatedAt||0);
+            default:           return 0;
+          }
+        });
+
+        // Group by category
+        const grouped: Record<string, any[]> = {};
+        sorted.forEach((i:any) => {
+          const cat = i.category || 'Other';
+          if (!grouped[cat]) grouped[cat] = [];
+          grouped[cat].push(i);
+        });
+        const groupKeys = [
+          ...CATEGORY_ORDER.filter(c => grouped[c]),
+          ...Object.keys(grouped).filter(c => !CATEGORY_ORDER.includes(c)),
+        ];
+
+        // KPIs
+        const totalActiveSKUs  = withVal.filter((i:any) => i.inStock > 0).length;
+        const totalVal         = withVal.reduce((s:number,i:any) => s + i._value, 0);
+        const highestItem      = [...withVal].sort((a:any,b:any) => b._value - a._value)[0];
+        const lowStockCount    = withVal.filter((i:any) => i._isLow && !i._isNeg).length;
+        const negCount         = withVal.filter((i:any) => i._isNeg).length;
+
+        // Top-10 for bar chart
+        const top10 = [...withVal].sort((a:any,b:any) => b._value - a._value).slice(0,10);
+        const top10Max = top10[0]?._value || 1;
+
+        // Donut data by category
+        const catTotals = activeItems.reduce((acc:Record<string,number>, i:any) => {
+          const c = i.category || 'Other';
+          acc[c] = (acc[c]||0) + (Number(i.inStock)||0)*(Number(i.cost)||0);
+          return acc;
+        }, {});
+        const donutData = Object.entries(catTotals)
+          .map(([name, value]) => ({ name, value: value as number }))
+          .filter(d => d.value > 0)
+          .sort((a,b) => b.value - a.value);
+        const donutTotal = donutData.reduce((s,d) => s+d.value, 0) || 1;
+
+        const filterTabs: {key: typeof snapFilter; label: string}[] = [
+          {key:'instock',  label:'In Stock'},
+          {key:'low',      label:'Low Stock'},
+          {key:'negative', label:'Negative'},
+          {key:'dead',     label:'Dead Stock'},
+          {key:'highval',  label:'High Value (≥$500)'},
+        ];
+
+        return (
+          <div className="fixed inset-0 z-[150] flex justify-end">
+            {/* Backdrop */}
+            <div
+              className="absolute inset-0 bg-black/60 backdrop-blur-[2px]"
+              onClick={() => setSnapshotOpen(false)}
+            />
+            {/* Panel */}
+            <div className="relative flex flex-col w-full max-w-2xl h-full bg-[#0d0d0d] border-l border-white/10 shadow-[0_0_80px_rgba(0,0,0,0.8)] animate-in slide-in-from-right duration-300 overflow-hidden">
+
+              {/* ── Header ────────────────────────────────────────────── */}
+              <div className="shrink-0 px-6 py-4 border-b border-white/10 bg-[#111111]">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-violet-400">HQ Dashboard</p>
+                    <h2 className="mt-0.5 text-lg font-semibold text-white">Live Inventory Snapshot</h2>
+                    <p className="text-xs text-zinc-500 mt-0.5">Active items only · Real-time values</p>
+                  </div>
+                  <button
+                    onClick={() => setSnapshotOpen(false)}
+                    className="p-2 rounded-lg text-zinc-500 hover:text-white hover:bg-white/10 transition-colors"
+                  >✕</button>
+                </div>
+
+                {/* KPI Strip */}
+                <div className="mt-4 grid grid-cols-5 gap-2">
+                  {[
+                    {label:'Active SKUs',  value: totalActiveSKUs},
+                    {label:'Total Value',  value: `$${totalVal.toLocaleString('en-US',{maximumFractionDigits:0})}`},
+                    {label:'Top Item',     value: highestItem ? `$${highestItem._value.toLocaleString('en-US',{maximumFractionDigits:0})}` : '—'},
+                    {label:'Low Stock',    value: lowStockCount,  danger: lowStockCount > 0},
+                    {label:'Negative',     value: negCount,       danger: negCount > 0},
+                  ].map(k => (
+                    <div key={k.label} className="bg-[#1a1a1a] rounded-lg px-3 py-2 border border-white/5">
+                      <p className="text-[9px] font-semibold uppercase tracking-wider text-zinc-500">{k.label}</p>
+                      <p className={`text-sm font-bold mt-0.5 ${(k as any).danger ? 'text-red-400' : 'text-white'}`}>{String(k.value)}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* ── Sticky filter / search bar ────────────────────────── */}
+              <div className="shrink-0 px-4 pt-3 pb-2 border-b border-white/5 bg-[#0f0f0f] space-y-2">
+                {/* Search */}
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600 text-xs">🔍</span>
+                  <input
+                    type="text"
+                    value={snapSearch}
+                    onChange={e => setSnapSearch(e.target.value)}
+                    placeholder="Search item name or supplier…"
+                    className="w-full bg-[#1a1a1a] border border-white/10 rounded-lg pl-8 pr-3 py-2 text-xs text-white placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                  />
+                </div>
+
+                {/* Filter tabs + sort */}
+                <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
+                  {filterTabs.map(t => (
+                    <button
+                      key={t.key}
+                      onClick={() => setSnapFilter(t.key)}
+                      className={`shrink-0 px-2.5 py-1 rounded-md text-[10px] font-semibold transition-colors ${
+                        snapFilter === t.key
+                          ? 'bg-violet-600 text-white'
+                          : 'bg-[#1a1a1a] text-zinc-400 hover:text-white border border-white/10'
+                      }`}
+                    >{t.label}</button>
+                  ))}
+                  <div className="ml-auto shrink-0">
+                    <select
+                      value={snapSort}
+                      onChange={e => setSnapSort(e.target.value as typeof snapSort)}
+                      className="bg-[#1a1a1a] border border-white/10 rounded-md text-[10px] text-zinc-400 px-2 py-1 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                    >
+                      <option value="value_desc">↓ Highest Value</option>
+                      <option value="value_asc">↑ Lowest Value</option>
+                      <option value="alpha">A → Z</option>
+                      <option value="stock_asc">Lowest Stock</option>
+                      <option value="updated">Recently Updated</option>
+                    </select>
+                  </div>
+                </div>
+
+                <p className="text-[10px] text-zinc-600">{sorted.length} item{sorted.length !== 1 ? 's' : ''} shown</p>
+              </div>
+
+              {/* ── Scrollable body ───────────────────────────────────── */}
+              <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
+
+                {/* Grouped item list */}
+                {groupKeys.length === 0 ? (
+                  <div className="text-center py-16 text-zinc-600 text-sm">No items match the current filter.</div>
+                ) : (
+                  groupKeys.map(cat => {
+                    const items = grouped[cat];
+                    const catColor = CATEGORY_COLORS[cat] || '#71717a';
+                    const catVal = items.reduce((s:number,i:any)=>s+i._value,0);
+                    const isOpen = snapGroupOpen[cat] !== false; // default open
+                    return (
+                      <div key={cat} className="rounded-xl border border-white/8 overflow-hidden">
+                        {/* Category header */}
+                        <button
+                          type="button"
+                          onClick={() => setSnapGroupOpen(p => ({...p,[cat]:!isOpen}))}
+                          className="w-full flex items-center justify-between px-4 py-2.5 bg-[#161616] hover:bg-[#1c1c1c] transition-colors"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="h-2 w-2 rounded-full shrink-0" style={{background:catColor}} />
+                            <span className="text-xs font-bold text-white">{cat}</span>
+                            <span className="text-[10px] text-zinc-500">{items.length} item{items.length!==1?'s':''}</span>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <span className="text-xs font-semibold text-zinc-300">
+                              ${catVal.toLocaleString('en-US',{maximumFractionDigits:0})}
+                            </span>
+                            <span className="text-zinc-600 text-xs">{isOpen ? '▲' : '▼'}</span>
+                          </div>
+                        </button>
+
+                        {isOpen && (
+                          <div className="divide-y divide-white/5">
+                            {items.map((item:any) => {
+                              const supplierLabel = item.preferredSupplierName || item.supplier || '—';
+                              const valueLabel = `$${item._value.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+                              return (
+                                <div key={item.id} className={`px-4 py-2.5 flex items-center justify-between gap-3 ${item._isNeg ? 'bg-red-950/20' : item._isLow ? 'bg-amber-950/20' : 'bg-[#121212]'}`}>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <span className="text-xs font-semibold text-white truncate">{item.name}</span>
+                                      {item._isNeg && (
+                                        <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-red-900/60 text-red-400 border border-red-700/50">⚠ Negative</span>
+                                      )}
+                                      {item._isLow && !item._isNeg && (
+                                        <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-900/60 text-amber-400 border border-amber-700/50">Low Stock</span>
+                                      )}
+                                    </div>
+                                    <p className="text-[10px] text-zinc-600 mt-0.5 truncate">{supplierLabel}</p>
+                                  </div>
+                                  <div className="text-right shrink-0">
+                                    <p className={`text-xs font-bold ${item._isNeg ? 'text-red-400' : 'text-white'}`}>
+                                      {Number(item.inStock||0).toLocaleString()} {item.baseUnit||item.unit}
+                                    </p>
+                                    <p className="text-[10px] text-zinc-500">{valueLabel}</p>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+
+                {/* ── Top 10 Highest Value bar chart ─────────────────── */}
+                {top10.length > 0 && (
+                  <div className="rounded-xl border border-white/8 bg-[#111111] p-4">
+                    <p className="text-xs font-bold text-white mb-3">Top 10 by Inventory Value</p>
+                    <div className="space-y-2">
+                      {top10.map((item:any, i:number) => (
+                        <div key={item.id} className="flex items-center gap-2">
+                          <span className="text-[9px] text-zinc-600 w-4 text-right shrink-0">{i+1}</span>
+                          <span className="text-[10px] text-zinc-300 w-28 truncate shrink-0">{item.name}</span>
+                          <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
+                            <div
+                              className="h-full rounded-full bg-violet-500 transition-all"
+                              style={{width:`${(item._value/top10Max)*100}%`}}
+                            />
+                          </div>
+                          <span className="text-[10px] text-zinc-400 shrink-0 w-16 text-right">
+                            ${item._value.toLocaleString('en-US',{maximumFractionDigits:0})}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* ── Category distribution donut ────────────────────── */}
+                {donutData.length > 0 && (
+                  <div className="rounded-xl border border-white/8 bg-[#111111] p-4">
+                    <p className="text-xs font-bold text-white mb-3">Value by Category</p>
+                    <div className="flex items-center gap-4">
+                      <div className="shrink-0">
+                        <ResponsiveContainer width={120} height={120}>
+                          <PieChart>
+                            <Pie
+                              data={donutData}
+                              cx="50%" cy="50%"
+                              innerRadius={36} outerRadius={54}
+                              paddingAngle={2}
+                              dataKey="value"
+                              strokeWidth={0}
+                            >
+                              {donutData.map((entry, index) => (
+                                <Cell
+                                  key={entry.name}
+                                  fill={CATEGORY_COLORS[entry.name] || categoryColors[index % categoryColors.length]}
+                                />
+                              ))}
+                            </Pie>
+                          </PieChart>
+                        </ResponsiveContainer>
+                      </div>
+                      <div className="flex-1 space-y-1.5">
+                        {donutData.map((d, i) => (
+                          <div key={d.name} className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-1.5">
+                              <span
+                                className="h-1.5 w-1.5 rounded-full shrink-0"
+                                style={{background: CATEGORY_COLORS[d.name] || categoryColors[i % categoryColors.length]}}
+                              />
+                              <span className="text-[10px] text-zinc-400">{d.name}</span>
+                            </div>
+                            <span className="text-[10px] text-zinc-300 font-semibold">
+                              {((d.value/donutTotal)*100).toFixed(1)}%
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+              </div>{/* end scroll body */}
+            </div>{/* end panel */}
+          </div>
+        );
+      })()}
+
       </div>
     </div>
   );
