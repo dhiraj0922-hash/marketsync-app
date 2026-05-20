@@ -70,27 +70,77 @@ const COMMISSARY_COLORS: Record<string, string> = {
   "Veggie Paradise": "bg-success-50  text-success-700  border-success-200",
 };
 
+const stockIqDarkShellCss = `
+  body .flex.bg-neutral-50.text-neutral-900.min-h-screen {
+    background: #070707 !important;
+    color: #e4e4e7 !important;
+  }
+  body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] {
+    background: #111111 !important;
+    border-color: #262626 !important;
+  }
+  body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] a,
+  body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] button {
+    color: #a1a1aa !important;
+  }
+  body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] a[class*="bg-brand-50"],
+  body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] a:hover {
+    background: #2563eb !important;
+    color: #ffffff !important;
+  }
+  body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] svg {
+    color: currentColor !important;
+  }
+  body header[class*="bg-white"][class*="border-b"] {
+    background: #111111 !important;
+    border-color: #262626 !important;
+    box-shadow: none !important;
+  }
+  body header[class*="bg-white"] h1,
+  body header[class*="bg-white"] button,
+  body header[class*="bg-white"] span {
+    color: #e4e4e7 !important;
+  }
+  body header[class*="bg-white"] input,
+  body header[class*="bg-white"] [role="button"] {
+    background: #171717 !important;
+    border-color: #262626 !important;
+    color: #e4e4e7 !important;
+  }
+`;
+
+function DarkPageShell({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="-m-6 min-h-[calc(100vh-4rem)] bg-[#070707] p-6 text-zinc-100">
+      <style>{stockIqDarkShellCss}</style>
+      <div className="mx-auto max-w-[1408px] space-y-5">
+        {children}
+      </div>
+    </div>
+  );
+}
+
 // ─── Status badge helper ───────────────────────────────────────────────────────
 
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, string> = {
-    Draft:       "bg-neutral-100 text-neutral-700",
-    draft:       "bg-neutral-100 text-neutral-700",
-    Submitted:   "bg-warning-50 text-warning-700",
-    submitted:   "bg-warning-50 text-warning-700",
-    Approved:    "bg-brand-50 text-brand-700",
-    approved:    "bg-brand-50 text-brand-700",
-    Rejected:    "bg-danger-50 text-danger-700",
-    rejected:    "bg-danger-50 text-danger-700",
-    Fulfilled:   "bg-success-50 text-success-700",
-    fulfilled:   "bg-success-50 text-success-700",
-    Partial:     "bg-orange-50 text-orange-700",
-    partial:     "bg-orange-50 text-orange-700",
-    Backordered: "bg-danger-50 text-danger-700",
-    backordered: "bg-danger-50 text-danger-700",
+    Draft:       "bg-zinc-500/15 text-zinc-300 border border-zinc-500/20",
+    draft:       "bg-zinc-500/15 text-zinc-300 border border-zinc-500/20",
+    Submitted:   "bg-amber-500/15 text-amber-300 border border-amber-500/20",
+    submitted:   "bg-amber-500/15 text-amber-300 border border-amber-500/20",
+    Approved:    "bg-blue-500/15 text-blue-300 border border-blue-500/20",
+    approved:    "bg-blue-500/15 text-blue-300 border border-blue-500/20",
+    Rejected:    "bg-red-500/15 text-red-300 border border-red-500/20",
+    rejected:    "bg-red-500/15 text-red-300 border border-red-500/20",
+    Fulfilled:   "bg-emerald-500/15 text-emerald-300 border border-emerald-500/20",
+    fulfilled:   "bg-emerald-500/15 text-emerald-300 border border-emerald-500/20",
+    Partial:     "bg-orange-500/15 text-orange-300 border border-orange-500/20",
+    partial:     "bg-orange-500/15 text-orange-300 border border-orange-500/20",
+    Backordered: "bg-red-500/15 text-red-300 border border-red-500/20",
+    backordered: "bg-red-500/15 text-red-300 border border-red-500/20",
   };
   return (
-    <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-semibold ${map[status] ?? "bg-neutral-100 text-neutral-600"}`}>
+    <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${map[status] ?? "bg-zinc-500/15 text-zinc-300 border border-zinc-500/20"}`}>
       {status}
     </span>
   );
@@ -286,20 +336,23 @@ function LocationManagerView({
 
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center p-16 text-neutral-400 gap-2">
-        <Loader2 className="h-5 w-5 animate-spin" /> Loading your requisitions…
-      </div>
+      <DarkPageShell>
+        <div className="flex items-center justify-center p-16 text-zinc-500 gap-2">
+          <Loader2 className="h-5 w-5 animate-spin" /> Loading your requisitions…
+        </div>
+      </DarkPageShell>
     );
   }
 
   return (
-    <div className="space-y-6">
+    <DarkPageShell>
 
       {/* ── Header ─────────────────────────────────────────────────────── */}
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <h2 className="text-2xl font-bold tracking-tight">My Requisitions</h2>
-          <p className="text-neutral-500 text-sm mt-0.5 flex items-center gap-1.5">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-zinc-500">Requisitions</p>
+          <h2 className="mt-2 text-2xl font-semibold tracking-tight text-white">My Requisitions</h2>
+          <p className="mt-1 flex items-center gap-1.5 text-sm text-zinc-500">
             <MapPin className="h-3.5 w-3.5" />
             {profile.locationId}
           </p>
@@ -307,7 +360,7 @@ function LocationManagerView({
         <button
           id="btn-create-requisition"
           onClick={() => { setSaveError(null); setIsCreateOpen(true); }}
-          className="flex items-center gap-2 px-5 py-2.5 text-sm font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 shadow-sm transition-colors"
+          className="flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-blue-600/20 transition-colors hover:bg-blue-500"
         >
           <Plus className="h-4 w-4" />
           Create Requisition
@@ -315,39 +368,48 @@ function LocationManagerView({
       </div>
 
       {/* ── Metrics ────────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {[
-          { label: "Total", value: requisitions.length, color: "text-neutral-800" },
-          { label: "Pending Review", value: requisitions.filter(r => r.status === "submitted" || r.status === "Submitted").length, color: "text-warning-600" },
-          { label: "Approved", value: requisitions.filter(r => r.status === "approved" || r.status === "Approved").length, color: "text-brand-600" },
-          { label: "Fulfilled", value: requisitions.filter(r => r.status === "fulfilled" || r.status === "Fulfilled").length, color: "text-success-600" },
+          { label: "Total", value: requisitions.length, tone: "blue", icon: <Inbox className="h-5 w-5" /> },
+          { label: "Pending Review", value: requisitions.filter(r => r.status === "submitted" || r.status === "Submitted").length, tone: "amber", icon: <Clock className="h-5 w-5" /> },
+          { label: "Approved", value: requisitions.filter(r => r.status === "approved" || r.status === "Approved").length, tone: "blue", icon: <CheckCircle2 className="h-5 w-5" /> },
+          { label: "Fulfilled", value: requisitions.filter(r => r.status === "fulfilled" || r.status === "Fulfilled").length, tone: "emerald", icon: <PackageCheck className="h-5 w-5" /> },
         ].map((s, i) => (
-          <Card key={i} className="shadow-sm border-neutral-200">
-            <CardContent className="p-4">
-              <span className="text-xs text-neutral-500 font-medium block">{s.label}</span>
-              <span className={`text-2xl font-bold ${s.color}`}>{s.value}</span>
+          <Card key={i} className="rounded-xl border-white/10 bg-[#111111] shadow-[0_18px_50px_rgba(0,0,0,0.28)]">
+            <CardContent className="flex items-start justify-between p-4">
+              <div>
+                <span className="block text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">{s.label}</span>
+                <span className="mt-3 block text-2xl font-semibold tracking-tight text-white">{s.value}</span>
+              </div>
+              <div className={`rounded-lg p-2 ${
+                s.tone === "emerald" ? "bg-emerald-500/15 text-emerald-300" :
+                s.tone === "amber" ? "bg-amber-500/15 text-amber-300" :
+                "bg-blue-500/15 text-blue-300"
+              }`}>
+                {s.icon}
+              </div>
             </CardContent>
           </Card>
         ))}
       </div>
 
       {/* ── Table ──────────────────────────────────────────────────────── */}
-      <Card className="shadow-sm border-neutral-200 overflow-hidden">
-        <CardHeader className="flex flex-col sm:flex-row gap-3 items-start sm:items-center pb-4 border-b border-neutral-100 bg-white pt-4 px-4">
+      <Card className="overflow-hidden rounded-xl border-white/10 bg-[#111111] shadow-[0_18px_50px_rgba(0,0,0,0.32)]">
+        <CardHeader className="flex flex-col items-start gap-3 border-b border-white/10 bg-[#111111] px-4 py-4 sm:flex-row sm:items-center">
           <div className="relative w-full sm:w-80">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-neutral-400 pointer-events-none" />
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
             <input
               type="text"
               placeholder="Search requisitions…"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9 pr-4 py-1.5 border border-neutral-200 rounded-md text-sm w-full bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
+              className="w-full rounded-lg border border-white/10 bg-[#171717] py-2 pl-9 pr-4 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-blue-500"
             />
           </div>
           <select
             value={filterStatus}
             onChange={(e) => setFilterStatus(e.target.value)}
-            className="px-3 py-1.5 text-sm border border-neutral-200 bg-white rounded-lg outline-none focus:ring-1 focus:ring-brand-500"
+            className="rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm font-medium text-zinc-200 outline-none focus:ring-1 focus:ring-blue-500"
           >
           <option value="all">All Statuses</option>
             <option value="draft">Draft</option>
@@ -359,7 +421,7 @@ function LocationManagerView({
         </CardHeader>
         <CardContent className="p-0">
           <Table>
-            <TableHeader className="bg-neutral-50/80 text-xs text-neutral-500 uppercase tracking-wider">
+            <TableHeader className="border-b border-white/10 bg-[#161616] text-xs uppercase tracking-[0.16em] text-zinc-500">
               <TableRow>
                 <TableHead className="py-3 px-6">Request ID</TableHead>
                 <TableHead className="py-3">Date</TableHead>
@@ -373,30 +435,30 @@ function LocationManagerView({
               {filtered.length > 0 ? filtered.map((req) => (
                 <TableRow
                   key={req.id}
-                  className="cursor-pointer hover:bg-neutral-50/50 transition-colors"
+                  className="cursor-pointer border-b border-white/5 bg-[#111111] transition-colors hover:bg-[#171717]"
                   onClick={() => setSelectedReq(req)}
                 >
-                  <TableCell className="px-6 py-4 font-semibold text-brand-900">
+                  <TableCell className="px-6 py-4 font-semibold text-zinc-100">
                     <div className="flex items-center gap-2">
-                      <Inbox className="h-4 w-4 text-neutral-400" />
+                      <Inbox className="h-4 w-4 text-zinc-500" />
                       {req.id}
                     </div>
                   </TableCell>
-                  <TableCell className="py-4 text-sm text-neutral-500 flex items-center gap-1.5">
-                    <Clock className="h-3.5 w-3.5 text-neutral-400" /> {req.date}
+                  <TableCell className="flex items-center gap-1.5 py-4 text-sm text-zinc-500">
+                    <Clock className="h-3.5 w-3.5 text-zinc-600" /> {req.date}
                   </TableCell>
-                  <TableCell className="py-4 text-sm font-medium text-neutral-700">{req.items}</TableCell>
-                  <TableCell className="py-4 text-sm font-semibold text-neutral-800">
+                  <TableCell className="py-4 text-sm font-medium text-zinc-300">{req.items}</TableCell>
+                  <TableCell className="py-4 text-sm font-semibold text-zinc-100">
                     {req.totalAmount > 0
                       ? `$${Number(req.totalAmount).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                      : <span className="text-neutral-400">—</span>}
+                      : <span className="text-zinc-600">—</span>}
                   </TableCell>
-                  <TableCell className="py-4 text-sm text-neutral-500 max-w-xs truncate">{req.notes || "—"}</TableCell>
+                  <TableCell className="max-w-xs truncate py-4 text-sm text-zinc-500">{req.notes || "—"}</TableCell>
                   <TableCell className="py-4"><StatusBadge status={req.status} /></TableCell>
                 </TableRow>
               )) : (
                 <TableRow>
-                  <TableCell colSpan={5} className="text-center py-12 text-neutral-400 text-sm">
+                  <TableCell colSpan={5} className="py-12 text-center text-sm text-zinc-500">
                     No requisitions yet. Create your first one above.
                   </TableCell>
                 </TableRow>
@@ -744,7 +806,7 @@ function LocationManagerView({
           })()}
         </div>
       </Drawer>
-    </div>
+    </DarkPageShell>
   );
 }
 
@@ -1247,23 +1309,31 @@ function HQAdminView({
     </div>
   );
 
-  if (isLoading) return <div className="p-12 flex justify-center text-neutral-400 animate-pulse">Loading Requisitions HQ Pipeline…</div>;
+  if (isLoading) return (
+    <DarkPageShell>
+      <div className="flex justify-center p-12 text-zinc-500">
+        <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+        Loading Requisitions HQ Pipeline…
+      </div>
+    </DarkPageShell>
+  );
 
   return (
-    <div className="space-y-6">
+    <DarkPageShell>
       {/* Header + Tab toggle */}
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 print:hidden">
+      <div className="flex flex-col gap-3 print:hidden lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <h2 className="text-2xl font-bold tracking-tight">Store Requisitions</h2>
-          <p className="text-neutral-500 text-sm">Manage store demands and route against HQ Finished Goods.</p>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-zinc-500">Requisitions</p>
+          <h2 className="mt-2 text-2xl font-semibold tracking-tight text-white">Store Requisitions</h2>
+          <p className="mt-1 text-sm text-zinc-500">Manage store demands and route against HQ Finished Goods.</p>
         </div>
-        <div className="flex bg-neutral-100 p-1 rounded-lg border border-neutral-200 shadow-inner">
+        <div className="flex rounded-lg border border-white/10 bg-[#151515] p-1 shadow-inner shadow-black/30">
           <button onClick={() => setActiveTab("overview")}
-            className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${activeTab === "overview" ? "bg-white text-brand-700 shadow-sm" : "text-neutral-600 hover:text-neutral-900"}`}>
+            className={`rounded-md px-4 py-1.5 text-sm font-medium transition-colors ${activeTab === "overview" ? "bg-blue-600 text-white shadow-sm shadow-blue-600/20" : "text-zinc-400 hover:text-white"}`}>
             Store Requisitions
           </button>
           <button onClick={() => setActiveTab("hq-production")}
-            className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors flex items-center gap-2 ${activeTab === "hq-production" ? "bg-white text-brand-700 shadow-sm" : "text-neutral-600 hover:text-neutral-900"}`}>
+            className={`flex items-center gap-2 rounded-md px-4 py-1.5 text-sm font-medium transition-colors ${activeTab === "hq-production" ? "bg-blue-600 text-white shadow-sm shadow-blue-600/20" : "text-zinc-400 hover:text-white"}`}>
             <ClipboardList className="h-4 w-4" /> HQ Production
           </button>
         </div>
@@ -1271,47 +1341,57 @@ function HQAdminView({
 
       {activeTab === "overview" ? (
         <>
-          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 print:hidden">
+          <div className="flex flex-col items-start justify-between gap-4 print:hidden sm:flex-row sm:items-center">
             <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
               <button onClick={createMockRequest}
-                className="flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium bg-neutral-100 border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-200 shadow-sm w-full sm:w-auto transition-colors">
-                <Sparkles className="h-4 w-4 text-brand-500" /> + Mock Store Req
+                className="flex w-full items-center justify-center gap-2 rounded-lg border border-white/10 bg-[#151515] px-4 py-2 text-sm font-medium text-zinc-300 shadow-sm transition-colors hover:bg-[#1f1f1f] sm:w-auto">
+                <Sparkles className="h-4 w-4 text-blue-300" /> + Mock Store Req
               </button>
               <button onClick={() => handleFulfillSelected()} disabled={selectedReqIds.length === 0}
-                className={`flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium rounded-lg shadow-sm w-full sm:w-auto transition-colors ${selectedReqIds.length > 0 ? "bg-brand-600 text-white hover:bg-brand-700" : "bg-neutral-200 text-neutral-400 cursor-not-allowed"}`}>
+                className={`flex w-full items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium shadow-sm transition-colors sm:w-auto ${selectedReqIds.length > 0 ? "bg-blue-600 text-white shadow-blue-600/20 hover:bg-blue-500" : "cursor-not-allowed bg-[#202020] text-zinc-600"}`}>
                 <PackageCheck className="h-4 w-4" /> Fulfill ({selectedReqIds.length}) Requests
               </button>
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
             {[
-              { label: "Pending Workflow", value: pendingCount.toString(), color: "text-warning-600" },
-              { label: "Open Backorders", value: backorderCount.toString(), color: "text-danger-600" },
-              { label: "Top Consuming Location", value: topLocation, color: "text-brand-600" },
-              { label: "Total Value Supplied", value: `$${totalValueSupplied.toFixed(2)}`, color: "text-success-600" },
+              { label: "Pending Workflow", value: pendingCount.toString(), tone: "amber", icon: <Clock className="h-5 w-5" /> },
+              { label: "Open Backorders", value: backorderCount.toString(), tone: "red", icon: <AlertCircle className="h-5 w-5" /> },
+              { label: "Top Consuming Location", value: topLocation, tone: "blue", icon: <MapPin className="h-5 w-5" /> },
+              { label: "Total Value Supplied", value: `$${totalValueSupplied.toFixed(2)}`, tone: "emerald", icon: <CircleDollarSign className="h-5 w-5" /> },
             ].map((stat, i) => (
-              <Card key={i} className="shadow-sm border-neutral-200">
-                <CardContent className="p-4 flex flex-col gap-1 text-center sm:text-left">
-                  <span className="text-xs text-neutral-500 font-medium">{stat.label}</span>
-                  <span className={`text-2xl font-bold ${stat.color}`}>{stat.value}</span>
+              <Card key={i} className="rounded-xl border-white/10 bg-[#111111] shadow-[0_18px_50px_rgba(0,0,0,0.28)]">
+                <CardContent className="flex items-start justify-between p-4">
+                  <div>
+                    <span className="block text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">{stat.label}</span>
+                    <span className="mt-3 block text-2xl font-semibold tracking-tight text-white">{stat.value}</span>
+                  </div>
+                  <div className={`rounded-lg p-2 ${
+                    stat.tone === "emerald" ? "bg-emerald-500/15 text-emerald-300" :
+                    stat.tone === "amber" ? "bg-amber-500/15 text-amber-300" :
+                    stat.tone === "red" ? "bg-red-500/15 text-red-300" :
+                    "bg-blue-500/15 text-blue-300"
+                  }`}>
+                    {stat.icon}
+                  </div>
                 </CardContent>
               </Card>
             ))}
           </div>
 
-          <Card className="shadow-sm border-neutral-200 overflow-hidden">
-            <CardHeader className="flex flex-col sm:flex-row space-y-4 sm:space-y-0 sm:items-center justify-between pb-4 border-b border-neutral-100 bg-white">
+          <Card className="overflow-hidden rounded-xl border-white/10 bg-[#111111] shadow-[0_18px_50px_rgba(0,0,0,0.32)]">
+            <CardHeader className="flex flex-col justify-between gap-3 border-b border-white/10 bg-[#111111] px-4 py-4 sm:flex-row sm:items-center">
               <div className="relative w-full sm:w-[400px]">
                 <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                  <Search className="h-4 w-4 text-neutral-400" />
+                  <Search className="h-4 w-4 text-zinc-500" />
                 </div>
                 <input type="text" placeholder="Search Req ID, location, or requester…" value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="pl-9 pr-4 py-1.5 border border-neutral-200 rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 w-full bg-neutral-50" />
+                  className="w-full rounded-lg border border-white/10 bg-[#171717] py-2 pl-9 pr-4 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-blue-500" />
               </div>
               <div className="flex flex-wrap gap-2">
-                <select className="px-3 py-1.5 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm"
+                <select className="rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm font-medium text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500"
                   value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
                   <option value="all">All Statuses</option>
                   <option value="draft">Draft</option>
@@ -1325,7 +1405,7 @@ function HQAdminView({
                 {/* Location filter: hidden for location_manager — RLS already isolates their data */}
                 {profile?.role !== "location_manager" && (
                   <select
-                    className="px-3 py-1.5 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm"
+                    className="rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm font-medium text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500"
                     value={filterLocation}
                     onChange={(e) => setFilterLocation(e.target.value)}
                   >
@@ -1334,25 +1414,25 @@ function HQAdminView({
                   </select>
                 )}
                 {profile?.role === "location_manager" && profile.locationId && (
-                  <div className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-neutral-50 border border-neutral-200 text-neutral-700 rounded-lg">
-                    <MapPin className="h-3.5 w-3.5 text-brand-500" />
+                  <div className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm font-medium text-zinc-200">
+                    <MapPin className="h-3.5 w-3.5 text-blue-300" />
                     {profile.locationId}
                   </div>
                 )}
                 {/* Date range filters */}
-                <label className="flex items-center gap-1.5 text-xs text-neutral-500 font-medium">
+                <label className="flex items-center gap-1.5 text-xs font-medium text-zinc-500">
                   From
                   <input type="date" value={filterFromDate} onChange={(e) => setFilterFromDate(e.target.value)}
-                    className="px-2 py-1.5 text-sm bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm" />
+                    className="rounded-lg border border-white/10 bg-[#171717] px-2 py-2 text-sm text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500" />
                 </label>
-                <label className="flex items-center gap-1.5 text-xs text-neutral-500 font-medium">
+                <label className="flex items-center gap-1.5 text-xs font-medium text-zinc-500">
                   To
                   <input type="date" value={filterToDate} onChange={(e) => setFilterToDate(e.target.value)}
-                    className="px-2 py-1.5 text-sm bg-white border border-neutral-200 text-neutral-700 rounded-lg outline-none focus:ring-1 focus:ring-brand-500 shadow-sm" />
+                    className="rounded-lg border border-white/10 bg-[#171717] px-2 py-2 text-sm text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500" />
                 </label>
                 {(filterStatus !== "all" || filterLocation !== "All" || filterFromDate || filterToDate || searchQuery) && (
                   <button onClick={() => { setFilterStatus("all"); setFilterLocation("All"); setFilterFromDate(""); setFilterToDate(""); setSearchQuery(""); }}
-                    className="px-3 py-1.5 text-xs font-medium text-neutral-500 hover:text-neutral-700 border border-neutral-200 rounded-lg bg-white hover:bg-neutral-50 transition-colors">
+                    className="rounded-lg border border-white/10 bg-[#151515] px-3 py-2 text-xs font-medium text-zinc-400 transition-colors hover:bg-[#202020] hover:text-white">
                     Clear filters
                   </button>
                 )}
@@ -1360,10 +1440,10 @@ function HQAdminView({
             </CardHeader>
             <CardContent className="p-0">
               <Table>
-                <TableHeader className="bg-neutral-50/80 text-xs text-neutral-500 uppercase tracking-wider">
+                <TableHeader className="border-b border-white/10 bg-[#161616] text-xs uppercase tracking-[0.16em] text-zinc-500">
                   <TableRow>
                     <TableHead className="w-[40px] px-6 py-3">
-                      <input type="checkbox" className="rounded border-neutral-300 text-brand-600 focus:ring-brand-500"
+                      <input type="checkbox" className="rounded border-white/20 bg-[#171717] text-blue-600 focus:ring-blue-500"
                         onChange={(e) => {
                           if (e.target.checked) {
                             const approvedIds = filteredReqs.filter((r) => FULFILLABLE_STATUSES.has((r.status ?? "").toLowerCase())).map((r) => r.id);
@@ -1384,34 +1464,34 @@ function HQAdminView({
                 <TableBody>
                   {filteredReqs.length > 0 ? filteredReqs.map((req) => (
                     <TableRow key={req.id}
-                      className={`cursor-pointer transition-colors hover:bg-neutral-50/50 ${selectedReqIds.includes(req.id) ? "bg-brand-50/30" : ""}`}
+                      className={`cursor-pointer border-b border-white/5 transition-colors hover:bg-[#171717] ${selectedReqIds.includes(req.id) ? "bg-blue-500/10" : "bg-[#111111]"}`}
                       onClick={(e) => { if ((e.target as HTMLElement).closest('input[type="checkbox"]')) return; setSelectedReq(req); }}>
                       <TableCell className="px-6">
                         <input type="checkbox" checked={selectedReqIds.includes(req.id)} onChange={() => handleToggleSelect(req.id)}
                           disabled={!FULFILLABLE_STATUSES.has((req.status ?? "").toLowerCase())}
-                          className="rounded border-neutral-300 text-brand-600 focus:ring-brand-500 disabled:opacity-50" />
+                          className="rounded border-white/20 bg-[#171717] text-blue-600 focus:ring-blue-500 disabled:opacity-50" />
                       </TableCell>
-                      <TableCell className="py-4 font-semibold text-brand-900">
-                        <div className="flex items-center gap-2"><Inbox className="h-4 w-4 text-neutral-400" />{req.id}</div>
+                      <TableCell className="py-4 font-semibold text-zinc-100">
+                        <div className="flex items-center gap-2"><Inbox className="h-4 w-4 text-zinc-500" />{req.id}</div>
                       </TableCell>
-                      <TableCell className="py-4 font-medium text-neutral-900 text-sm">
-                        <div className="flex items-center gap-1.5"><MapPin className="h-3.5 w-3.5 text-neutral-400" />{req.location}</div>
+                      <TableCell className="py-4 text-sm font-medium text-zinc-100">
+                        <div className="flex items-center gap-1.5"><MapPin className="h-3.5 w-3.5 text-zinc-600" />{req.location}</div>
                       </TableCell>
-                      <TableCell className="py-4 text-sm text-neutral-600">{req.requestedBy || req.requestedby || "—"}</TableCell>
-                      <TableCell className="py-4 text-sm text-neutral-500">
-                        <div className="flex items-center gap-1.5"><Clock className="h-3.5 w-3.5 text-neutral-400" />{req.date}</div>
+                      <TableCell className="py-4 text-sm text-zinc-400">{req.requestedBy || req.requestedby || "—"}</TableCell>
+                      <TableCell className="py-4 text-sm text-zinc-500">
+                        <div className="flex items-center gap-1.5"><Clock className="h-3.5 w-3.5 text-zinc-600" />{req.date}</div>
                       </TableCell>
-                      <TableCell className="py-4 text-sm font-medium text-neutral-700">{req.items}</TableCell>
+                      <TableCell className="py-4 text-sm font-medium text-zinc-300">{req.items}</TableCell>
                        <TableCell className="py-4 text-sm font-semibold">
                         {(() => {
                           const { amount, isEstimate } = getDisplayValue(req);
                           const status = (req.status ?? "").toLowerCase();
                           const isFulfilled = FULFILLED_STATUSES.has(status);
                           return (
-                            <span className={isFulfilled ? "text-success-600" : "text-neutral-700"}>
+                            <span className={isFulfilled ? "text-emerald-300" : "text-zinc-200"}>
                               ${amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                               {isEstimate && !isFulfilled && (
-                                <span className="ml-1 text-[10px] font-normal text-neutral-400 align-middle">est.</span>
+                                <span className="ml-1 align-middle text-[10px] font-normal text-zinc-600">est.</span>
                               )}
                             </span>
                           );
@@ -1435,12 +1515,12 @@ function HQAdminView({
                         return <StatusBadge status={visual} />;
                       })()}</TableCell>
                       <TableCell className="px-6 py-4 text-right">
-                        <span className="text-brand-600 hover:text-brand-700 text-sm font-medium transition-colors">Review</span>
+                        <span className="text-sm font-medium text-blue-300 transition-colors hover:text-blue-200">Review</span>
                       </TableCell>
                     </TableRow>
                   )) : (
                     <TableRow>
-                      <TableCell colSpan={9} className="text-center py-10 text-neutral-500 text-sm">No matching requests.</TableCell>
+                      <TableCell colSpan={9} className="py-10 text-center text-sm text-zinc-500">No matching requests.</TableCell>
                     </TableRow>
                   )}
                 </TableBody>
@@ -1861,7 +1941,7 @@ function HQAdminView({
           </div>
         </div>
       )}
-    </div>
+    </DarkPageShell>
   );
 }
 
@@ -1896,9 +1976,11 @@ export default function Requisitions() {
 
   if (isBootstrapping) {
     return (
-      <div className="flex items-center justify-center p-16 text-neutral-400 gap-2">
-        <Loader2 className="h-5 w-5 animate-spin" /> Loading…
-      </div>
+      <DarkPageShell>
+        <div className="flex items-center justify-center gap-2 p-16 text-zinc-500">
+          <Loader2 className="h-5 w-5 animate-spin" /> Loading…
+        </div>
+      </DarkPageShell>
     );
   }
 
