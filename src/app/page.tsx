@@ -32,7 +32,10 @@ import {
   Tooltip as RechartsTooltip, 
   ResponsiveContainer,
   LineChart,
-  Line
+  Line,
+  PieChart,
+  Pie,
+  Cell,
 } from "recharts";
 import { findInventoryItem } from "@/lib/utils";
 
@@ -63,26 +66,26 @@ function DashboardMetricCard({
   trend?: React.ReactNode;
 }) {
   const toneMap = {
-    brand: "bg-blue-50 text-blue-700 ring-blue-100",
-    danger: "bg-rose-50 text-rose-700 ring-rose-100",
-    success: "bg-emerald-50 text-emerald-700 ring-emerald-100",
-    warning: "bg-amber-50 text-amber-700 ring-amber-100",
-    neutral: "bg-slate-100 text-slate-700 ring-slate-200",
+    brand: "bg-blue-500 text-white shadow-blue-500/25",
+    danger: "bg-red-500 text-white shadow-red-500/25",
+    success: "bg-emerald-500 text-white shadow-emerald-500/25",
+    warning: "bg-violet-500 text-white shadow-violet-500/25",
+    neutral: "bg-amber-500 text-white shadow-amber-500/25",
   };
 
   return (
-    <Card className="rounded-lg border-slate-200 bg-white shadow-sm">
-      <CardContent className="p-4 sm:p-5">
+    <Card className="rounded-xl border-white/10 bg-[#151515] shadow-[0_18px_50px_rgba(0,0,0,0.28)]">
+      <CardContent className="p-5">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">{label}</p>
-            <div className="mt-2 text-2xl font-bold tracking-tight text-slate-950">{value}</div>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500">{label}</p>
+            <div className="mt-3 text-2xl font-semibold tracking-tight text-white">{value}</div>
           </div>
-          <div className={`rounded-lg p-2 ring-1 ${toneMap[tone]}`}>
+          <div className={`rounded-lg p-2.5 shadow-lg ${toneMap[tone]}`}>
             <Icon className="h-4 w-4" />
           </div>
         </div>
-        <div className="mt-4 flex min-h-5 items-center justify-between gap-2 text-xs text-slate-500">
+        <div className="mt-4 flex min-h-5 items-center justify-between gap-2 text-xs text-zinc-500">
           <span className="truncate">{helper}</span>
           {trend && <span className="shrink-0 font-semibold">{trend}</span>}
         </div>
@@ -478,140 +481,85 @@ export default function Dashboard() {
     .slice(0, 5);
   const topCategoryTotal = inventoryCategoryData.reduce((sum, item) => sum + item.value, 0) || 1;
   const topLowStock = lowStockItems.slice(0, 5);
+  const categoryColors = ["#6366f1", "#22c55e", "#f59e0b", "#ec4899", "#a855f7"];
+  const alertPreview = dashboardAlerts.slice(0, 4);
+  const approvalCount = productionPlans.filter(p => p.status.includes("Draft") || p.status.includes("Pending")).length + orders.filter(o => o.status === "Draft (Auto)" || o.status === "Pending Approval").length;
 
   return (
-    <div className="mx-auto max-w-[1600px] space-y-5">
-      <div className="flex flex-col gap-4 rounded-lg border border-slate-200 bg-white p-4 shadow-sm sm:p-5 lg:flex-row lg:items-center lg:justify-between">
-        <div className="min-w-0">
-          <div className="mb-2 flex flex-wrap items-center gap-2">
-            <Badge variant="neutral" className="rounded-md bg-slate-100 px-2 py-1 text-[10px] uppercase tracking-wider text-slate-600">
-              StockIQ
-            </Badge>
-            <span className="inline-flex items-center gap-1 text-xs font-medium text-slate-500">
-              <CalendarDays className="h-3.5 w-3.5" />
-              {new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}
-            </span>
-          </div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-950 sm:text-3xl">Dashboard</h1>
-          <p className="mt-1 text-sm text-slate-500">Inventory health, variance signals, purchasing activity, and operational alerts.</p>
+    <div className="-m-6 min-h-[calc(100vh-4rem)] bg-[#070707] p-6 text-zinc-100">
+      <style>{`
+        body .flex.bg-neutral-50.text-neutral-900.min-h-screen {
+          background: #070707 !important;
+          color: #e4e4e7 !important;
+        }
+        body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] {
+          background: #111111 !important;
+          border-color: #262626 !important;
+        }
+        body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] a,
+        body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] button {
+          color: #a1a1aa !important;
+        }
+        body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] a[class*="bg-brand-50"],
+        body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] a:hover {
+          background: #2563eb !important;
+          color: #ffffff !important;
+        }
+        body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] svg {
+          color: currentColor !important;
+        }
+        body header[class*="bg-white"][class*="border-b"] {
+          background: #111111 !important;
+          border-color: #262626 !important;
+          box-shadow: none !important;
+        }
+        body header[class*="bg-white"] h1,
+        body header[class*="bg-white"] button,
+        body header[class*="bg-white"] span {
+          color: #e4e4e7 !important;
+        }
+        body header[class*="bg-white"] input,
+        body header[class*="bg-white"] [role="button"] {
+          background: #171717 !important;
+          border-color: #262626 !important;
+          color: #e4e4e7 !important;
+        }
+      `}</style>
+      <div className="mx-auto max-w-[1408px] space-y-5">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-zinc-500">Dashboard</p>
+          <h1 className="mt-2 text-2xl font-semibold tracking-tight text-white">StockIQ Overview</h1>
+          <p className="mt-1 text-sm text-zinc-500">Real-time inventory health, purchasing activity, and variance signals.</p>
         </div>
-        <div className="grid grid-cols-3 gap-2 rounded-lg bg-slate-50 p-2 text-center sm:min-w-[360px]">
-          <div className="rounded-md bg-white px-3 py-2 shadow-sm">
-            <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Items</p>
-            <p className="mt-1 text-lg font-bold text-slate-950">{inventoryItems.length}</p>
-          </div>
-          <div className="rounded-md bg-white px-3 py-2 shadow-sm">
-            <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Orders</p>
-            <p className="mt-1 text-lg font-bold text-slate-950">{orders.length}</p>
-          </div>
-          <div className="rounded-md bg-white px-3 py-2 shadow-sm">
-            <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Alerts</p>
-            <p className="mt-1 text-lg font-bold text-slate-950">{dashboardAlerts.length}</p>
-          </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-[#141414] px-3 py-2 text-xs font-medium text-zinc-300">
+            <CalendarDays className="h-3.5 w-3.5 text-zinc-500" />
+            {new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}
+          </span>
+          <button
+            onClick={handleOpenBulkGenerate}
+            disabled={lowStockItems.length === 0}
+            className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white shadow-lg shadow-blue-600/20 transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Sparkles className="h-3.5 w-3.5" />
+            Generate Drafts
+          </button>
         </div>
       </div>
-      {/* Smart Action Center (Phase 8) */}
-      {smartSuggestions.length > 0 && (
-        <div className="rounded-lg border border-blue-100 bg-blue-50/70 p-4 shadow-sm sm:p-5">
-          <div className="mb-4 flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <div className="rounded-lg bg-blue-600 p-2 text-white shadow-sm">
-                <Sparkles className="h-4 w-4" />
-             </div>
-              <div>
-                <h3 className="text-base font-bold text-slate-950">Smart Action Center</h3>
-                <p className="text-xs text-blue-700/70">Automation-ready work detected from current operating data.</p>
-              </div>
-            </div>
-            <Badge variant="default" className="rounded-md bg-white px-2 py-1 text-blue-700">
-              {smartSuggestions.length} action{smartSuggestions.length !== 1 ? "s" : ""}
-            </Badge>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-            {smartSuggestions.map(suggestion => (
-              <div key={suggestion.id} className="flex flex-col justify-between rounded-lg border border-blue-100 bg-white p-4 shadow-sm">
-                 <div>
-                    <div className="flex items-center gap-2 mb-2">
-                       <span className="rounded-md bg-blue-50 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-blue-600">{suggestion.type}</span>
-                    </div>
-                    <h4 className="mb-1 text-sm font-semibold text-slate-950">{suggestion.title}</h4>
-                    <p className="mb-4 text-xs leading-relaxed text-slate-500">{suggestion.desc}</p>
-                 </div>
-                 <button 
-                   onClick={suggestion.onClick}
-                   className="w-full rounded-md bg-blue-600 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700"
-                 >
-                   {suggestion.actionText}
-                 </button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
 
-      {/* HQ Approvals Widget */}
-      {(productionPlans.filter(p => p.status.includes("Draft") || p.status.includes("Pending")).length > 0 || orders.filter(o => o.status === "Draft (Auto)" || o.status === "Pending Approval").length > 0) && (
-        <Card className="shadow-sm border-brand-200 bg-brand-50/50">
-          <CardContent className="p-4 sm:p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-             <div className="flex items-start gap-4">
-               <div className="p-2 bg-brand-600 text-white rounded-lg shadow-sm">
-                  <CheckSquare className="h-6 w-6" />
-               </div>
-               <div>
-                 <h3 className="text-lg font-bold text-neutral-900 tracking-tight">HQ Approvals Required</h3>
-                 <p className="text-sm text-neutral-500">
-                    You have <strong className="text-brand-700">{productionPlans.filter(p => p.status.includes("Draft") || p.status.includes("Pending")).length + orders.filter(o => o.status === "Draft (Auto)" || o.status === "Pending Approval").length} items</strong> generated by the automation engine awaiting your authorization.
-                 </p>
-                 <div className="mt-2 flex flex-wrap gap-2">
-                    { [
-                        ...productionPlans.filter(p => p.status.includes("Draft") || p.status.includes("Pending")).map(p => ({ title: `Production: ${p.fgName}`, id: p.id })),
-                        ...orders.filter(o => o.status === "Draft (Auto)" || o.status === "Pending Approval").map(o => ({ title: `Auto-PO ${o.id}`, id: o.id }))
-                      ].slice(0, 3).map(item => (
-                       <Badge key={item.id} variant="neutral" className="bg-white border-brand-200 text-brand-700 text-xs">
-                         {item.title}
-                       </Badge>
-                    ))}
-                    { (productionPlans.filter(p => p.status.includes("Draft") || p.status.includes("Pending")).length + orders.filter(o => o.status === "Draft (Auto)" || o.status === "Pending Approval").length) > 3 && (
-                       <span className="text-xs text-neutral-400 font-medium self-centerml-1">and more...</span>
-                    )}
-                 </div>
-               </div>
-             </div>
-             <button 
-               onClick={() => router.push('/approvals')}
-               className="whitespace-nowrap px-5 py-2 bg-brand-600 hover:bg-brand-700 text-white font-medium rounded-lg shadow-sm transition-colors text-sm w-full sm:w-auto text-center"
-             >
-               View All Approvals
-             </button>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* HQ Cross-Location Review — HQ admin only */}
-      {isHQAdmin && (
-        <Card className="shadow-sm border-indigo-100 bg-indigo-50/30">
-          <CardHeader className="border-b border-indigo-100 pb-4">
-            <CardTitle className="text-base text-neutral-800">Cross-Location Review</CardTitle>
-          </CardHeader>
-          <CardContent className="p-5">
-            <HQLocationReview locations={locations} />
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Exec Metrics Row */}
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-4">
         <DashboardMetricCard
           label="Inventory Value"
           value={`$${totalInventoryValue.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`}
           helper={isCleanSlate ? "Opening balance" : "Across active inventory"}
           icon={DollarSign}
           tone="brand"
-          trend={!isCleanSlate && <span className="inline-flex items-center gap-1 text-emerald-600"><TrendingUp className="h-3.5 w-3.5" />+2.4%</span>}
+          trend={!isCleanSlate && <span className="inline-flex items-center gap-1 text-emerald-400"><TrendingUp className="h-3.5 w-3.5" />+2.4%</span>}
         />
         <DashboardMetricCard
           label="Logged Variance"
-          value={<span className={varianceTotal < 0 ? 'text-rose-600' : 'text-slate-950'}>${Math.abs(varianceTotal).toFixed(2)}</span>}
+          value={<span className={varianceTotal < 0 ? 'text-red-400' : 'text-white'}>${Math.abs(varianceTotal).toFixed(2)}</span>}
           helper="Net value impact from counts"
           icon={Trash2}
           tone="danger"
@@ -622,7 +570,7 @@ export default function Dashboard() {
           helper={`${pendingCounts} sessions pending review`}
           icon={ClipboardCheck}
           tone="neutral"
-          trend={counts.length > 0 && <span className="text-emerald-600">{Math.round((approvedCounts / counts.length) * 100)}% approved</span>}
+          trend={counts.length > 0 && <span className="text-emerald-400">{Math.round((approvedCounts / counts.length) * 100)}% approved</span>}
         />
         <DashboardMetricCard
           label="CoGS (7 Days)"
@@ -630,198 +578,189 @@ export default function Dashboard() {
           helper={isCleanSlate ? "Insufficient operational data" : "vs theoretical 28.9%"}
           icon={CircleGauge}
           tone="warning"
-          trend={!isCleanSlate && <span className="inline-flex items-center gap-1 text-emerald-600"><TrendingDown className="h-3.5 w-3.5" />-0.5%</span>}
+          trend={!isCleanSlate && <span className="inline-flex items-center gap-1 text-red-400"><TrendingDown className="h-3.5 w-3.5" />-0.5%</span>}
         />
       </div>
 
-      <div className="grid grid-cols-1 gap-5 xl:grid-cols-12">
-        {/* Main Chart */}
-        <Card className="rounded-lg border-slate-200 shadow-sm xl:col-span-8">
-          <CardHeader className="border-b border-slate-100 pb-4">
+      <div className="grid grid-cols-1 gap-5 md:grid-cols-12">
+        <Card className="rounded-xl border-white/10 bg-[#111111] shadow-[0_18px_50px_rgba(0,0,0,0.32)] md:col-span-8">
+          <CardHeader className="border-b border-white/5 pb-4">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <CardTitle className="text-base text-slate-950">Inventory Usage Trend</CardTitle>
-                <CardDescription className="mt-1">Theoretical vs actual consumption over the last 7 days</CardDescription>
+                <CardTitle className="text-base text-white">Inventory Usage Trend</CardTitle>
+                <CardDescription className="mt-1 text-zinc-500">Theoretical vs actual consumption over the last 7 days</CardDescription>
               </div>
-              <div className="hidden items-center gap-3 text-xs text-slate-500 sm:flex">
-                <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-slate-950" />Actual</span>
-                <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-blue-500" />Theoretical</span>
+              <div className="hidden items-center gap-3 text-xs text-zinc-500 sm:flex">
+                <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-blue-500" />Actual</span>
+                <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-emerald-500" />Theoretical</span>
               </div>
             </div>
           </CardHeader>
           <CardContent className="pt-6 h-80">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={dynamicUsageData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E5E5E5" />
-                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#737373', fontSize: 12}} dy={10} />
-                <YAxis axisLine={false} tickLine={false} tick={{fill: '#737373', fontSize: 12}} dx={-10} tickFormatter={(value) => `$${value}`} />
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#262626" />
+                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#71717a', fontSize: 12}} dy={10} />
+                <YAxis axisLine={false} tickLine={false} tick={{fill: '#71717a', fontSize: 12}} dx={-10} tickFormatter={(value) => `$${value}`} />
                 <RechartsTooltip 
-                  contentStyle={{ borderRadius: '8px', border: '1px solid #E5E5E5', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                  contentStyle={{ borderRadius: '10px', border: '1px solid #27272a', background: '#111', color: '#fafafa', boxShadow: '0 18px 50px rgb(0 0 0 / 0.35)' }}
                 />
-                <Line type="monotone" dataKey="actual" stroke="#171717" strokeWidth={2} dot={{r: 4}} activeDot={{r: 6}} name="Actual Usage" />
-                <Line type="monotone" dataKey="theoretical" stroke="#3b82f6" strokeWidth={2} strokeDasharray="5 5" dot={false} activeDot={{r: 6}} name="Theoretical" />
+                <Line type="monotone" dataKey="actual" stroke="#3b82f6" strokeWidth={2.5} dot={{r: 3, fill: "#3b82f6"}} activeDot={{r: 6}} name="Actual Usage" />
+                <Line type="monotone" dataKey="theoretical" stroke="#22c55e" strokeWidth={2.5} strokeDasharray="5 5" dot={false} activeDot={{r: 6}} name="Theoretical" />
               </LineChart>
             </ResponsiveContainer>
           </CardContent>
         </Card>
 
-        {/* Alerts & Widgets */}
-        <div className="space-y-5 xl:col-span-4">
-          <Card className="rounded-lg border-slate-200 shadow-sm">
-            <CardHeader className="border-b border-slate-100 pb-4">
-              <CardTitle className="flex items-center gap-2 text-base text-slate-950">
-                 <Layers3 className="h-4 w-4 text-blue-600" />
-                 Category Distribution
+        <Card className="rounded-xl border-white/10 bg-[#111111] shadow-[0_18px_50px_rgba(0,0,0,0.32)] md:col-span-4">
+          <CardHeader className="border-b border-white/5 pb-4">
+            <CardTitle className="flex items-center gap-2 text-base text-white">
+                 <Layers3 className="h-4 w-4 text-violet-400" />
+                 Inventory Categories
               </CardTitle>
             </CardHeader>
-            <CardContent className="p-4">
-              <div className="space-y-3">
-                {inventoryCategoryData.length > 0 ? inventoryCategoryData.map((category, idx) => (
-                  <div key={category.name}>
-                    <div className="mb-1.5 flex items-center justify-between gap-2 text-xs">
-                      <span className="font-semibold text-slate-700">{category.name}</span>
-                      <span className="font-mono text-slate-500">${category.value.toLocaleString('en-US', { maximumFractionDigits: 0 })}</span>
-                    </div>
-                    <div className="h-2 overflow-hidden rounded-full bg-slate-100">
-                      <div
-                        className={idx === 0 ? "h-full rounded-full bg-blue-600" : idx === 1 ? "h-full rounded-full bg-emerald-500" : idx === 2 ? "h-full rounded-full bg-amber-500" : "h-full rounded-full bg-slate-400"}
-                        style={{ width: `${Math.max(6, (category.value / topCategoryTotal) * 100)}%` }}
-                      />
-                    </div>
-                  </div>
-                )) : (
-                  <div className="rounded-lg border border-dashed border-slate-200 p-6 text-center text-sm text-slate-400">No inventory value to distribute.</div>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="rounded-lg border-slate-200 shadow-sm">
-            <CardHeader className="flex flex-row items-center justify-between border-b border-slate-100 pb-4">
-              <CardTitle className="flex items-center gap-2 text-base text-slate-950">
-                 <AlertCircle className="h-4 w-4 text-rose-500" />
-                 Alert Engine
-              </CardTitle>
-              {dashboardAlerts.length > 0 && <Badge variant="danger" className="rounded-md px-2 py-0.5">{dashboardAlerts.length} Active</Badge>}
-            </CardHeader>
-            <CardContent className="max-h-[360px] overflow-y-auto overflow-hidden p-0">
-              {dashboardAlerts.length === 0 ? (
-                 <div className="p-6 text-center text-sm text-neutral-500">System architecture tracks purely optimal thresholds currently.</div>
-              ) : (
-                <div className="divide-y divide-neutral-100">
-                  {dashboardAlerts.map(alert => (
-                    <div key={alert.id} className="p-4 flex gap-3 hover:bg-neutral-50 transition-colors">
-                      <div className={`mt-0.5 p-1.5 rounded-md shrink-0 h-fit ${alert.severity === 'Critical' ? 'bg-danger-50 text-danger-600' : 'bg-warning-50 text-warning-600'}`}>
-                        {alert.group === 'supplier' ? <ShoppingCart className="h-4 w-4" /> : 
-                         alert.group === 'stock' ? <PackageX className="h-4 w-4" /> :
-                         alert.group === 'price' ? <DollarSign className="h-4 w-4" /> : <TrendingUp className="h-4 w-4" />}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex justify-between items-start w-full">
-                           <h4 className="text-sm font-semibold text-neutral-900 truncate pr-2">{alert.title}</h4>
-                           <span className={`text-[10px] uppercase font-bold tracking-wider shrink-0 ${alert.severity === 'Critical' ? 'text-danger-600' : 'text-warning-600'}`}>{alert.severity}</span>
-                        </div>
-                        <p className="text-xs text-neutral-500 mt-0.5 leading-relaxed">{alert.desc}</p>
-                        
-                        {(alert.oldPrice !== undefined && alert.newPrice !== undefined) && (
-                           <div className="flex items-center gap-2 mt-2 bg-white border border-neutral-200 rounded p-1.5 w-fit shadow-sm">
-                              <span className="text-[10px] text-neutral-500 font-medium line-through">${alert.oldPrice.toFixed(2)}</span>
-                              <ArrowRight className="h-3 w-3 text-neutral-400" />
-                              <span className="text-xs text-danger-600 font-bold">${alert.newPrice.toFixed(2)}</span>
-                           </div>
-                        )}
-                        
-                        <div className="flex items-center justify-between mt-3 flex-wrap gap-2">
-                           <span className="text-[10px] text-neutral-400 font-medium flex items-center gap-1">
-                              <Clock className="h-3 w-3" /> {alert.date}
-                           </span>
-                           <div className="flex items-center gap-2">
-                              {alert.poId && (
-                                 <button 
-                                   onClick={() => router.push(`/orders?openDraft=${alert.poId}`)} 
-                                   className="px-2 py-1 text-[10px] font-medium bg-white border border-neutral-200 text-neutral-700 rounded hover:bg-neutral-100 transition-colors shadow-sm"
-                                 >
-                                    View PO
-                                 </button>
-                              )}
-                              {alert.supplierId && (
-                                 <button 
-                                   onClick={() => router.push(`/suppliers?id=${alert.supplierId}`)} 
-                                   className="px-2 py-1 text-[10px] font-medium bg-white border border-neutral-200 text-neutral-700 rounded hover:bg-neutral-100 transition-colors shadow-sm"
-                                 >
-                                    View Vendor
-                                 </button>
-                              )}
-                              {(!alert.poId && !alert.supplierId && alert.actionLink) && (
-                                 <button 
-                                   onClick={() => router.push(alert.actionLink)} 
-                                   className="px-2 py-1 text-[10px] font-medium bg-white border border-neutral-200 text-neutral-700 rounded hover:bg-neutral-100 transition-colors shadow-sm"
-                                 >
-                                    Resolve
-                                 </button>
-                              )}
-                           </div>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
+          <CardContent className="p-5">
+            <div className="h-56">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie data={inventoryCategoryData} dataKey="value" innerRadius={58} outerRadius={88} paddingAngle={3}>
+                    {inventoryCategoryData.map((category, idx) => (
+                      <Cell key={category.name} fill={categoryColors[idx % categoryColors.length]} />
+                    ))}
+                  </Pie>
+                  <RechartsTooltip contentStyle={{ borderRadius: '10px', border: '1px solid #27272a', background: '#111', color: '#fafafa' }} formatter={(value) => `$${Number(value ?? 0).toLocaleString()}`} />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              {inventoryCategoryData.map((category, idx) => (
+                <div key={category.name} className="flex min-w-0 items-center gap-2 text-[11px] text-zinc-400">
+                  <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: categoryColors[idx % categoryColors.length] }} />
+                  <span className="truncate">{category.name}</span>
                 </div>
-              )}
-            </CardContent>
-          </Card>
-
-          <Card className="rounded-lg border-slate-200 shadow-sm">
-            <CardHeader className="flex flex-row items-center justify-between border-b border-slate-100 pb-4">
-              <CardTitle className="text-base text-slate-950">Recent Purchase Orders</CardTitle>
-              <button onClick={() => router.push('/orders')} className="text-sm font-semibold text-blue-600 hover:text-blue-700">View All</button>
-            </CardHeader>
-            <CardContent className="p-0">
-              <div className="divide-y divide-neutral-100">
-                {recentOrdersRender.length > 0 ? recentOrdersRender.map((order) => (
-                  <div key={order.id} onClick={() => router.push('/orders')} className="p-4 flex items-center justify-between hover:bg-neutral-50 transition-colors cursor-pointer">
-                    <div className="flex items-center gap-3">
-                      <div className="p-2 bg-neutral-100 rounded-md shrink-0">
-                        <FileText className="h-4 w-4 text-neutral-600" />
-                      </div>
-                      <div>
-                        <h4 className="text-sm font-semibold text-neutral-900">{order.supplier}</h4>
-                        <div className="flex items-center text-xs text-neutral-500 mt-0.5 gap-2">
-                          <span>{order.id}</span>
-                          <span>•</span>
-                          <span className="flex items-center gap-1"><Clock className="h-3 w-3" />{order.date}</span>
-                        </div>
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-sm font-medium text-neutral-900">${order.total.toFixed(2)}</p>
-                      <Badge variant={order.status === 'Delivered' ? 'success' : order.status === 'Sent' ? 'default' : 'warning'} className="text-[10px] mt-1 px-1.5 py-0 h-4">
-                        {order.status}
-                      </Badge>
-                    </div>
-                  </div>
-                )) : (
-                  <div className="p-4 text-sm text-neutral-500 text-center">No recent orders synced.</div>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-        </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
       </div>
 
-      {/* Low Stock Table */}
-      <Card className="overflow-hidden rounded-lg border-slate-200 shadow-sm">
-        <CardHeader className="flex flex-col gap-3 border-b border-slate-100 pb-4 sm:flex-row sm:items-center sm:justify-between">
+      {smartSuggestions.length > 0 && (
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_220px]">
+          <div className="rounded-xl border border-blue-500/20 bg-[#101827] p-4 shadow-[0_18px_50px_rgba(0,0,0,0.28)]">
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex min-w-0 items-center gap-3">
+                <div className="rounded-lg bg-blue-600 p-2 text-white">
+                  <Sparkles className="h-4 w-4" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-sm font-semibold text-white">Smart Action Center</h3>
+                  <p className="mt-1 truncate text-xs text-blue-100/65">{smartSuggestions[0]?.title}</p>
+                </div>
+              </div>
+              <button onClick={smartSuggestions[0]?.onClick} className="shrink-0 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-500">
+                {smartSuggestions[0]?.actionText}
+              </button>
+            </div>
+          </div>
+          <button onClick={() => router.push('/approvals')} className="rounded-xl border border-white/10 bg-[#151515] p-4 text-left shadow-[0_18px_50px_rgba(0,0,0,0.24)] transition-colors hover:bg-[#1b1b1b]">
+            <div className="flex items-center justify-between">
+              <div className="rounded-lg bg-violet-500 p-2 text-white">
+                <CheckSquare className="h-4 w-4" />
+              </div>
+              <span className="text-xs font-semibold text-violet-300">{approvalCount} pending</span>
+            </div>
+          </button>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-5 md:grid-cols-12">
+        <Card className="rounded-xl border-white/10 bg-[#111111] shadow-[0_18px_50px_rgba(0,0,0,0.32)] md:col-span-4">
+          <CardHeader className="flex flex-row items-center justify-between border-b border-white/5 pb-4">
+            <CardTitle className="flex items-center gap-2 text-base text-white">
+              <AlertCircle className="h-4 w-4 text-red-400" />
+              Stock Alerts
+            </CardTitle>
+            <Badge variant="danger" className="rounded-md bg-red-500/15 px-2 py-0.5 text-red-300">{dashboardAlerts.length} Alert</Badge>
+          </CardHeader>
+          <CardContent className="space-y-3 p-4">
+            {alertPreview.map(alert => (
+              <div key={alert.id} className="rounded-lg border border-white/10 bg-[#181818] p-3">
+                <div className="flex items-start gap-3">
+                  <div className={`mt-0.5 rounded-md p-2 ${alert.severity === 'Critical' ? 'bg-red-500/15 text-red-400' : 'bg-amber-500/15 text-amber-400'}`}>
+                    {alert.group === 'supplier' ? <ShoppingCart className="h-4 w-4" /> : alert.group === 'stock' ? <PackageX className="h-4 w-4" /> : <TrendingUp className="h-4 w-4" />}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <h4 className="truncate text-xs font-semibold text-white">{alert.title}</h4>
+                      <span className={`text-[10px] font-bold uppercase ${alert.severity === 'Critical' ? 'text-red-400' : 'text-amber-400'}`}>{alert.severity}</span>
+                    </div>
+                    <p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-zinc-500">{alert.desc}</p>
+                    <div className="mt-2 flex items-center justify-between gap-2">
+                      <span className="text-[10px] text-zinc-600">{alert.date}</span>
+                      {alert.actionLink && (
+                        <button onClick={() => router.push(alert.actionLink)} className="rounded-md border border-white/10 px-2 py-1 text-[10px] font-semibold text-zinc-300 hover:bg-white/5">Resolve</button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+
+        <Card className="rounded-xl border-white/10 bg-[#111111] shadow-[0_18px_50px_rgba(0,0,0,0.32)] md:col-span-8">
+          <CardHeader className="flex flex-row items-center justify-between border-b border-white/5 pb-4">
+            <CardTitle className="text-base text-white">Recent Transactions</CardTitle>
+            <button onClick={() => router.push('/orders')} className="text-xs font-semibold text-zinc-300 hover:text-white">View All</button>
+          </CardHeader>
+          <CardContent className="p-0">
+            <Table>
+              <TableHeader className="bg-[#151515]">
+                <TableRow className="border-white/5">
+                  <TableHead className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">PO</TableHead>
+                  <TableHead className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">Supplier</TableHead>
+                  <TableHead className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">Date</TableHead>
+                  <TableHead className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">Status</TableHead>
+                  <TableHead className="text-right text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">Total</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {recentOrdersRender.length > 0 ? recentOrdersRender.map(order => (
+                  <TableRow key={order.id} onClick={() => router.push('/orders')} className="cursor-pointer border-white/5 hover:bg-white/[0.03]">
+                    <TableCell className="font-mono text-xs text-zinc-400">{order.id}</TableCell>
+                    <TableCell className="font-medium text-white">{order.supplier}</TableCell>
+                    <TableCell className="text-zinc-500">{order.date}</TableCell>
+                    <TableCell>
+                      <span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${order.status === 'Delivered' ? 'bg-emerald-500/15 text-emerald-300' : order.status === 'Sent' ? 'bg-blue-500/15 text-blue-300' : 'bg-amber-500/15 text-amber-300'}`}>
+                        {order.status}
+                      </span>
+                    </TableCell>
+                    <TableCell className="text-right font-semibold text-white">${order.total.toFixed(2)}</TableCell>
+                  </TableRow>
+                )) : (
+                  <TableRow className="border-white/5">
+                    <TableCell colSpan={5} className="py-8 text-center text-sm text-zinc-500">No recent orders synced.</TableCell>
+                  </TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      </div>
+
+      <Card className="overflow-hidden rounded-xl border-white/10 bg-[#111111] shadow-[0_18px_50px_rgba(0,0,0,0.32)]">
+        <CardHeader className="flex flex-col gap-3 border-b border-white/5 pb-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <CardTitle className="flex items-center gap-2 text-base text-slate-950">
-              <Boxes className="h-4 w-4 text-amber-600" />
+            <CardTitle className="flex items-center gap-2 text-base text-white">
+              <Boxes className="h-4 w-4 text-amber-400" />
               Low Stock Action Center
             </CardTitle>
-            <CardDescription className="mt-1">Items below par requiring immediate reorder.</CardDescription>
+            <CardDescription className="mt-1 text-zinc-500">Items below par requiring immediate reorder.</CardDescription>
           </div>
           <button 
             onClick={handleOpenBulkGenerate}
             disabled={lowStockItems.length === 0}
-            className="flex items-center justify-center gap-2 rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white shadow-lg shadow-blue-600/20 transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
           >
             Auto-Generate POs
             <ArrowRight className="h-4 w-4" />
@@ -829,30 +768,30 @@ export default function Dashboard() {
         </CardHeader>
         <CardContent className="p-0">
           {topLowStock.length > 0 && (
-            <div className="grid grid-cols-1 gap-3 border-b border-slate-100 bg-slate-50/70 p-4 md:grid-cols-5">
+            <div className="grid grid-cols-1 gap-3 border-b border-white/5 bg-[#0d0d0d] p-4 md:grid-cols-5">
               {topLowStock.map(item => {
                 const stockRatio = item.parLevel > 0 ? Math.max(0, Math.min(100, (item.inStock / item.parLevel) * 100)) : 0;
                 return (
-                  <div key={item.id} className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
-                    <p className="truncate text-xs font-semibold text-slate-900">{item.name}</p>
-                    <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100">
+                  <div key={item.id} className="rounded-lg border border-white/10 bg-[#181818] p-3">
+                    <p className="truncate text-xs font-semibold text-white">{item.name}</p>
+                    <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10">
                       <div className={stockRatio < 30 ? "h-full rounded-full bg-rose-500" : "h-full rounded-full bg-amber-500"} style={{ width: `${stockRatio}%` }} />
                     </div>
-                    <p className="mt-2 text-[10px] font-medium text-slate-500">{item.inStock} / {item.parLevel} {item.unit}</p>
+                    <p className="mt-2 text-[10px] font-medium text-zinc-500">{item.inStock} / {item.parLevel} {item.unit}</p>
                   </div>
                 );
               })}
             </div>
           )}
           <Table>
-            <TableHeader className="bg-slate-50">
-              <TableRow>
-                <TableHead className="font-semibold text-slate-600">Item Name</TableHead>
-                <TableHead className="font-semibold text-slate-600">Status</TableHead>
-                <TableHead className="font-semibold text-slate-600">Current Stock</TableHead>
-                <TableHead className="font-semibold text-slate-600">Par Level</TableHead>
-                <TableHead className="font-semibold text-slate-600">Suggested Reorder</TableHead>
-                <TableHead className="text-right font-semibold text-slate-600">Action</TableHead>
+            <TableHeader className="bg-[#151515]">
+              <TableRow className="border-white/5">
+                <TableHead className="font-semibold text-zinc-500">Item Name</TableHead>
+                <TableHead className="font-semibold text-zinc-500">Status</TableHead>
+                <TableHead className="font-semibold text-zinc-500">Current Stock</TableHead>
+                <TableHead className="font-semibold text-zinc-500">Par Level</TableHead>
+                <TableHead className="font-semibold text-zinc-500">Suggested Reorder</TableHead>
+                <TableHead className="text-right font-semibold text-zinc-500">Action</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -863,20 +802,20 @@ export default function Dashboard() {
                   const suggestedReorder = item.parLevel - item.inStock;
                   
                   return (
-                    <TableRow key={item.id} className="transition-colors hover:bg-slate-50/70">
-                      <TableCell className="font-semibold text-slate-950">{item.name}</TableCell>
+                    <TableRow key={item.id} className="border-white/5 transition-colors hover:bg-white/[0.03]">
+                      <TableCell className="font-semibold text-white">{item.name}</TableCell>
                       <TableCell>
                         <Badge variant={item.inStock === 0 ? 'danger' : isCritical ? 'danger' : 'warning'} className="px-2">
                           {item.inStock === 0 ? "Out of Stock" : isCritical ? "Critical" : "Low"}
                         </Badge>
                       </TableCell>
-                      <TableCell className="font-medium text-slate-500">{item.inStock} {item.unit}</TableCell>
-                      <TableCell className="text-slate-500">{item.parLevel} {item.unit}</TableCell>
-                      <TableCell className="font-semibold text-amber-600">{suggestedReorder} {item.unit}</TableCell>
+                      <TableCell className="font-medium text-zinc-500">{item.inStock} {item.unit}</TableCell>
+                      <TableCell className="text-zinc-500">{item.parLevel} {item.unit}</TableCell>
+                      <TableCell className="font-semibold text-amber-400">{suggestedReorder} {item.unit}</TableCell>
                       <TableCell className="text-right">
                         <button 
                           onClick={() => handleAddToPO(item)}
-                          className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 shadow-sm transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
+                          className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-white/5 px-3 py-1.5 text-sm font-semibold text-zinc-200 transition-colors hover:bg-blue-600 hover:text-white"
                         >
                           <Plus className="h-3.5 w-3.5" />
                           Add to PO
@@ -886,8 +825,8 @@ export default function Dashboard() {
                   );
                 })
               ) : (
-                <TableRow>
-                  <TableCell colSpan={6} className="text-center py-6 text-sm text-neutral-500">
+                <TableRow className="border-white/5">
+                  <TableCell colSpan={6} className="text-center py-6 text-sm text-zinc-500">
                     All inventory items are fully stocked above par.
                   </TableCell>
                 </TableRow>
@@ -896,6 +835,17 @@ export default function Dashboard() {
           </Table>
         </CardContent>
       </Card>
+
+      {isHQAdmin && (
+        <Card className="rounded-xl border-white/10 bg-[#111111] shadow-[0_18px_50px_rgba(0,0,0,0.32)]">
+          <CardHeader className="border-b border-white/5 pb-4">
+            <CardTitle className="text-base text-white">Cross-Location Review</CardTitle>
+          </CardHeader>
+          <CardContent className="p-5 text-zinc-900">
+            <HQLocationReview locations={locations} />
+          </CardContent>
+        </Card>
+      )}
 
       {/* Bulk Generate Preview Drawer */}
       <Drawer
@@ -978,6 +928,7 @@ export default function Dashboard() {
           )}
         </div>
       </Drawer>
+      </div>
     </div>
   );
 }
