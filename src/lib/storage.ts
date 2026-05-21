@@ -1494,39 +1494,65 @@ export async function upsertRecipe(
 ): Promise<{ success: boolean; error?: any }> {
   const row = mapRecipeToDB(recipe);
   const payloadBytes = JSON.stringify(row).length;
-  console.debug("[upsertRecipe] payload:", payloadBytes, "bytes | ingredients:", row.ingredients.length);
+  console.debug("[upsertRecipe] payload:", payloadBytes, "bytes | ingredients:", row.ingredients.length,
+    "| output_item_id:", row.output_item_id, "| output_item_type:", row.output_item_type);
 
   // Build the PostgREST upsert URL
   const url = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1/recipes?on_conflict=id`;
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? '';
 
   // Get the current session token for authenticated requests.
-  // Falls back to the anon key if no active session (e.g. during SSR or cold load).
   const { data: { session } } = await supabase.auth.getSession();
   const authHeader = session?.access_token ? `Bearer ${session.access_token}` : `Bearer ${key}`;
 
-  try {
+  const doFetch = async (body: object, sig?: AbortSignal) => {
     const resp = await fetch(url, {
       method: 'POST',
-      signal,
+      signal: sig,
       headers: {
         'Content-Type': 'application/json',
         'apikey': key,
         'Authorization': authHeader,
         'Prefer': 'resolution=merge-duplicates,return=minimal',
       },
-      body: JSON.stringify(row),
+      body: JSON.stringify(body),
     });
-
     if (!resp.ok) {
       let errBody: any = {};
       try { errBody = await resp.json(); } catch { errBody = { message: resp.statusText }; }
-      console.error("[upsertRecipe] HTTP", resp.status, errBody);
-      return { success: false, error: errBody };
+      return { ok: false, status: resp.status, errBody };
+    }
+    return { ok: true };
+  };
+
+  try {
+    const result = await doFetch(row, signal);
+    if (!result.ok) {
+      const errMsg: string = result.errBody?.message ?? result.errBody?.hint ?? '';
+      // If migration_prep_output.sql has NOT been run yet, PostgREST returns
+      // HTTP 400 with "column output_item_id does not exist" (or similar).
+      // In that case: retry without the new columns so the save still succeeds.
+      // The output linkage will be lost until the migration is applied.
+      const isMissingColumn = errMsg.includes('output_item_id') || errMsg.includes('output_item_type');
+      if (isMissingColumn) {
+        console.warn(
+          '[upsertRecipe] output columns not found in DB — migration_prep_output.sql may not have been run. ' +
+          'Retrying without output_item_id / output_item_type. Run the migration to persist recipe output linking.'
+        );
+        // Omit the new columns and retry
+        const { output_item_id: _oid, output_item_type: _otype, ...rowWithoutOutput } = row;
+        const retry = await doFetch(rowWithoutOutput, signal);
+        if (!retry.ok) {
+          console.error("[upsertRecipe] HTTP", retry.status, retry.errBody);
+          return { success: false, error: retry.errBody };
+        }
+        return { success: true };
+      }
+      console.error("[upsertRecipe] HTTP", result.status, result.errBody);
+      return { success: false, error: result.errBody };
     }
     return { success: true };
   } catch (err: any) {
-    // AbortError means the caller cancelled (timeout) — re-throw so withAbortableTimeout catch handles it
     if (err?.name === 'AbortError') throw err;
     console.error("[upsertRecipe] fetch error", err);
     return { success: false, error: { message: err?.message ?? 'Network error' } };

@@ -555,13 +555,10 @@ function RecipesPageContent() {
       };
 
       // ── Step 1: upsert the single recipe row ────────────────────────────────
-      // Uses withAbortableTimeout so the underlying fetch() is actually cancelled
-      // (not just orphaned) when the 30 s deadline fires.
-      //
-      // KEY FIX: upsertRecipe now uses raw fetch() and accepts the AbortSignal.
-      // Previously: supabase.from().upsert() ignores signals → zombie TCP request
-      //   blocked the NEXT save attempt, causing cascading timeouts.
-      // Now: abort() tears down the HTTP connection immediately.
+      // Diagnostic log — verify output linkage before save
+      console.log(
+        `[saveRecipe] saving "${recipeData.name}" | outputItemId="${recipeData.outputItemId}" | outputItemType="${recipeData.outputItemType}" | id="${recipeData.id}"`
+      );
       console.debug("[saveRecipe] step 1: upsertRecipe", recipeData.id,
         "| ingredients:", ingredients.length);
       const SAVE_TIMEOUT_MS = Math.max(30_000, 20_000); // 30 s, floor of 20 s

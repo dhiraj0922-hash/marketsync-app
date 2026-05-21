@@ -440,51 +440,89 @@ export default function FinishedGoods() {
   // ── Recipe lookup ─────────────────────────────────────────────────────────
   // Lookup priority:
   //   1. sourceRecipeId  — hq_sale_items.source_recipe_id (UUID FK → recipes.id)
-  //   2. outputItemId    — covers inventory_items-based items (FG path)
-  //   3. outputItemId + outputItemType=prep — prep inventory items (NEW)
-  //   4. Name-match      — last resort for hq_sale_items only
-  //   5. Name-match      — last resort for prep inventory items
+  //   2. outputItemId matches fg.id (inventory row PK)
+  //   3. outputItemId matches fg.itemId (shared identity column)
+  //   4. outputItemType=prep + outputItemId matches fg.id or fg.itemId (explicit prep link)
+  //   5. Name-match — hq_sale_items only
+  //   6. Name-match — prep inventory items (outputItemType=prep)
   const findRecipeForFg = (fg: any) => {
+    const fgIdStr     = String(fg.id     ?? '');
+    const fgItemIdStr = String(fg.itemId ?? '');
+
+    // Diagnostic log — fires once per item render; check browser console
+    console.log(
+      `[findRecipeForFg] checking "${fg.name}" | fg.id="${fgIdStr}" | fg.itemId="${fgItemIdStr}" | fg.itemType="${fg.itemType}" | fg._source="${fg._source ?? 'inventory_items'}"`
+    );
+
+    // Log all recipes' output links so mismatch is immediately visible
+    if (process.env.NODE_ENV !== 'production') {
+      recipes.forEach(r => {
+        if (r.outputItemId) {
+          console.log(
+            `  recipe "${r.name}" outputItemId="${r.outputItemId}" outputItemType="${r.outputItemType}"`
+          );
+        }
+      });
+    }
+
     // 1. source_recipe_id — the canonical link stored on hq_sale_items
     if (fg.sourceRecipeId) {
       const bySourceId = recipes.find(
         (r) => r.id?.toString() === fg.sourceRecipeId.toString()
       );
-      if (bySourceId) return bySourceId;
+      if (bySourceId) {
+        console.log(`  [findRecipeForFg] MATCH via sourceRecipeId → "${bySourceId.name}"`);
+        return bySourceId;
+      }
       console.warn(
         `[findRecipeForFg] source_recipe_id=${fg.sourceRecipeId} not found in loaded recipes for "${fg.name}"`
       );
     }
 
-    // 2. outputItemId match (inventory_items FG path — existing)
-    const byOutputId = recipes.find(
-      (r) => r.outputItemId?.toString() === fg.id.toString()
-        && (r.outputItemType !== 'prep')  // prefer non-prep match first
-    );
-    if (byOutputId) return byOutputId;
-
-    // 3. Prep item match — recipe explicitly typed as 'prep' output linking this inventory item
-    const byPrepOutputId = recipes.find(
-      (r) => r.outputItemId?.toString() === fg.id.toString()
-        && r.outputItemType === 'prep'
-    );
-    if (byPrepOutputId) return byPrepOutputId;
-
-    // 4. Name-match fallback — hq_sale_items only, exact match
-    if (fg._source === "hq_sale_items") {
-      const norm = fg.name.trim().toLowerCase();
-      return recipes.find((r) => r.name?.trim().toLowerCase() === norm) ?? null;
+    // 2 & 3. outputItemId matches fg.id OR fg.itemId — FG path (non-prep first)
+    const byOutputId = recipes.find((r) => {
+      if (!r.outputItemId || r.outputItemType === 'prep') return false;
+      const oid = String(r.outputItemId);
+      return oid === fgIdStr || (fgItemIdStr && oid === fgItemIdStr);
+    });
+    if (byOutputId) {
+      console.log(`  [findRecipeForFg] MATCH via outputItemId (FG) id/itemId → "${byOutputId.name}"`);
+      return byOutputId;
     }
 
-    // 5. Name-match fallback — prep inventory items (itemType === 'Preparation')
+    // 4. Prep item match — recipe.outputItemType === 'prep', matches fg.id OR fg.itemId
+    const byPrepOutputId = recipes.find((r) => {
+      if (!r.outputItemId || r.outputItemType !== 'prep') return false;
+      const oid = String(r.outputItemId);
+      return oid === fgIdStr || (fgItemIdStr && oid === fgItemIdStr);
+    });
+    if (byPrepOutputId) {
+      console.log(`  [findRecipeForFg] MATCH via outputItemId (Prep) id/itemId → "${byPrepOutputId.name}"`);
+      return byPrepOutputId;
+    }
+
+    // 5. Name-match fallback — hq_sale_items only, exact match
+    if (fg._source === "hq_sale_items") {
+      const norm = fg.name.trim().toLowerCase();
+      const byName = recipes.find((r) => r.name?.trim().toLowerCase() === norm) ?? null;
+      if (byName) console.log(`  [findRecipeForFg] MATCH via name (hq_sale_items) → "${byName.name}"`);
+      else console.log(`  [findRecipeForFg] NO MATCH for "${fg.name}" (hq_sale_items)`);
+      return byName;
+    }
+
+    // 6. Name-match fallback — prep inventory items
     if (fg.itemType === "Preparation") {
       const norm = fg.name.trim().toLowerCase();
       const byName = recipes.find(
         (r) => r.outputItemType === 'prep' && r.name?.trim().toLowerCase() === norm
       );
-      if (byName) return byName;
+      if (byName) {
+        console.log(`  [findRecipeForFg] MATCH via name (Prep) → "${byName.name}"`);
+        return byName;
+      }
     }
 
+    console.log(`  [findRecipeForFg] NO MATCH for "${fg.name}" (all paths exhausted)`);
     return null;
   };
 
