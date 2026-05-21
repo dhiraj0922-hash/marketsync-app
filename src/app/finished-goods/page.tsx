@@ -42,6 +42,7 @@ import {
   loadProductionMovements,
   upsertRecipe,
   syncLinkedFgCost,
+  updateInventoryLinkedRecipe,
   type ProductionMovementRow,
 } from "@/lib/storage";
 import {
@@ -120,14 +121,53 @@ const FILTER_TABS: { key: FilterMode; label: string }[] = [
   { key: "prep",  label: "Prep / Base" },
 ];
 
+const stockIqDarkShellCss = `
+  body .flex.bg-neutral-50.text-neutral-900.min-h-screen {
+    background: #070707 !important;
+    color: #e4e4e7 !important;
+  }
+  body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] {
+    background: #111111 !important;
+    border-color: #262626 !important;
+  }
+  body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] a,
+  body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] button {
+    color: #a1a1aa !important;
+  }
+  body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] a[class*="bg-brand-50"],
+  body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] a:hover {
+    background: #2563eb !important;
+    color: #ffffff !important;
+  }
+  body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] svg {
+    color: currentColor !important;
+  }
+  body header[class*="bg-white"][class*="border-b"] {
+    background: #111111 !important;
+    border-color: #262626 !important;
+    box-shadow: none !important;
+  }
+  body header[class*="bg-white"] h1,
+  body header[class*="bg-white"] button,
+  body header[class*="bg-white"] span {
+    color: #e4e4e7 !important;
+  }
+  body header[class*="bg-white"] input,
+  body header[class*="bg-white"] [role="button"] {
+    background: #171717 !important;
+    border-color: #262626 !important;
+    color: #e4e4e7 !important;
+  }
+`;
+
 // ─── Badges ──────────────────────────────────────────────────────────────────
 function ClassBadge({ cls }: { cls: ItemClass }) {
   return cls === "final" ? (
-    <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-brand-50 text-brand-700 border border-brand-200">
+    <span className="inline-flex items-center gap-1 rounded-full border border-blue-500/20 bg-blue-500/15 px-2 py-0.5 text-[10px] font-bold text-blue-300">
       <Layers className="h-2.5 w-2.5" /> Final
     </span>
   ) : (
-    <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-neutral-100 text-neutral-600 border border-neutral-200">
+    <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/20 bg-amber-500/15 px-2 py-0.5 text-[10px] font-bold text-amber-300">
       <ChefHat className="h-2.5 w-2.5" /> Prep
     </span>
   );
@@ -214,6 +254,12 @@ export default function FinishedGoods() {
   const [recipeUpdateConfirm, setRecipeUpdateConfirm] = useState<RecipeUpdateTarget | null>(null);
   const [recipeUpdateSaving,  setRecipeUpdateSaving]  = useState(false);
   const [recipeUpdateError,   setRecipeUpdateError]   = useState<string | null>(null);
+
+  // ── Prep recipe linking state ─────────────────────────────────────────────
+  // linkingRecipeFor: the inventory item id whose recipe picker is open (null = closed)
+  const [linkingRecipeFor,  setLinkingRecipeFor]  = useState<string | null>(null);
+  const [recipeSearchQuery, setRecipeSearchQuery] = useState("");
+  const [savingLinkFor,     setSavingLinkFor]     = useState<string | null>(null);
 
   // ── Handler: permanently swap one ingredient in a recipe ─────────────────
   async function handleUpdateRecipeIngredient() {
@@ -541,7 +587,7 @@ export default function FinishedGoods() {
   // ── Production constraints ───────────────────────────────────────────────
   // Unchanged from original — no production logic modified.
   const getProductionConstraints = (fg: any, batches: number) => {
-    const recipe = findRecipeForFg(fg);
+    const recipe = getRecipeForItem(fg);
     if (!recipe || !recipe.ingredients)
       return { valid: true, shortages: [], maxBatches: -1, yield: 0, ingredientsCheck: [] };
 
@@ -655,7 +701,7 @@ export default function FinishedGoods() {
     autoFulfill: boolean
   ) => {
     const rule   = getProductionConstraints(fg, targetBatches);
-    const recipe = findRecipeForFg(fg);
+    const recipe = getRecipeForItem(fg);
     if (!recipe || !rule) return;
 
     const isHqItem = fg._source === "hq_sale_items";
@@ -939,7 +985,7 @@ export default function FinishedGoods() {
   const openAutoFulfillModule = (e: any, fg: any) => {
     e.stopPropagation();
     const demand = reqBackorders.get(fg.id) || 0;
-    const recipe = findRecipeForFg(fg);
+    const recipe = getRecipeForItem(fg);
 
     if (demand <= 0 || !recipe) {
       alert("No open backorders found for this item, or Recipe is missing.");
@@ -950,6 +996,39 @@ export default function FinishedGoods() {
     setSelectedFG(fg);
     setProduceBatches(theoreticalBatchesRequired);
     setIsAutoFulfillMode(true);
+  };
+
+  // ── handleLinkRecipe: assign or clear a recipe for a prep inventory item ──
+  const handleLinkRecipe = async (prepItemId: string, recipeId: string | null) => {
+    setSavingLinkFor(prepItemId);
+    const res = await updateInventoryLinkedRecipe(prepItemId, recipeId);
+    setSavingLinkFor(null);
+    if (!res.success) {
+      alert(`Failed to save recipe link: ${res.error?.message ?? 'Unknown error'}\n\nMake sure migration_linked_recipe.sql has been run in Supabase.`);
+      return;
+    }
+    // Mirror into local inventoryData immediately — no full reload needed
+    setInventoryData((prev: any[]) =>
+      prev.map((item: any) =>
+        item.id.toString() === prepItemId.toString()
+          ? { ...item, linkedRecipeId: recipeId }
+          : item
+      )
+    );
+    setLinkingRecipeFor(null);
+    setRecipeSearchQuery("");
+  };
+
+  // ── getLinkedRecipe: authoritative recipe lookup for prep inventory items ──
+  // For prep items: use fg.linkedRecipeId directly (explicit HQ mapping).
+  // For FG/hq_sale_items: fall through to findRecipeForFg() which handles
+  //   sourceRecipeId / outputItemId / name-match paths.
+  const getRecipeForItem = (fg: any) => {
+    if (fg.itemType === "Preparation" && fg.linkedRecipeId) {
+      return recipes.find((r) => r.id?.toString() === fg.linkedRecipeId.toString()) ?? null;
+    }
+    // Non-prep items — FG workflow unchanged
+    return findRecipeForFg(fg);
   };
 
   // ─── JSX ───────────────────────────────────────────────────────────────────
@@ -1079,7 +1158,7 @@ export default function FinishedGoods() {
               {filteredFGs.length > 0 ? (
                 filteredFGs.map((fg) => {
                   const cls        = classMap.get(String(fg.id)) ?? "final";
-                  const recipe     = findRecipeForFg(fg);
+                  const recipe     = getRecipeForItem(fg);
                   const hasRecipe  = !!recipe;
                   const isHqSource = fg._source === "hq_sale_items";
                   const backorders = reqBackorders.get(fg.id) || 0;
@@ -1089,6 +1168,13 @@ export default function FinishedGoods() {
                     <TableRow
                       key={fg.id}
                       className="cursor-pointer transition-colors hover:bg-neutral-50/50"
+                      onClick={() => {
+                        // Close recipe picker if user clicks a different row
+                        if (linkingRecipeFor && linkingRecipeFor !== fg.id.toString()) {
+                          setLinkingRecipeFor(null);
+                          setRecipeSearchQuery("");
+                        }
+                      }}
                     >
                       {/* Item name + ID */}
                       <TableCell className="px-6 py-3">
@@ -1117,27 +1203,95 @@ export default function FinishedGoods() {
                         <ClassBadge cls={cls} />
                       </TableCell>
 
-                      {/* Recipe badge */}
-                      <TableCell className="py-3">
-                        <div className="flex flex-col gap-0.5">
-                          <RecipeBadge
-                            linked={hasRecipe}
-                            recipeId={recipe?.id ?? null}
-                            recipeName={recipe?.name ?? null}
-                            onNavigate={
-                              hasRecipe && recipe?.id
-                                ? () => router.push(`/recipes?recipeId=${encodeURIComponent(recipe.id)}`)
-                                : undefined
-                            }
-                          />
-                          {hasRecipe && (
-                            <span className="text-[10px] text-neutral-400 truncate max-w-[140px]">
-                              {recipe.yieldQty} {recipe.yieldUnit} · {recipe.ingredients?.length ?? 0} ing.
-                            </span>
-                          )}
-                        </div>
-                      </TableCell>
+                      {/* Recipe / Linked Recipe column */}
+                      <TableCell className="py-3" style={{minWidth: 200}}>
+                        {fg.itemType === "Preparation" ? (
+                          // ── Prep items: explicit HQ-controlled linking ────
+                          <div className="flex flex-col gap-1">
+                            {/* Current linked recipe badge */}
+                            {hasRecipe ? (
+                              <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200 w-fit">
+                                <CheckCircle2 className="h-2.5 w-2.5 shrink-0" />
+                                <span className="truncate max-w-[120px]">{recipe!.name}</span>
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 w-fit">
+                                <AlertTriangle className="h-2.5 w-2.5 shrink-0" /> No Recipe Linked
+                              </span>
+                            )}
 
+                            {/* Link Recipe picker */}
+                            {linkingRecipeFor === fg.id.toString() ? (
+                              <div className="relative mt-1" onClick={e => e.stopPropagation()}>
+                                <input
+                                  autoFocus
+                                  type="text"
+                                  placeholder="Search recipe…"
+                                  value={recipeSearchQuery}
+                                  onChange={e => setRecipeSearchQuery(e.target.value)}
+                                  className="w-full px-2 py-1 text-xs border border-brand-300 rounded focus:outline-none focus:ring-1 focus:ring-brand-500"
+                                />
+                                <div className="absolute z-50 top-full left-0 w-full mt-0.5 bg-white border border-neutral-200 rounded-md shadow-lg max-h-48 overflow-y-auto">
+                                  {fg.linkedRecipeId && (
+                                    <button
+                                      className="w-full text-left px-2 py-1.5 text-xs text-red-600 hover:bg-red-50 border-b border-neutral-100 font-semibold"
+                                      onClick={() => handleLinkRecipe(fg.id.toString(), null)}
+                                    >✕ Remove Link</button>
+                                  )}
+                                  {recipes
+                                    .filter(r => !recipeSearchQuery || r.name?.toLowerCase().includes(recipeSearchQuery.toLowerCase()))
+                                    .slice(0, 30)
+                                    .map(r => (
+                                      <button
+                                        key={r.id}
+                                        className={`w-full text-left px-2 py-1.5 text-xs hover:bg-brand-50 transition-colors ${fg.linkedRecipeId === r.id ? 'bg-brand-50 text-brand-700 font-semibold' : 'text-neutral-700'}`}
+                                        onClick={() => handleLinkRecipe(fg.id.toString(), r.id)}
+                                      >
+                                        {r.name}
+                                        <span className="text-neutral-400 ml-1">({r.yieldQty} {r.yieldUnit})</span>
+                                      </button>
+                                    ))
+                                  }
+                                  {recipes.filter(r => !recipeSearchQuery || r.name?.toLowerCase().includes(recipeSearchQuery.toLowerCase())).length === 0 && (
+                                    <p className="px-2 py-2 text-xs text-neutral-400 italic">No recipes match</p>
+                                  )}
+                                </div>
+                                <button
+                                  className="mt-1 text-[10px] text-neutral-400 hover:text-neutral-600"
+                                  onClick={e => { e.stopPropagation(); setLinkingRecipeFor(null); setRecipeSearchQuery(""); }}
+                                >Cancel</button>
+                              </div>
+                            ) : (
+                              <button
+                                disabled={savingLinkFor === fg.id.toString()}
+                                onClick={e => { e.stopPropagation(); setLinkingRecipeFor(fg.id.toString()); setRecipeSearchQuery(""); }}
+                                className="text-[10px] px-2 py-0.5 rounded border border-brand-200 text-brand-600 hover:bg-brand-50 w-fit mt-0.5 font-semibold disabled:opacity-50"
+                              >
+                                {savingLinkFor === fg.id.toString() ? "Saving…" : hasRecipe ? "Change" : "Link Recipe"}
+                              </button>
+                            )}
+                          </div>
+                        ) : (
+                          // ── FG items: existing RecipeBadge display ────────
+                          <div className="flex flex-col gap-0.5">
+                            <RecipeBadge
+                              linked={hasRecipe}
+                              recipeId={recipe?.id ?? null}
+                              recipeName={recipe?.name ?? null}
+                              onNavigate={
+                                hasRecipe && recipe?.id
+                                  ? () => router.push(`/recipes?recipeId=${encodeURIComponent(recipe!.id)}`)
+                                  : undefined
+                              }
+                            />
+                            {hasRecipe && (
+                              <span className="text-[10px] text-neutral-400 truncate max-w-[140px]">
+                                {recipe!.yieldQty} {recipe!.yieldUnit} · {recipe!.ingredients?.length ?? 0} ing.
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </TableCell>
 
                       {/* Stock */}
                       <TableCell className="py-3">
@@ -1182,19 +1336,33 @@ export default function FinishedGoods() {
                               <RefreshCw className="h-3.5 w-3.5" /> Auto-Fulfill
                             </button>
                           )}
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setProduceBatches(1);
-                              setSelectedFG(fg);
-                              setIsAutoFulfillMode(false);
-                            }}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-brand-50 text-brand-700 hover:bg-brand-100 rounded-md text-xs font-semibold transition-colors"
-                          >
-                            <PackagePlus className="h-3.5 w-3.5" /> Produce
-                          </button>
+                          {(() => {
+                            // Prep items require explicit linked recipe before producing
+                            const isPrepItem = fg.itemType === "Preparation";
+                            const canProduce = !isPrepItem || !!fg.linkedRecipeId;
+                            return (
+                              <button
+                                disabled={!canProduce}
+                                title={!canProduce ? "Link a recipe first using the 'Link Recipe' button" : undefined}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setProduceBatches(1);
+                                  setSelectedFG(fg);
+                                  setIsAutoFulfillMode(false);
+                                }}
+                                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${
+                                  canProduce
+                                    ? "bg-brand-50 text-brand-700 hover:bg-brand-100 cursor-pointer"
+                                    : "bg-neutral-100 text-neutral-400 cursor-not-allowed"
+                                }`}
+                              >
+                                <PackagePlus className="h-3.5 w-3.5" /> Produce
+                              </button>
+                            );
+                          })()}
                         </div>
                       </TableCell>
+
                     </TableRow>
                   );
                 })
@@ -1223,14 +1391,14 @@ export default function FinishedGoods() {
           setSubstituteModal(null);
         }}
         title={(() => {
-          const recipe = selectedFG ? findRecipeForFg(selectedFG) : null;
+          const recipe = selectedFG ? getRecipeForItem(selectedFG) : null;
           const isPrepOutput = recipe?.outputItemType === 'prep' || selectedFG?.itemType === 'Preparation';
           const typeLabel = isPrepOutput ? '🍳 Prep Production' : '🏷️ Production Run';
           if (isAutoFulfillMode) return `Auto-Fulfill Backorder: ${selectedFG?.name}`;
           return `${typeLabel}: ${selectedFG?.name}`;
         })()}
         description={(() => {
-          const recipe = selectedFG ? findRecipeForFg(selectedFG) : null;
+          const recipe = selectedFG ? getRecipeForItem(selectedFG) : null;
           const isPrepOutput = recipe?.outputItemType === 'prep' || selectedFG?.itemType === 'Preparation';
           if (isAutoFulfillMode) return 'Algorithmically mapping raw constraints to clear location backorders natively.';
           if (isPrepOutput) return 'Deducts raw ingredients and labour · Adds prep stock · Flows into downstream recipes.';
@@ -1407,7 +1575,7 @@ export default function FinishedGoods() {
               </TableHeader>
               <TableBody>
                 {activeConstraints?.ingredientsCheck.map((ing: any, idx: number) => {
-                  const recipe = selectedFG ? findRecipeForFg(selectedFG) : null;
+                  const recipe = selectedFG ? getRecipeForItem(selectedFG) : null;
                   const originalIngName = recipe?.ingredients?.[ing.ingIdx]?.name ?? ing.originalName ?? ing.name;
                   const isModalOpen = substituteModal?.ingIdx === ing.ingIdx;
 

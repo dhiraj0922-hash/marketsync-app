@@ -135,6 +135,8 @@ const mapInventoryToFrontend = (db: any) => ({
      innerUnitUom:      db.inner_unit_uom    ?? null,  // measurement unit of innerUnitSize
      baseUomNew:        db.base_uom          ?? null,  // preferred costing unit (overrides baseUnit when set)
      allowedRecipeUoms: Array.isArray(db.allowed_recipe_uoms) ? db.allowed_recipe_uoms : null,
+     // Explicit production recipe link — set via Production → Prep/Base "Link Recipe" picker
+     linkedRecipeId:    db.linked_recipe_id ?? null,
 });
 
 const mapInventoryToDB = (item: any) => {
@@ -172,6 +174,8 @@ const mapInventoryToDB = (item: any) => {
      inner_unit_uom:      item.innerUnitUom   ?? null,
      base_uom:            newBaseUom          || null,
      allowed_recipe_uoms: Array.isArray(item.allowedRecipeUoms) ? item.allowedRecipeUoms : null,
+     // Explicit prep→recipe linkage — persist whatever HQ sets
+     linked_recipe_id:    item.linkedRecipeId ? String(item.linkedRecipeId) : null,
   };
 };
 
@@ -334,6 +338,29 @@ export async function deductInventoryItemStock(
     return { success: false, error: updateErr };
   }
   return { success: true, newStock };
+}
+
+/**
+ * Atomically set (or clear) the linked_recipe_id on a single inventory_items row.
+ *
+ * Called from Production → Prep/Base "Link Recipe" picker.
+ * Pass recipeId=null to unlink.
+ *
+ * Requires migration_linked_recipe.sql to have been run first.
+ */
+export async function updateInventoryLinkedRecipe(
+  itemId: string,
+  recipeId: string | null
+): Promise<{ success: boolean; error?: any }> {
+  const { error } = await supabase
+    .from('inventory_items')
+    .update({ linked_recipe_id: recipeId ?? null })
+    .eq('id', itemId);
+  if (error) {
+    console.error('[updateInventoryLinkedRecipe] error:', error);
+    return { success: false, error };
+  }
+  return { success: true };
 }
 
 
