@@ -97,6 +97,7 @@ function RecipesPageContent() {
   const [yieldUnit, setYieldUnit] = useState("kg");
   const [targetMargin, setTargetMargin] = useState<number>(80);
   const [outputItemId, setOutputItemId] = useState<string>("");
+  const [outputItemType, setOutputItemType] = useState<'finished_good'|'prep'>('finished_good');
   
   const [ingredients, setIngredients] = useState<any[]>([]);
   const [selectedInvId, setSelectedInvId] = useState<string>("");
@@ -279,6 +280,7 @@ function RecipesPageContent() {
       setYieldUnit(recipe.yieldUnit || "kg");
       setTargetMargin(recipe.margin || 80);
       setOutputItemId(recipe.outputItemId || "");
+      setOutputItemType((recipe.outputItemType as 'finished_good'|'prep') || 'finished_good');
       setIngredients(recipe.ingredients ? [...recipe.ingredients] : []);
       setNutritionEstimate(recipe.nutritionEstimate ?? null);
     } else {
@@ -289,6 +291,7 @@ function RecipesPageContent() {
       setYieldUnit("kg");
       setTargetMargin(80);
       setOutputItemId("");
+      setOutputItemType('finished_good');
       setIngredients([]);
       setNutritionEstimate(null);
     }
@@ -316,6 +319,8 @@ function RecipesPageContent() {
     setYieldUnit(header.yieldUnit || "portions");
     setTargetMargin(80);          // default margin — user sets in builder
     setOutputItemId("");
+    setOutputItemType('finished_good');
+
     setIngredients(importedIngredients);   // AI-matched ingredients pre-loaded
     setSelectedInvId("");
 
@@ -543,6 +548,8 @@ function RecipesPageContent() {
         margin: targetMargin,
         price,
         outputItemId,
+        outputItemType,
+
         ingredients,
         nutritionEstimate: editingRecipe?.nutritionEstimate ?? null,
       };
@@ -737,6 +744,12 @@ function RecipesPageContent() {
                     <p className="font-semibold text-brand-900">{recipe.name}</p>
                     <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                       <p className="text-xs text-neutral-500">{recipe.category} • {recipe.id}</p>
+                      {/* Output type badge */}
+                      {recipe.outputItemType === 'prep' ? (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 font-bold uppercase tracking-wider">🍳 Prep</span>
+                      ) : (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-50 border border-blue-200 text-blue-700 font-bold uppercase tracking-wider">🏷️ FG</span>
+                      )}
                       {recipe.nutritionEstimate && (
                         <button
                           type="button"
@@ -753,9 +766,22 @@ function RecipesPageContent() {
                     <Badge variant="neutral" className="bg-white border-neutral-200 text-neutral-700">
                       Output: {recipe.yieldQty} {recipe.yieldUnit}
                     </Badge>
+                    {recipe.outputItemId && (() => {
+                      const linkedItem = inventory.find((i: any) => i.id.toString() === recipe.outputItemId.toString());
+                      return linkedItem ? (
+                        <p className="text-[10px] text-emerald-600 font-semibold mt-1 flex items-center gap-1">
+                          <span>→</span> {linkedItem.name}
+                        </p>
+                      ) : null;
+                    })()}
                   </TableCell>
                   <TableCell className="py-4 text-sm text-neutral-600">
                     <span className="font-semibold text-neutral-900">{recipe.ingredients ? recipe.ingredients.length : 0}</span> linked nodes
+                    {recipe.ingredients && recipe.ingredients.some((ing: any) =>
+                      (ing.name || '').toUpperCase().includes('LABOUR') || (ing.name || '').toUpperCase().includes('LABOR')
+                    ) && (
+                      <p className="text-[10px] text-violet-600 font-semibold mt-0.5">⚙ Includes labour</p>
+                    )}
                   </TableCell>
                   <TableCell className="py-4 text-right">
                     <p className="font-bold text-neutral-900">${(recipe.theoreticalCost || 0).toFixed(2)}</p>
@@ -766,6 +792,7 @@ function RecipesPageContent() {
                     )}
                     <p className="text-[10px] uppercase text-neutral-400 font-semibold tracking-wider mt-1">{recipe.margin}% target margin</p>
                   </TableCell>
+
                   <TableCell className="pr-6 py-4 text-right">
                     <div className="inline-flex items-center gap-2 flex-wrap justify-end">
                       {/* ── Add to Finished Goods ─────────────────────────── */}
@@ -964,23 +991,59 @@ function RecipesPageContent() {
                   />
                 </div>
                 
-                <div className="pt-4 mt-4 border-t border-neutral-100">
-                   <label className="text-xs font-semibold text-neutral-600 uppercase tracking-wider mb-1.5 block">Linked Physical Output Item (Optional)</label>
-                   <select
-                     value={outputItemId}
-                     onChange={e => setOutputItemId(e.target.value)}
-                     className="w-full p-2 border border-neutral-300 rounded text-sm bg-white focus:outline-none focus:ring-1 focus:ring-brand-500"
-                   >
-                     <option value="">No Link (Abstract Recipe)</option>
-                     <optgroup label="Physical Preparations / FGs">
-                       {inventory.filter((i: any) => i.itemType === 'Preparation' || i.itemType === 'Finished Good').map((item: any) => (
-                         <option key={item.id} value={item.id.toString()}>
-                           {item.name} ({item.unit})
-                         </option>
-                       ))}
-                     </optgroup>
-                   </select>
-                   <p className="text-[10px] text-neutral-400 mt-1">If linked, generating production blocks updates this item's native stock quantity.</p>
+                
+                <div className="pt-4 mt-4 border-t border-neutral-100 space-y-3">
+                   {/* Output Type */}
+                   <div>
+                     <label className="text-xs font-semibold text-neutral-600 uppercase tracking-wider mb-2 block">Output Type</label>
+                     <div className="flex gap-2">
+                       <label className={`flex-1 flex items-start gap-2 px-3 py-2 rounded-lg border cursor-pointer transition-colors text-xs select-none ${outputItemType === 'finished_good' ? 'bg-brand-50 border-brand-400 text-brand-800 font-semibold shadow-sm' : 'bg-white border-neutral-200 text-neutral-600 hover:border-neutral-400'}`}>
+                         <input type="radio" name="outputItemType" value="finished_good" checked={outputItemType === 'finished_good'} onChange={() => { setOutputItemType('finished_good'); setOutputItemId(''); }} className="mt-0.5 accent-brand-600 shrink-0" />
+                         <span>
+                           <span className="block">🏷️ Finished Good</span>
+                           <span className="block text-[10px] font-normal text-neutral-400 mt-0.5">Sold / requisitioned to stores</span>
+                         </span>
+                       </label>
+                       <label className={`flex-1 flex items-start gap-2 px-3 py-2 rounded-lg border cursor-pointer transition-colors text-xs select-none ${outputItemType === 'prep' ? 'bg-brand-50 border-brand-400 text-brand-800 font-semibold shadow-sm' : 'bg-white border-neutral-200 text-neutral-600 hover:border-neutral-400'}`}>
+                         <input type="radio" name="outputItemType" value="prep" checked={outputItemType === 'prep'} onChange={() => { setOutputItemType('prep'); setOutputItemId(''); }} className="mt-0.5 accent-brand-600 shrink-0" />
+                         <span>
+                           <span className="block">🍳 Prep Item</span>
+                           <span className="block text-[10px] font-normal text-neutral-400 mt-0.5">Intermediate — used in other recipes</span>
+                         </span>
+                       </label>
+                     </div>
+                   </div>
+                   {/* Linked output inventory item */}
+                   <div>
+                     <label className="text-xs font-semibold text-neutral-600 uppercase tracking-wider mb-1 block">
+                       {outputItemType === 'prep' ? 'Linked Prep Inventory Item (Optional)' : 'Linked Physical Output Item (Optional)'}
+                     </label>
+                     <select
+                       value={outputItemId}
+                       onChange={e => setOutputItemId(e.target.value)}
+                       className="w-full p-2 border border-neutral-300 rounded text-sm bg-white focus:outline-none focus:ring-1 focus:ring-brand-500"
+                     >
+                       <option value="">No Link (Abstract Recipe)</option>
+                       {outputItemType === 'prep' ? (
+                         <optgroup label="Prep / Preparation Items">
+                           {inventory.filter((i: any) => i.itemType === 'Preparation').map((item: any) => (
+                             <option key={item.id} value={item.id.toString()}>{item.name} ({item.unit})</option>
+                           ))}
+                         </optgroup>
+                       ) : (
+                         <optgroup label="Finished Goods">
+                           {inventory.filter((i: any) => i.itemType === 'Finished Good').map((item: any) => (
+                             <option key={item.id} value={item.id.toString()}>{item.name} ({item.unit})</option>
+                           ))}
+                         </optgroup>
+                       )}
+                     </select>
+                     <p className="text-[10px] text-neutral-400 mt-1">
+                       {outputItemType === 'prep'
+                         ? 'When produced, prep item stock increases and raw ingredients are deducted.'
+                         : "If linked, production updates this item's native stock quantity."}
+                     </p>
+                   </div>
                 </div>
              </div>
              

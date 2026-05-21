@@ -136,12 +136,15 @@ function ClassBadge({ cls }: { cls: ItemClass }) {
 function RecipeBadge({
   linked,
   recipeId,
+  recipeName,
   onNavigate,
 }: {
   linked: boolean;
   recipeId?: string | null;
+  recipeName?: string | null;
   onNavigate?: () => void;
 }) {
+  const label = recipeName ? recipeName : "Linked recipe";
   if (linked && onNavigate) {
     return (
       <button
@@ -150,13 +153,13 @@ function RecipeBadge({
         className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200 cursor-pointer hover:bg-green-100 hover:border-green-400 focus:outline-none focus:ring-1 focus:ring-green-400 transition-colors"
         title="Open linked recipe"
       >
-        <CheckCircle2 className="h-2.5 w-2.5" /> Linked recipe
+        <CheckCircle2 className="h-2.5 w-2.5" /> {label}
       </button>
     );
   }
   return linked ? (
     <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200">
-      <CheckCircle2 className="h-2.5 w-2.5" /> Linked recipe
+      <CheckCircle2 className="h-2.5 w-2.5" /> {label}
     </span>
   ) : (
     <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">
@@ -435,11 +438,12 @@ export default function FinishedGoods() {
   });
 
   // ── Recipe lookup ─────────────────────────────────────────────────────────
-  // Priority for hq_sale_items virtual items:
+  // Lookup priority:
   //   1. sourceRecipeId  — hq_sale_items.source_recipe_id (UUID FK → recipes.id)
-  //                        Most reliable: no name ambiguity, no outputItemId needed.
-  //   2. outputItemId    — covers inventory_items-based items (existing path).
-  //   3. Name-match      — last resort for hq_sale_items only (exact, trimmed, case-insensitive).
+  //   2. outputItemId    — covers inventory_items-based items (FG path)
+  //   3. outputItemId + outputItemType=prep — prep inventory items (NEW)
+  //   4. Name-match      — last resort for hq_sale_items only
+  //   5. Name-match      — last resort for prep inventory items
   const findRecipeForFg = (fg: any) => {
     // 1. source_recipe_id — the canonical link stored on hq_sale_items
     if (fg.sourceRecipeId) {
@@ -447,22 +451,38 @@ export default function FinishedGoods() {
         (r) => r.id?.toString() === fg.sourceRecipeId.toString()
       );
       if (bySourceId) return bySourceId;
-      // Set but not loaded — warn so it's traceable
       console.warn(
         `[findRecipeForFg] source_recipe_id=${fg.sourceRecipeId} not found in loaded recipes for "${fg.name}"`
       );
     }
 
-    // 2. outputItemId match (inventory_items path — unchanged)
+    // 2. outputItemId match (inventory_items FG path — existing)
     const byOutputId = recipes.find(
       (r) => r.outputItemId?.toString() === fg.id.toString()
+        && (r.outputItemType !== 'prep')  // prefer non-prep match first
     );
     if (byOutputId) return byOutputId;
 
-    // 3. Name-match fallback — hq_sale_items only, exact match
+    // 3. Prep item match — recipe explicitly typed as 'prep' output linking this inventory item
+    const byPrepOutputId = recipes.find(
+      (r) => r.outputItemId?.toString() === fg.id.toString()
+        && r.outputItemType === 'prep'
+    );
+    if (byPrepOutputId) return byPrepOutputId;
+
+    // 4. Name-match fallback — hq_sale_items only, exact match
     if (fg._source === "hq_sale_items") {
       const norm = fg.name.trim().toLowerCase();
       return recipes.find((r) => r.name?.trim().toLowerCase() === norm) ?? null;
+    }
+
+    // 5. Name-match fallback — prep inventory items (itemType === 'Preparation')
+    if (fg.itemType === "Preparation") {
+      const norm = fg.name.trim().toLowerCase();
+      const byName = recipes.find(
+        (r) => r.outputItemType === 'prep' && r.name?.trim().toLowerCase() === norm
+      );
+      if (byName) return byName;
     }
 
     return null;
@@ -855,7 +875,8 @@ export default function FinishedGoods() {
         });
       }
 
-      // production_in for the finished good (works for both sources; item_id is TEXT)
+      // production_in for the output item (works for both prep and FG; item_id is TEXT)
+      const isPrepOutput = recipe.outputItemType === 'prep' || fg.itemType === 'Preparation';
       await logMovement({
         locationId:    fg.locationId ?? "LOC-HQ",
         itemId:        String(fg.id),
@@ -864,7 +885,8 @@ export default function FinishedGoods() {
         unitCost:      fg.cost ?? null,
         referenceType: "production",
         referenceId:   newLog.id,
-        notes: `Production output: ${targetBatches} batches of ${fg.name}${isHqItem ? " [hq_sale_items]" : ""}`,
+        notes: `Production output: ${targetBatches} batches of ${fg.name}${isPrepOutput ? " [prep_item]" : isHqItem ? " [hq_sale_items]" : ""}`,
+
       });
     })();
 
@@ -1063,6 +1085,7 @@ export default function FinishedGoods() {
                           <RecipeBadge
                             linked={hasRecipe}
                             recipeId={recipe?.id ?? null}
+                            recipeName={recipe?.name ?? null}
                             onNavigate={
                               hasRecipe && recipe?.id
                                 ? () => router.push(`/recipes?recipeId=${encodeURIComponent(recipe.id)}`)
@@ -1071,11 +1094,12 @@ export default function FinishedGoods() {
                           />
                           {hasRecipe && (
                             <span className="text-[10px] text-neutral-400 truncate max-w-[140px]">
-                              {recipe.name}
+                              {recipe.yieldQty} {recipe.yieldUnit} · {recipe.ingredients?.length ?? 0} ing.
                             </span>
                           )}
                         </div>
                       </TableCell>
+
 
                       {/* Stock */}
                       <TableCell className="py-3">
@@ -1150,7 +1174,7 @@ export default function FinishedGoods() {
         </CardContent>
       </Card>
 
-      {/* ── Production Drawer — unchanged logic ─────────────────────────── */}
+      {/* ── Production Drawer ─────────────────────────────────────────────── */}
       <Drawer
         isOpen={!!selectedFG}
         onClose={() => {
@@ -1160,25 +1184,43 @@ export default function FinishedGoods() {
           setSubstitutes(new Map());
           setSubstituteModal(null);
         }}
-        title={
-          isAutoFulfillMode
-            ? `Auto-Fulfill Backorder: ${selectedFG?.name}`
-            : `Produce ${selectedFG?.name}`
-        }
-        description={
-          isAutoFulfillMode
-            ? "Algorithmically mapping raw constraints to clear location backorders natively."
-            : "Calculate required raw ingredients directly mapping to theoretical recipe rules."
-        }
+        title={(() => {
+          const recipe = selectedFG ? findRecipeForFg(selectedFG) : null;
+          const isPrepOutput = recipe?.outputItemType === 'prep' || selectedFG?.itemType === 'Preparation';
+          const typeLabel = isPrepOutput ? '🍳 Prep Production' : '🏷️ Production Run';
+          if (isAutoFulfillMode) return `Auto-Fulfill Backorder: ${selectedFG?.name}`;
+          return `${typeLabel}: ${selectedFG?.name}`;
+        })()}
+        description={(() => {
+          const recipe = selectedFG ? findRecipeForFg(selectedFG) : null;
+          const isPrepOutput = recipe?.outputItemType === 'prep' || selectedFG?.itemType === 'Preparation';
+          if (isAutoFulfillMode) return 'Algorithmically mapping raw constraints to clear location backorders natively.';
+          if (isPrepOutput) return 'Deducts raw ingredients and labour · Adds prep stock · Flows into downstream recipes.';
+          return 'Calculate required raw ingredients directly mapping to theoretical recipe rules.';
+        })()}
         footer={
           <div className="w-full flex items-center justify-between">
-            <div className="flex flex-col">
+            <div className="flex flex-col gap-0.5">
               <span className="text-sm font-medium text-neutral-500">
                 Projected Yield:{" "}
                 <span className="text-brand-600 font-bold">
                   {activeConstraints?.yield} {activeConstraints?.unit}
                 </span>
               </span>
+              {/* Extra stats: ingredient count, labour, last produced */}
+              {selectedFG && findRecipeForFg(selectedFG) && (() => {
+                const r = findRecipeForFg(selectedFG);
+                const labourIngs = (r.ingredients ?? []).filter((ing: any) =>
+                  (ing.name || '').toUpperCase().includes('LABOUR') || (ing.name || '').toUpperCase().includes('LABOR')
+                );
+                return (
+                  <span className="text-[10px] text-neutral-400 mt-0.5">
+                    {(r.ingredients ?? []).length} ingredients
+                    {labourIngs.length > 0 && ` · ${labourIngs.length} labour`}
+                    {selectedFG.lastProduced && ` · Last: ${selectedFG.lastProduced}`}
+                  </span>
+                );
+              })()}
               {isAutoFulfillMode && (
                 <span className="text-xs font-medium text-red-500 mt-1">
                   Open Backorders: {reqBackorders.get(selectedFG?.id) || 0}{" "}

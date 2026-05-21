@@ -1383,10 +1383,13 @@ const mapRecipeToFrontend = (db: any) => ({
     margin:          db.margin,
     ingredients:     db.ingredients || [],
     nutritionEstimate: db.nutrition_estimate ?? null,
+    // Output item linkage — prep vs finished_good routing
+    outputItemId:   db.output_item_id   ?? null,
+    outputItemType: db.output_item_type  ?? 'finished_good',
 });
 
 // Columns to fetch — avoids pulling created_at and any future-added admin columns
-const RECIPE_SELECT = "id,name,category,yieldqty,yieldunit,theoreticalcost,margin,ingredients,nutrition_estimate";
+const RECIPE_SELECT = "id,name,category,yieldqty,yieldunit,theoreticalcost,margin,ingredients,nutrition_estimate,output_item_id,output_item_type";
 const RECIPE_SELECT_LEGACY = "id,name,category,yieldqty,yieldunit,theoreticalcost,margin,ingredients";
 
 const mapRecipeToDB = (r: any) => ({
@@ -1401,6 +1404,9 @@ const mapRecipeToDB = (r: any) => ({
     ingredients: Array.isArray(r.ingredients)
       ? r.ingredients.map(sanitizeIngredientForDB)
       : [],
+    // Output item linkage
+    output_item_id:   r.outputItemId   ? String(r.outputItemId) : null,
+    output_item_type: r.outputItemType || 'finished_good',
 });
 
 export async function loadRecipes() {
@@ -1413,7 +1419,7 @@ export async function loadRecipes() {
 
   // Until migration_recipe_nutrition.sql is run, older DBs do not have this
   // column. Keep recipes usable and surface null estimates instead of hard-failing.
-  if (error && String(error.message || "").includes("nutrition_estimate")) {
+  if (error && String(error.message || '').includes('nutrition_estimate')) {
     const fallback = await supabase
       .from('recipes')
       .select(RECIPE_SELECT_LEGACY)
@@ -1421,6 +1427,18 @@ export async function loadRecipes() {
       .range(0, 4999);
     data = fallback.data;
     error = fallback.error;
+  }
+
+  // Until migration_prep_output.sql is run, older DBs do not have output_item_id.
+  // Fall back to the legacy select (no output cols) so recipes remain usable.
+  if (error && (String(error.message || '').includes('output_item_id') || String(error.message || '').includes('output_item_type'))) {
+    const fallback2 = await supabase
+      .from('recipes')
+      .select(RECIPE_SELECT_LEGACY)
+      .order('name', { ascending: true })
+      .range(0, 4999);
+    data = fallback2.data;
+    error = fallback2.error;
   }
 
   if (error) return [];
