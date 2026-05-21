@@ -92,11 +92,12 @@ function classifyItems(
   });
 
   const map = new Map<string, ItemClass>();
-  finishedGoods.forEach((fg) => {
-    const id = String(fg.id);
+  finishedGoods.filter(Boolean).forEach((fg) => {
+    const id = String(fg?.id ?? "");
+    if (!id) return;
     const isIngredient = ingredientIds.has(id);
     const isOutput = outputIds.has(id);
-    const isPreparation = fg.itemType === "Preparation";
+    const isPreparation = isPreparationItem(fg);
 
     if (isPreparation || isIngredient) {
       // Definitively prep: explicitly typed OR consumed by another recipe
@@ -120,6 +121,12 @@ const FILTER_TABS: { key: FilterMode; label: string }[] = [
   { key: "final", label: "Final Items" },
   { key: "prep",  label: "Prep / Base" },
 ];
+
+const getSafeItemType = (item: any): string =>
+  item?.itemType ?? item?.item_type ?? "Finished Good";
+
+const isPreparationItem = (item: any): boolean =>
+  getSafeItemType(item) === "Preparation";
 
 const stockIqDarkShellCss = `
   body .flex.bg-neutral-50.text-neutral-900.min-h-screen {
@@ -384,9 +391,10 @@ export default function FinishedGoods() {
   }
 
   // ── inventory_items FG/Prep base ─────────────────────────────────────────
-  const invFinishedGoods = inventoryData.filter(
-    (i) => i.itemType === "Finished Good" || i.itemType === "Preparation"
-  );
+  const invFinishedGoods = inventoryData.filter((i) => {
+    const itemType = getSafeItemType(i);
+    return itemType === "Finished Good" || itemType === "Preparation";
+  });
 
   // ── Build set of IDs already covered by inventory_items ─────────────────
   // Used for deduplication: if hq_sale_items.id already exists in
@@ -397,6 +405,7 @@ export default function FinishedGoods() {
   // _source flag routes stock writes to the correct table in executeProduction.
   // These items are never written into inventory_items.
   const saleItemVirtuals = saleItems
+    .filter(Boolean)
     .filter((si: any) => !invFgIds.has(String(si.id))) // deduplicate by ID
     .map((si: any) => {
       // Required debug log per request
@@ -417,7 +426,7 @@ export default function FinishedGoods() {
 
   // ── Merged display list ──────────────────────────────────────────────────
   // inventory_items items first (existing behaviour), then hq_sale_items adapters.
-  const finishedGoods = [...invFinishedGoods, ...saleItemVirtuals];
+  const finishedGoods = [...invFinishedGoods, ...saleItemVirtuals].filter(Boolean);
 
   // ── Classify each item ───────────────────────────────────────────────────
   // hq_sale_items adapters are always classified "final" (they are sellable output).
@@ -492,12 +501,15 @@ export default function FinishedGoods() {
   //   5. Name-match — hq_sale_items only
   //   6. Name-match — prep inventory items (outputItemType=prep)
   const findRecipeForFg = (fg: any) => {
-    const fgIdStr     = String(fg.id     ?? '');
-    const fgItemIdStr = String(fg.itemId ?? '');
+    if (!fg) return null;
+    const fgIdStr     = String(fg?.id     ?? '');
+    const fgItemIdStr = String(fg?.itemId ?? '');
+    const fgItemType  = getSafeItemType(fg);
+    const fgName      = fg?.name ?? "Unknown item";
 
     // Diagnostic log — fires once per item render; check browser console
     console.log(
-      `[findRecipeForFg] checking "${fg.name}" | fg.id="${fgIdStr}" | fg.itemId="${fgItemIdStr}" | fg.itemType="${fg.itemType}" | fg._source="${fg._source ?? 'inventory_items'}"`
+      `[findRecipeForFg] checking "${fgName}" | fg.id="${fgIdStr}" | fg.itemId="${fgItemIdStr}" | fg.itemType="${fgItemType}" | fg._source="${fg?._source ?? 'inventory_items'}"`
     );
 
     // Log all recipes' output links so mismatch is immediately visible
@@ -512,7 +524,7 @@ export default function FinishedGoods() {
     }
 
     // 1. source_recipe_id — the canonical link stored on hq_sale_items
-    if (fg.sourceRecipeId) {
+    if (fg?.sourceRecipeId) {
       const bySourceId = recipes.find(
         (r) => r.id?.toString() === fg.sourceRecipeId.toString()
       );
@@ -521,7 +533,7 @@ export default function FinishedGoods() {
         return bySourceId;
       }
       console.warn(
-        `[findRecipeForFg] source_recipe_id=${fg.sourceRecipeId} not found in loaded recipes for "${fg.name}"`
+        `[findRecipeForFg] source_recipe_id=${fg.sourceRecipeId} not found in loaded recipes for "${fgName}"`
       );
     }
 
@@ -548,17 +560,17 @@ export default function FinishedGoods() {
     }
 
     // 5. Name-match fallback — hq_sale_items only, exact match
-    if (fg._source === "hq_sale_items") {
-      const norm = fg.name.trim().toLowerCase();
+    if (fg?._source === "hq_sale_items") {
+      const norm = String(fg?.name ?? "").trim().toLowerCase();
       const byName = recipes.find((r) => r.name?.trim().toLowerCase() === norm) ?? null;
       if (byName) console.log(`  [findRecipeForFg] MATCH via name (hq_sale_items) → "${byName.name}"`);
-      else console.log(`  [findRecipeForFg] NO MATCH for "${fg.name}" (hq_sale_items)`);
+      else console.log(`  [findRecipeForFg] NO MATCH for "${fgName}" (hq_sale_items)`);
       return byName;
     }
 
     // 6. Name-match fallback — prep inventory items
-    if (fg.itemType === "Preparation") {
-      const norm = fg.name.trim().toLowerCase();
+    if (isPreparationItem(fg)) {
+      const norm = String(fg?.name ?? "").trim().toLowerCase();
       const byName = recipes.find(
         (r) => r.outputItemType === 'prep' && r.name?.trim().toLowerCase() === norm
       );
@@ -568,7 +580,7 @@ export default function FinishedGoods() {
       }
     }
 
-    console.log(`  [findRecipeForFg] NO MATCH for "${fg.name}" (all paths exhausted)`);
+    console.log(`  [findRecipeForFg] NO MATCH for "${fgName}" (all paths exhausted)`);
     return null;
   };
 
@@ -578,7 +590,8 @@ export default function FinishedGoods() {
   // For FG/hq_sale_items: fall through to findRecipeForFg() which handles
   //   sourceRecipeId / outputItemId / name-match paths.
   const getRecipeForItem = (fg: any) => {
-    if (fg.itemType === "Preparation" && fg.linkedRecipeId) {
+    if (!fg) return null;
+    if (isPreparationItem(fg) && fg?.linkedRecipeId) {
       return recipes.find((r) => r.id?.toString() === fg.linkedRecipeId.toString()) ?? null;
     }
     // Non-prep items — FG workflow unchanged
@@ -973,7 +986,7 @@ export default function FinishedGoods() {
       }
 
       // production_in for the output item (works for both prep and FG; item_id is TEXT)
-      const isPrepOutput = recipe.outputItemType === 'prep' || fg.itemType === 'Preparation';
+      const isPrepOutput = recipe?.outputItemType === 'prep' || isPreparationItem(fg);
       await logMovement({
         locationId:    fg.locationId ?? "LOC-HQ",
         itemId:        String(fg.id),
@@ -1034,38 +1047,35 @@ export default function FinishedGoods() {
 
   // ─── JSX ───────────────────────────────────────────────────────────────────
   return (
-    <div className="-m-6 min-h-[calc(100vh-4rem)] bg-[#070707] p-6 text-zinc-100">
-      <style>{stockIqDarkShellCss}</style>
-      <div className="mx-auto max-w-[1408px] space-y-5">
+    <div className="space-y-6">
 
       {/* ── Header ──────────────────────────────────────────────────────── */}
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
-          <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-zinc-500">Production</p>
-          <h2 className="mt-2 text-2xl font-semibold tracking-tight text-white">Production</h2>
-          <p className="mt-1 text-sm text-zinc-500">
+          <h2 className="text-2xl font-bold tracking-tight">Production</h2>
+          <p className="text-neutral-500 text-sm mt-0.5">
             Central kitchen batch execution and auto-fulfillment.
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex items-center gap-2">
           {/* Page-level view tabs */}
-          <div className="flex items-center gap-1 rounded-lg border border-white/10 bg-[#151515] p-1 shadow-inner shadow-black/30">
+          <div className="flex items-center gap-1 bg-neutral-100 rounded-lg p-1">
             <button
               onClick={() => setPageView("items")}
-              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-colors ${
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
                 pageView === "items"
-                  ? "bg-blue-600 text-white shadow-sm shadow-blue-600/20"
-                  : "text-zinc-400 hover:text-white"
+                  ? "bg-white text-neutral-900 shadow-sm"
+                  : "text-neutral-500 hover:text-neutral-700"
               }`}
             >
               <Package className="h-3.5 w-3.5" /> Production Items
             </button>
             <button
               onClick={() => setPageView("history")}
-              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-colors ${
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
                 pageView === "history"
-                  ? "bg-blue-600 text-white shadow-sm shadow-blue-600/20"
-                  : "text-zinc-400 hover:text-white"
+                  ? "bg-white text-neutral-900 shadow-sm"
+                  : "text-neutral-500 hover:text-neutral-700"
               }`}
             >
               <History className="h-3.5 w-3.5" /> Production History
@@ -1073,7 +1083,7 @@ export default function FinishedGoods() {
           </div>
           <button
             onClick={() => setIsImportOpen(true)}
-            className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#151515] px-4 py-2 text-sm font-semibold text-zinc-300 shadow-sm transition-colors hover:bg-[#1f1f1f]"
+            className="flex items-center gap-1.5 px-4 py-2 text-sm font-semibold bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 shadow-sm transition-colors"
           >
             <Upload className="h-4 w-4" /> Import CSV
           </button>
@@ -1083,60 +1093,50 @@ export default function FinishedGoods() {
       {pageView === "items" && (<>
 
       {/* ── Metrics ──────────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          { label: "Total SKUs",             value: totalSKUs.toString(),       icon: <Package className="h-5 w-5" />, tone: "blue" },
-          { label: "Final Items",            value: finalCount.toString(),      icon: <Layers className="h-5 w-5" />, tone: "emerald" },
-          { label: "HQ Catalog Items",       value: hqLinkedCount.toString(),   icon: <ShoppingBag className="h-5 w-5" />, tone: "violet" },
-          { label: "Total Backorder Volume", value: totalBackorders.toString(), icon: <AlertTriangle className="h-5 w-5" />, tone: "red" },
+          { label: "Total SKUs",             value: totalSKUs.toString(),       color: "text-neutral-900" },
+          { label: "Final Items",            value: finalCount.toString(),      color: "text-brand-600" },
+          { label: "HQ Catalog Items",       value: hqLinkedCount.toString(),   color: "text-violet-600" },
+          { label: "Total Backorder Volume", value: totalBackorders.toString(), color: "text-red-600" },
         ].map((stat, i) => (
-          <Card key={i} className="rounded-xl border-white/10 bg-[#111111] shadow-[0_18px_50px_rgba(0,0,0,0.28)]">
-            <CardContent className="flex items-start justify-between p-4">
-              <div>
-                <span className="block text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">{stat.label}</span>
-                <span className="mt-3 block truncate text-2xl font-semibold tracking-tight text-white">{stat.value}</span>
-              </div>
-              <div className={`rounded-lg p-2 ${
-                stat.tone === "emerald" ? "bg-emerald-500/15 text-emerald-300" :
-                stat.tone === "violet" ? "bg-violet-500/15 text-violet-300" :
-                stat.tone === "red" ? "bg-red-500/15 text-red-300" :
-                "bg-blue-500/15 text-blue-300"
-              }`}>
-                {stat.icon}
-              </div>
+          <Card key={i} className="shadow-sm border-neutral-200">
+            <CardContent className="p-4 flex flex-col gap-1">
+              <span className="text-xs text-neutral-500 font-medium">{stat.label}</span>
+              <span className={`text-xl font-bold ${stat.color} truncate`}>{stat.value}</span>
             </CardContent>
           </Card>
         ))}
       </div>
 
       {/* ── Table card ───────────────────────────────────────────────────── */}
-      <Card className="overflow-hidden rounded-xl border-white/10 bg-[#111111] shadow-[0_18px_50px_rgba(0,0,0,0.32)]">
-        <CardHeader className="flex flex-col items-start gap-3 border-b border-white/10 bg-[#111111] px-4 py-4 sm:flex-row sm:items-center">
+      <Card className="shadow-sm border-neutral-200 overflow-hidden">
+        <CardHeader className="flex flex-col sm:flex-row gap-3 items-start sm:items-center pb-4 border-b border-neutral-100 bg-white pt-4 px-4">
 
           {/* Search */}
           <div className="relative w-full sm:w-80">
             <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-              <Search className="h-4 w-4 text-zinc-500" />
+              <Search className="h-4 w-4 text-neutral-400" />
             </div>
             <input
               type="text"
               placeholder="Search by name or ID…"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full rounded-lg border border-white/10 bg-[#171717] py-2 pl-9 pr-4 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              className="pl-9 pr-4 py-1.5 border border-neutral-200 rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 focus:border-brand-500 w-full bg-neutral-50 hover:bg-white transition-colors"
             />
           </div>
 
           {/* Filter tabs */}
-          <div className="flex items-center gap-1 rounded-lg border border-white/10 bg-[#171717] p-1">
+          <div className="flex items-center gap-1 bg-neutral-100 rounded-lg p-1">
             {FILTER_TABS.map((tab) => (
               <button
                 key={tab.key}
                 onClick={() => setFilterMode(tab.key)}
-                className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-colors ${
+                className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
                   filterMode === tab.key
-                    ? "bg-blue-600 text-white shadow-sm"
-                    : "text-zinc-400 hover:text-white"
+                    ? "bg-white text-neutral-900 shadow-sm"
+                    : "text-neutral-500 hover:text-neutral-700"
                 }`}
               >
                 {tab.label}
@@ -1150,14 +1150,14 @@ export default function FinishedGoods() {
           </div>
 
           {/* Result count */}
-          <span className="ml-auto hidden text-xs text-zinc-500 sm:block">
+          <span className="text-xs text-neutral-400 ml-auto hidden sm:block">
             {filteredFGs.length} item{filteredFGs.length !== 1 ? "s" : ""}
           </span>
         </CardHeader>
 
         <CardContent className="p-0">
           <Table>
-            <TableHeader className="border-b border-white/10 bg-[#161616] text-xs uppercase tracking-[0.16em] text-zinc-500">
+            <TableHeader className="bg-neutral-50/80 text-xs text-neutral-500 uppercase tracking-wider">
               <TableRow>
                 <TableHead className="px-6 py-3">Item / SKU</TableHead>
                 <TableHead className="py-3">Type</TableHead>
@@ -1181,7 +1181,7 @@ export default function FinishedGoods() {
                   return (
                     <TableRow
                       key={fg.id}
-                      className="cursor-pointer border-b border-white/5 bg-[#111111] transition-colors hover:bg-[#171717]"
+                      className="cursor-pointer transition-colors hover:bg-neutral-50/50"
                       onClick={() => {
                         // Close recipe picker if user clicks a different row
                         if (linkingRecipeFor && linkingRecipeFor !== fg.id.toString()) {
@@ -1193,19 +1193,19 @@ export default function FinishedGoods() {
                       {/* Item name + ID */}
                       <TableCell className="px-6 py-3">
                         <div className="flex items-center gap-2">
-                          <Factory className="h-4 w-4 shrink-0 text-zinc-600" />
+                          <Factory className="h-4 w-4 text-neutral-300 shrink-0" />
                           <div>
                             <div className="flex items-center gap-1.5">
-                              <p className="font-semibold leading-tight text-zinc-100">
+                              <p className="font-semibold text-neutral-900 leading-tight">
                                 {fg.name}
                               </p>
                               {isHqSource && (
-                                <span className="inline-flex items-center gap-0.5 whitespace-nowrap rounded-full border border-violet-500/20 bg-violet-500/15 px-1.5 py-0.5 text-[9px] font-bold text-violet-300">
+                                <span className="inline-flex items-center gap-0.5 text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-violet-50 text-violet-700 border border-violet-200 whitespace-nowrap">
                                   <ShoppingBag className="h-2 w-2" /> HQ Catalog
                                 </span>
                               )}
                             </div>
-                            <p className="mt-0.5 font-mono text-[10px] text-zinc-600">
+                            <p className="text-[10px] text-neutral-400 font-mono mt-0.5">
                               {fg.id}
                             </p>
                           </div>
@@ -1219,17 +1219,17 @@ export default function FinishedGoods() {
 
                       {/* Recipe / Linked Recipe column */}
                       <TableCell className="py-3" style={{minWidth: 200}}>
-                        {fg.itemType === "Preparation" ? (
+                        {isPreparationItem(fg) ? (
                           // ── Prep items: explicit HQ-controlled linking ────
                           <div className="flex flex-col gap-1">
                             {/* Current linked recipe badge */}
                             {hasRecipe ? (
-                              <span className="inline-flex w-fit items-center gap-1 rounded-full border border-emerald-500/20 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                              <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200 w-fit">
                                 <CheckCircle2 className="h-2.5 w-2.5 shrink-0" />
                                 <span className="truncate max-w-[120px]">{recipe!.name}</span>
                               </span>
                             ) : (
-                              <span className="inline-flex w-fit items-center gap-1 rounded-full border border-amber-500/20 bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-300">
+                              <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 w-fit">
                                 <AlertTriangle className="h-2.5 w-2.5 shrink-0" /> No Recipe Linked
                               </span>
                             )}
@@ -1243,12 +1243,12 @@ export default function FinishedGoods() {
                                   placeholder="Search recipe…"
                                   value={recipeSearchQuery}
                                   onChange={e => setRecipeSearchQuery(e.target.value)}
-                                  className="w-full rounded border border-blue-500/30 bg-[#171717] px-2 py-1 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                  className="w-full px-2 py-1 text-xs border border-brand-300 rounded focus:outline-none focus:ring-1 focus:ring-brand-500"
                                 />
-                                <div className="absolute left-0 top-full z-50 mt-0.5 max-h-48 w-full overflow-y-auto rounded-md border border-white/10 bg-[#151515] shadow-2xl shadow-black/50">
+                                <div className="absolute z-50 top-full left-0 w-full mt-0.5 bg-white border border-neutral-200 rounded-md shadow-lg max-h-48 overflow-y-auto">
                                   {fg.linkedRecipeId && (
                                     <button
-                                      className="w-full border-b border-white/10 px-2 py-1.5 text-left text-xs font-semibold text-red-300 hover:bg-red-500/10"
+                                      className="w-full text-left px-2 py-1.5 text-xs text-red-600 hover:bg-red-50 border-b border-neutral-100 font-semibold"
                                       onClick={() => handleLinkRecipe(fg.id.toString(), null)}
                                     >✕ Remove Link</button>
                                   )}
@@ -1258,20 +1258,20 @@ export default function FinishedGoods() {
                                     .map(r => (
                                       <button
                                         key={r.id}
-                                        className={`w-full px-2 py-1.5 text-left text-xs transition-colors hover:bg-blue-500/10 ${fg.linkedRecipeId === r.id ? 'bg-blue-500/15 font-semibold text-blue-200' : 'text-zinc-300'}`}
+                                        className={`w-full text-left px-2 py-1.5 text-xs hover:bg-brand-50 transition-colors ${fg.linkedRecipeId === r.id ? 'bg-brand-50 text-brand-700 font-semibold' : 'text-neutral-700'}`}
                                         onClick={() => handleLinkRecipe(fg.id.toString(), r.id)}
                                       >
                                         {r.name}
-                                        <span className="ml-1 text-zinc-600">({r.yieldQty} {r.yieldUnit})</span>
+                                        <span className="text-neutral-400 ml-1">({r.yieldQty} {r.yieldUnit})</span>
                                       </button>
                                     ))
                                   }
                                   {recipes.filter(r => !recipeSearchQuery || r.name?.toLowerCase().includes(recipeSearchQuery.toLowerCase())).length === 0 && (
-                                    <p className="px-2 py-2 text-xs italic text-zinc-500">No recipes match</p>
+                                    <p className="px-2 py-2 text-xs text-neutral-400 italic">No recipes match</p>
                                   )}
                                 </div>
                                 <button
-                                  className="mt-1 text-[10px] text-zinc-500 hover:text-zinc-300"
+                                  className="mt-1 text-[10px] text-neutral-400 hover:text-neutral-600"
                                   onClick={e => { e.stopPropagation(); setLinkingRecipeFor(null); setRecipeSearchQuery(""); }}
                                 >Cancel</button>
                               </div>
@@ -1279,7 +1279,7 @@ export default function FinishedGoods() {
                               <button
                                 disabled={savingLinkFor === fg.id.toString()}
                                 onClick={e => { e.stopPropagation(); setLinkingRecipeFor(fg.id.toString()); setRecipeSearchQuery(""); }}
-                                className="mt-0.5 w-fit rounded border border-blue-500/20 px-2 py-0.5 text-[10px] font-semibold text-blue-300 hover:bg-blue-500/10 disabled:opacity-50"
+                                className="text-[10px] px-2 py-0.5 rounded border border-brand-200 text-brand-600 hover:bg-brand-50 w-fit mt-0.5 font-semibold disabled:opacity-50"
                               >
                                 {savingLinkFor === fg.id.toString() ? "Saving…" : hasRecipe ? "Change" : "Link Recipe"}
                               </button>
@@ -1299,7 +1299,7 @@ export default function FinishedGoods() {
                               }
                             />
                             {hasRecipe && (
-                              <span className="max-w-[140px] truncate text-[10px] text-zinc-500">
+                              <span className="text-[10px] text-neutral-400 truncate max-w-[140px]">
                                 {recipe!.yieldQty} {recipe!.yieldUnit} · {recipe!.ingredients?.length ?? 0} ing.
                               </span>
                             )}
@@ -1309,7 +1309,7 @@ export default function FinishedGoods() {
 
                       {/* Stock */}
                       <TableCell className="py-3">
-                        <span className="font-medium tabular-nums text-zinc-100">
+                        <span className="font-medium text-neutral-900 tabular-nums">
                           {fg.inStock} {fg.unit}
                         </span>
                       </TableCell>
@@ -1318,7 +1318,7 @@ export default function FinishedGoods() {
                       <TableCell className="py-3">
                         <span
                           className={`font-bold tabular-nums ${
-                            available === 0 ? "text-zinc-600" : "text-emerald-300"
+                            available === 0 ? "text-neutral-400" : "text-green-600"
                           }`}
                         >
                           {available} {fg.unit}
@@ -1330,12 +1330,12 @@ export default function FinishedGoods() {
                         {backorders > 0 ? (
                           <Badge
                             variant="danger"
-                            className="bg-red-500/15 px-2 py-0.5 text-xs font-semibold text-red-300"
+                            className="px-2 py-0.5 text-xs font-semibold bg-red-50 text-red-700"
                           >
                             {backorders} {fg.unit} backordered
                           </Badge>
                         ) : (
-                          <span className="text-sm text-zinc-700">—</span>
+                          <span className="text-neutral-300 text-sm">—</span>
                         )}
                       </TableCell>
 
@@ -1345,15 +1345,15 @@ export default function FinishedGoods() {
                           {backorders > 0 && (
                             <button
                               onClick={(e) => openAutoFulfillModule(e, fg)}
-                              className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/20 bg-amber-500/15 px-3 py-1.5 text-xs font-semibold text-amber-300 shadow-sm transition-colors hover:bg-amber-500/25"
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 text-amber-700 hover:bg-amber-100 rounded-md text-xs font-semibold transition-colors border border-amber-200 shadow-sm"
                             >
                               <RefreshCw className="h-3.5 w-3.5" /> Auto-Fulfill
                             </button>
                           )}
                           {(() => {
                             // Prep items require explicit linked recipe before producing
-                            const isPrepItem = fg.itemType === "Preparation";
-                            const canProduce = !isPrepItem || !!fg.linkedRecipeId;
+                            const isPrepItem = isPreparationItem(fg);
+                            const canProduce = !isPrepItem || !!fg?.linkedRecipeId;
                             return (
                               <button
                                 disabled={!canProduce}
@@ -1366,8 +1366,8 @@ export default function FinishedGoods() {
                                 }}
                                 className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${
                                   canProduce
-                                    ? "cursor-pointer bg-blue-600 text-white hover:bg-blue-500"
-                                    : "cursor-not-allowed bg-[#202020] text-zinc-600"
+                                    ? "bg-brand-50 text-brand-700 hover:bg-brand-100 cursor-pointer"
+                                    : "bg-neutral-100 text-neutral-400 cursor-not-allowed"
                                 }`}
                               >
                                 <PackagePlus className="h-3.5 w-3.5" /> Produce
@@ -1382,7 +1382,7 @@ export default function FinishedGoods() {
                 })
               ) : (
                 <TableRow>
-                  <TableCell colSpan={7} className="py-12 text-center text-sm text-zinc-500">
+                  <TableCell colSpan={7} className="text-center py-12 text-neutral-400 text-sm">
                     {searchQuery
                       ? `No items match "${searchQuery}" in ${filterMode === "all" ? "all items" : filterMode === "final" ? "Final Items" : "Prep / Base"}.`
                       : "No items in this category."}
@@ -1406,14 +1406,14 @@ export default function FinishedGoods() {
         }}
         title={(() => {
           const recipe = selectedFG ? getRecipeForItem(selectedFG) : null;
-          const isPrepOutput = recipe?.outputItemType === 'prep' || selectedFG?.itemType === 'Preparation';
+          const isPrepOutput = recipe?.outputItemType === 'prep' || isPreparationItem(selectedFG);
           const typeLabel = isPrepOutput ? '🍳 Prep Production' : '🏷️ Production Run';
           if (isAutoFulfillMode) return `Auto-Fulfill Backorder: ${selectedFG?.name}`;
           return `${typeLabel}: ${selectedFG?.name}`;
         })()}
         description={(() => {
           const recipe = selectedFG ? getRecipeForItem(selectedFG) : null;
-          const isPrepOutput = recipe?.outputItemType === 'prep' || selectedFG?.itemType === 'Preparation';
+          const isPrepOutput = recipe?.outputItemType === 'prep' || isPreparationItem(selectedFG);
           if (isAutoFulfillMode) return 'Algorithmically mapping raw constraints to clear location backorders natively.';
           if (isPrepOutput) return 'Deducts raw ingredients and labour · Adds prep stock · Flows into downstream recipes.';
           return 'Calculate required raw ingredients directly mapping to theoretical recipe rules.';
@@ -1652,9 +1652,10 @@ export default function FinishedGoods() {
                   // ── Standard ingredient row ────────────────────────────────
 
                   // Candidate substitutes: all raw-type inventory items
-                  const candidatesAll = inventoryData.filter((i: any) =>
-                    i.itemType !== "Finished Good" && i.itemType !== "Preparation"
-                  );
+                  const candidatesAll = inventoryData.filter((i: any) => {
+                    const itemType = getSafeItemType(i);
+                    return itemType !== "Finished Good" && itemType !== "Preparation";
+                  });
                   // Prioritise: same unit AND same category as original ingredient's item
                   const effectiveOriginal = findInventoryItem(
                     inventoryData,
@@ -2313,7 +2314,6 @@ export default function FinishedGoods() {
           </div>
         );
       })()}
-      </div>
     </div>
   );
 }
