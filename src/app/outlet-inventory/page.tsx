@@ -13,10 +13,11 @@ import {
 } from "@/lib/excel";
 import {
   MapPin, Download, Upload, Save, Search, CheckCircle2,
-  AlertTriangle, RefreshCw, X, Store, Package,
+  RefreshCw, X, Store, Package, Plus,
 } from "lucide-react";
 
 type SourceFilter = "all" | "hq_supplied" | "local_vendor";
+type ViewMode = "active" | "catalog" | "disabled";
 
 interface MergedRow {
   itemId: string; name: string; category: string; uom: string;
@@ -44,7 +45,7 @@ function merge(catalog: OutletCatalogItem[], outlet: OutletInventoryRowV2[]): Me
       currentStock: o?.currentStock ?? 0,
       physicalCount: o?.physicalCount ?? null,
       minOnHand: o?.minOnHand ?? 0, parLevel: o?.parLevel ?? 0,
-      localEnabled: o?.localEnabled ?? true, localNotes: o?.localNotes ?? "",
+      localEnabled: o?.localEnabled ?? false, localNotes: o?.localNotes ?? "",
       localSupplier: o?.localSupplier ?? "", localPrice: o?.localPrice != null ? String(o.localPrice) : "",
       dirty: false, saving: false,
     };
@@ -63,7 +64,7 @@ export default function OutletInventoryPage() {
   const [loading,      setLoading]      = useState(true);
   const [search,       setSearch]       = useState("");
   const [srcFilter,    setSrcFilter]    = useState<SourceFilter>("all");
-  const [showDisabled, setShowDisabled] = useState(false);
+  const [viewMode,     setViewMode]     = useState<ViewMode>("active");
   const [savingAll,    setSavingAll]    = useState(false);
 
   // import state
@@ -107,12 +108,15 @@ export default function OutletInventoryPage() {
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
     return rows.filter((r) => {
+      // View mode gates
+      if (viewMode === "active")   { if (!r.outletRowId || !r.localEnabled) return false; }
+      if (viewMode === "disabled") { if (!r.outletRowId ||  r.localEnabled) return false; }
+      // catalog mode: show all catalog items (outletRowId may be null)
       if (srcFilter !== "all" && r.sourceType !== srcFilter) return false;
-      if (!showDisabled && !r.localEnabled) return false;
       if (q && !r.name.toLowerCase().includes(q) && !r.category.toLowerCase().includes(q) && !r.supplier.toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [rows, search, srcFilter, showDisabled]);
+  }, [rows, search, srcFilter, viewMode]);
 
   const patch = (itemId: string, p: Partial<MergedRow>) =>
     setRows((prev) => prev.map((r) => r.itemId === itemId ? { ...r, ...p, dirty: true } : r));
@@ -134,6 +138,19 @@ export default function OutletInventoryPage() {
     setSavingAll(true);
     await Promise.all(rows.filter((r) => r.dirty).map(saveRow));
     setSavingAll(false);
+  };
+
+  // Lazy-create a location row with local_enabled=true (catalog → active)
+  const enableItem = async (row: MergedRow) => {
+    setRows((prev) => prev.map((r) => r.itemId === row.itemId ? { ...r, saving: true } : r));
+    await upsertOutletInventoryRowV2({
+      item_id: row.itemId, location_id: activeLoc,
+      current_stock: 0, physical_count: null,
+      min_on_hand: 0, par_level: 0,
+      local_enabled: true, local_notes: null,
+    });
+    await loadAll(activeLoc);          // reload so row appears in Active view
+    setToast(`"${row.name}" enabled for ${activeLoc}.`);
   };
 
   const handleExport = () => {
@@ -238,18 +255,32 @@ export default function OutletInventoryPage() {
           <input type="text" placeholder="Search…" value={search} onChange={(e) => setSearch(e.target.value)}
             className="pl-9 pr-3 py-2 text-sm border border-neutral-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white w-48" />
         </div>
-        {(["all", "hq_supplied", "local_vendor"] as SourceFilter[]).map((f) => (
-          <button key={f} onClick={() => setSrcFilter(f)}
-            className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${srcFilter === f ? "bg-brand-600 text-white border-brand-600" : "bg-white border-neutral-200 text-neutral-600 hover:bg-neutral-50"}`}>
-            {f === "all" ? "All Items" : f === "hq_supplied" ? "HQ Supplied" : "Local Vendor"}
+        {([
+          ["active",   "Active Items"],
+          ["catalog",  "Add From Catalog"],
+          ["disabled", "Disabled"],
+        ] as [ViewMode, string][]).map(([m, label]) => (
+          <button key={m} onClick={() => setViewMode(m)}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${viewMode === m ? "bg-brand-600 text-white border-brand-600" : "bg-white border-neutral-200 text-neutral-600 hover:bg-neutral-50"}`}>
+            {label}
           </button>
         ))}
-        <button onClick={() => setShowDisabled(!showDisabled)}
-          className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${showDisabled ? "bg-neutral-800 text-white border-neutral-800" : "bg-white border-neutral-200 text-neutral-600 hover:bg-neutral-50"}`}>
-          {showDisabled ? "Hide disabled" : "Show disabled"}
-        </button>
+        {(["all", "hq_supplied", "local_vendor"] as SourceFilter[]).map((f) => (
+          <button key={f} onClick={() => setSrcFilter(f)}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${srcFilter === f ? "bg-neutral-700 text-white border-neutral-700" : "bg-white border-neutral-200 text-neutral-500 hover:bg-neutral-50"} text-[10px]`}>
+            {f === "all" ? "All" : f === "hq_supplied" ? "HQ" : "Local"}
+          </button>
+        ))}
         <span className="text-xs text-neutral-400 ml-auto">{filtered.length} items</span>
       </div>
+
+      {/* Catalog mode hint */}
+      {viewMode === "catalog" && (
+        <div className="flex items-center gap-2 bg-violet-50 border border-violet-200 rounded-lg px-4 py-2.5 text-xs text-violet-800">
+          <Plus className="h-3.5 w-3.5 shrink-0" />
+          <span><strong>Add From Catalog:</strong> Click <strong>Enable</strong> on any item to activate it for this location. Already-enabled items show their current outlet data.</span>
+        </div>
+      )}
 
       {/* Table */}
       {loading ? (
@@ -285,7 +316,11 @@ export default function OutletInventoryPage() {
               </thead>
               <tbody className="divide-y divide-neutral-100">
                 {filtered.length === 0 ? (
-                  <tr><td colSpan={15} className="py-10 text-center text-neutral-400 text-sm">No items match your filters.</td></tr>
+                  <tr><td colSpan={15} className="py-10 text-center text-neutral-400 text-sm">
+                    {viewMode === "active" ? "No active items — switch to Add From Catalog to enable items for this location." :
+                     viewMode === "disabled" ? "No disabled items for this location." :
+                     "No catalog items match your filters."}
+                  </td></tr>
                 ) : filtered.map((row) => (
                   <tr key={row.itemId} className={`${row.dirty ? "bg-amber-50/40" : "hover:bg-neutral-50/30"} ${!row.localEnabled ? "opacity-50" : ""}`}>
                     {/* Read-only catalog columns */}
@@ -336,13 +371,19 @@ export default function OutletInventoryPage() {
                         className="w-28 text-xs border border-neutral-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-brand-500" />
                     </td>
                     <td className="px-4 py-1.5 text-right">
-                      {row.dirty && (
+                      {viewMode === "catalog" && !row.outletRowId ? (
+                        <button onClick={() => enableItem(row)} disabled={row.saving}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-[10px] font-semibold bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50">
+                          {row.saving ? <RefreshCw className="h-2.5 w-2.5 animate-spin" /> : <Plus className="h-2.5 w-2.5" />}
+                          {row.saving ? "…" : "Enable"}
+                        </button>
+                      ) : row.dirty ? (
                         <button onClick={() => saveRow(row)} disabled={row.saving}
                           className="inline-flex items-center gap-1 px-2 py-1 text-[10px] font-semibold bg-brand-600 text-white rounded hover:bg-brand-700 disabled:opacity-50">
                           {row.saving ? <RefreshCw className="h-2.5 w-2.5 animate-spin" /> : <Save className="h-2.5 w-2.5" />}
                           {row.saving ? "…" : "Save"}
                         </button>
-                      )}
+                      ) : null}
                     </td>
                   </tr>
                 ))}
