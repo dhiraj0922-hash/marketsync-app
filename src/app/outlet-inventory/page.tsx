@@ -277,23 +277,35 @@ export default function OutletInventoryPage() {
     if (hqRequisitionLines.length === 0) return;
     setReqSaving(true);
     try {
+      const reqId = `REQ-${Date.now()}`;
       const header = {
-        id: `req_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+        id:          reqId,
         location_id: activeLoc,
-        created_by: user?.email || "Location Manager",
-        status: "pending",
-        notes: reqNotes.trim(),
-        date: new Date().toISOString().split("T")[0],
+        created_by:  user?.id || "System",
+        status:      "submitted",
+        notes:       reqNotes.trim(),
+        date:        new Date().toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+          year: "numeric"
+        }),
       };
 
-      const items = hqRequisitionLines.map((line) => ({
-        finished_good_id: line.row.hqSaleItemId || line.row.itemId,
-        item_name_snapshot: line.row.name,
-        unit_snapshot: line.row.uom,
-        quantity_requested: line.qty,
-        unit_price: line.price,
-        line_total: line.total,
-      }));
+      const items = hqRequisitionLines.map((line) => {
+        if (!line.row.hqSaleItemId) {
+          throw new Error(`Catalog item "${line.row.name}" is missing a valid hq_sale_item_id.`);
+        }
+        return {
+          item_id:                     null,
+          finished_good_id:            line.row.hqSaleItemId,
+          item_name_snapshot:          line.row.name,
+          unit_snapshot:               line.row.uom || "ea",
+          source_commissary_snapshot:  "Commissary HQ",
+          quantity_requested:          line.qty,
+          unit_price:                  line.price,
+          line_total:                  parseFloat(line.total.toFixed(2)),
+        };
+      });
 
       const res = await saveNewRequisition(header, items);
       if (res.success) {
@@ -311,6 +323,7 @@ export default function OutletInventoryPage() {
       setReqSaving(false);
     }
   };
+
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
