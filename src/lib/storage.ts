@@ -3523,3 +3523,146 @@ export async function deletePurchaseOption(id: string) {
   }
   return { success: true };
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// 18. OUTLET LEVEL INVENTORY  (location_inventory_items)
+// ────────────────────────────────────────────────────────────────────────────
+//
+// Table: location_inventory_items
+//   item_id, location_id  — UNIQUE composite key (matches inventory_items)
+//   current_stock, physical_count, min_on_hand, par_level — outlet-only fields
+//   local_enabled, local_notes, last_counted_at
+//
+// Master item data (name, category, uom, price, supplier…) is always read
+// from inventory_items WHERE location_id = 'LOC-HQ' and joined in memory
+// on the page — this table stores ONLY outlet-specific overrides.
+// ────────────────────────────────────────────────────────────────────────────
+
+/** Shape of one outlet inventory row after DB read */
+export interface OutletInventoryRow {
+  id:             string;
+  itemId:         string;       // shared item identity (FK to HQ row)
+  locationId:     string;
+  currentStock:   number;
+  physicalCount:  number | null;
+  minOnHand:      number;
+  parLevel:       number;
+  localEnabled:   boolean;
+  localNotes:     string | null;
+  lastCountedAt:  string | null;
+  createdAt:      string;
+  updatedAt:      string;
+}
+
+function mapOutletRowToFrontend(db: any): OutletInventoryRow {
+  return {
+    id:            db.id,
+    itemId:        db.item_id,
+    locationId:    db.location_id,
+    currentStock:  parseFloat(db.current_stock) || 0,
+    physicalCount: db.physical_count != null ? parseFloat(db.physical_count) : null,
+    minOnHand:     parseFloat(db.min_on_hand)   || 0,
+    parLevel:      parseFloat(db.par_level)      || 0,
+    localEnabled:  db.local_enabled !== false,
+    localNotes:    db.local_notes    ?? null,
+    lastCountedAt: db.last_counted_at ?? null,
+    createdAt:     db.created_at,
+    updatedAt:     db.updated_at,
+  };
+}
+
+/**
+ * Load all outlet inventory rows for a given location.
+ *
+ * @param locationId  Pass 'LOC-HQ' to retrieve HQ rows, or any outlet id.
+ *                    hq_admin can load any location; location_manager is
+ *                    restricted by RLS to their own location.
+ */
+export async function loadOutletInventory(
+  locationId: string
+): Promise<OutletInventoryRow[]> {
+  const { data, error } = await supabase
+    .from('location_inventory_items')
+    .select('*')
+    .eq('location_id', locationId)
+    .order('item_id', { ascending: true });
+
+  if (error) {
+    console.error('[loadOutletInventory] error:', error);
+    return [];
+  }
+  return (data ?? []).map(mapOutletRowToFrontend);
+}
+
+/**
+ * Upsert a single outlet inventory row.
+ * Only the outlet-editable fields are written; master item data is untouched.
+ *
+ * Requires migration_outlet_inventory.sql to have been run.
+ */
+export async function upsertOutletInventoryRow(
+  row: {
+    item_id:        string;
+    location_id:    string;
+    current_stock:  number;
+    physical_count: number | null;
+    min_on_hand:    number;
+    par_level:      number;
+    local_enabled:  boolean;
+    local_notes:    string | null;
+    last_counted_at?: string | null;
+  }
+): Promise<{ success: boolean; error?: any }> {
+  const payload: any = {
+    item_id:        row.item_id,
+    location_id:    row.location_id,
+    current_stock:  isNaN(row.current_stock)  ? 0 : row.current_stock,
+    physical_count: row.physical_count ?? null,
+    min_on_hand:    isNaN(row.min_on_hand)    ? 0 : row.min_on_hand,
+    par_level:      isNaN(row.par_level)      ? 0 : row.par_level,
+    local_enabled:  row.local_enabled,
+    local_notes:    row.local_notes ?? null,
+    updated_at:     new Date().toISOString(),
+  };
+  if (row.last_counted_at !== undefined) {
+    payload.last_counted_at = row.last_counted_at;
+  }
+
+  const { error } = await supabase
+    .from('location_inventory_items')
+    .upsert(payload, { onConflict: 'item_id,location_id' });
+
+  if (error) {
+    console.error('[upsertOutletInventoryRow] error:', error);
+    return { success: false, error };
+  }
+  return { success: true };
+}
+
+/**
+ * Bulk-upsert outlet inventory rows from Excel import.
+ * Processes each row individually so failures are isolated and reported.
+ *
+ * @param rows       Array of outlet rows (already validated + mapped by excel.ts)
+ * @returns          Summary: { succeeded, failed, errors }
+ */
+export async function bulkUpsertOutletInventory(
+  rows: Parameters<typeof upsertOutletInventoryRow>[0][]
+): Promise<{ succeeded: number; failed: number; errors: string[] }> {
+  let succeeded = 0;
+  let failed    = 0;
+  const errors: string[] = [];
+
+  for (const row of rows) {
+    const res = await upsertOutletInventoryRow(row);
+    if (res.success) {
+      succeeded++;
+    } else {
+      failed++;
+      const msg = res.error?.message ?? JSON.stringify(res.error);
+      errors.push(`${row.item_id} @ ${row.location_id}: ${msg}`);
+    }
+  }
+
+  return { succeeded, failed, errors };
+}

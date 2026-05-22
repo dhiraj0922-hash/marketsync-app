@@ -40,6 +40,7 @@ import {
   CheckSquare,
   Settings,
   MapPin,
+  Database,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/components/AuthProvider";
@@ -56,6 +57,7 @@ const navigation: NavItem[] = [
   { name: "Dashboard",     href: "/",              icon: LayoutDashboard },
   { name: "Approvals",     href: "/approvals",     icon: CheckSquare,    hqOnly: true },
   { name: "Inventory",     href: "/inventory",     icon: Package },
+  { name: "Outlet Inventory", href: "/outlet-inventory", icon: MapPin },
   { name: "Counts",        href: "/counts",        icon: ClipboardList },
   { name: "Orders",        href: "/orders",        icon: ShoppingCart },
   { name: "Requisitions",  href: "/requisitions",  icon: Inbox },
