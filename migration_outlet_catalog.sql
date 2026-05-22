@@ -63,25 +63,51 @@ ALTER TABLE public.location_inventory_items
 -- Note: local_notes already exists from migration_outlet_inventory.sql
 
 -- ── 3. Seed outlet_catalog_items from hq_sale_items ──────────────────────────
--- Pulls active HQ finished-goods catalog into outlet catalog as 'hq_supplied'.
--- item_id is prefixed with 'hq_' + hq_sale_items.id to avoid collisions.
--- Safe: ON CONFLICT DO NOTHING prevents re-seeding on repeated runs.
+-- Seeds active + requisitionable HQ finished goods into the outlet catalog.
+--
+-- Real hq_sale_items column names (verified from storage.ts mapSaleItemToFrontend):
+--   name            → name
+--   base_unit       → UOM / unit shown in the UI
+--   category        → category
+--   making_cost     → cost to produce
+--   manual_price    → HQ override price
+--   suggested_price → generated column (making_cost * 1.20)
+--   effective_price → COALESCE(manual_price, suggested_price) — used by requisitions
+--   pack_qty        → sellable pack size
+--   is_active       → active flag
+--   is_requisitionable → visible/orderable by locations
+--
+-- item_id is prefixed 'hq_' + id to keep it distinct from local vendor item_ids.
+-- Only seeds items that are: is_active = true AND is_requisitionable = true.
+-- Safe to re-run: ON CONFLICT (item_id) DO NOTHING skips existing rows.
+-- ─────────────────────────────────────────────────────────────────────────────
 INSERT INTO public.outlet_catalog_items
   (item_id, name, category, uom, type, source_type, hq_sale_item_id,
-   price, ordering_enabled, is_active)
+   price, pack_qty, ordering_enabled, is_active)
 SELECT
-  'hq_' || id::text   AS item_id,
+  'hq_' || id::text                                        AS item_id,
   name,
-  NULL                AS category,
-  unit                AS uom,
-  'Finished Good'     AS type,
-  'hq_supplied'       AS source_type,
-  id::text            AS hq_sale_item_id,
-  COALESCE(makingcost, 0) AS price,
-  true                AS ordering_enabled,
-  true                AS is_active
+  category,
+  COALESCE(NULLIF(TRIM(base_unit), ''), 'ea')              AS uom,
+  'Finished Good'                                          AS type,
+  'hq_supplied'                                            AS source_type,
+  id::text                                                 AS hq_sale_item_id,
+  -- Use effective_price (manual override if set, else suggested) for outlet price.
+  -- effective_price is a generated/computed column; fall back to manual_price or
+  -- suggested_price if the column does not exist in older schema versions.
+  COALESCE(
+    NULLIF(manual_price, 0),
+    NULLIF(suggested_price, 0),
+    making_cost,
+    0
+  )                                                        AS price,
+  COALESCE(NULLIF(pack_qty, 0), 1)                         AS pack_qty,
+  true                                                     AS ordering_enabled,
+  true                                                     AS is_active
 FROM public.hq_sale_items
-WHERE is_active IS NOT FALSE
+WHERE
+  (is_active        IS NULL OR is_active        = true)
+  AND (is_requisitionable IS NULL OR is_requisitionable = true)
 ON CONFLICT (item_id) DO NOTHING;
 
 -- ── 4. RLS for outlet_catalog_items ──────────────────────────────────────────
