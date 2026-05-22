@@ -3666,3 +3666,211 @@ export async function bulkUpsertOutletInventory(
 
   return { succeeded, failed, errors };
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// 19. OUTLET CATALOG  (outlet_catalog_items)
+// ────────────────────────────────────────────────────────────────────────────
+
+export interface OutletCatalogItem {
+  itemId:          string;
+  name:            string;
+  category:        string | null;
+  uom:             string | null;
+  type:            string;
+  sourceType:      'hq_supplied' | 'local_vendor';
+  hqSaleItemId:    string | null;
+  supplier:        string | null;
+  purchaseOption:  string | null;
+  productCode:     string | null;
+  scanBarcode:     string | null;
+  price:           number;
+  taxRate:         number;
+  packQty:         number;
+  orderingEnabled: boolean;
+  isActive:        boolean;
+}
+
+function mapCatalogItem(db: any): OutletCatalogItem {
+  return {
+    itemId:          db.item_id,
+    name:            db.name,
+    category:        db.category  ?? null,
+    uom:             db.uom       ?? null,
+    type:            db.type      ?? 'Inventory item',
+    sourceType:      db.source_type === 'hq_supplied' ? 'hq_supplied' : 'local_vendor',
+    hqSaleItemId:    db.hq_sale_item_id ?? null,
+    supplier:        db.supplier  ?? null,
+    purchaseOption:  db.purchase_option ?? null,
+    productCode:     db.product_code    ?? null,
+    scanBarcode:     db.scan_barcode    ?? null,
+    price:           parseFloat(db.price)    || 0,
+    taxRate:         parseFloat(db.tax_rate) || 0,
+    packQty:         parseFloat(db.pack_qty) || 1,
+    orderingEnabled: db.ordering_enabled !== false,
+    isActive:        db.is_active !== false,
+  };
+}
+
+/** Load all active outlet catalog items (global — same for every location) */
+export async function loadOutletCatalog(): Promise<OutletCatalogItem[]> {
+  const { data, error } = await supabase
+    .from('outlet_catalog_items')
+    .select('*')
+    .eq('is_active', true)
+    .order('name', { ascending: true });
+  if (error) {
+    console.error('[loadOutletCatalog] error:', error);
+    return [];
+  }
+  return (data ?? []).map(mapCatalogItem);
+}
+
+/** HQ-only: upsert a catalog item */
+export async function upsertOutletCatalogItem(
+  item: Omit<OutletCatalogItem, 'isActive'> & { isActive?: boolean }
+): Promise<{ success: boolean; error?: any }> {
+  const { error } = await supabase
+    .from('outlet_catalog_items')
+    .upsert({
+      item_id:          item.itemId,
+      name:             item.name,
+      category:         item.category         ?? null,
+      uom:              item.uom              ?? null,
+      type:             item.type,
+      source_type:      item.sourceType,
+      hq_sale_item_id:  item.hqSaleItemId     ?? null,
+      supplier:         item.supplier         ?? null,
+      purchase_option:  item.purchaseOption   ?? null,
+      product_code:     item.productCode      ?? null,
+      scan_barcode:     item.scanBarcode      ?? null,
+      price:            item.price,
+      tax_rate:         item.taxRate,
+      pack_qty:         item.packQty,
+      ordering_enabled: item.orderingEnabled,
+      is_active:        item.isActive ?? true,
+      updated_at:       new Date().toISOString(),
+    }, { onConflict: 'item_id' });
+  if (error) {
+    console.error('[upsertOutletCatalogItem] error:', error);
+    return { success: false, error };
+  }
+  return { success: true };
+}
+
+/** HQ-only: soft-delete a catalog item */
+export async function deactivateOutletCatalogItem(
+  itemId: string
+): Promise<{ success: boolean; error?: any }> {
+  const { error } = await supabase
+    .from('outlet_catalog_items')
+    .update({ is_active: false, updated_at: new Date().toISOString() })
+    .eq('item_id', itemId);
+  if (error) return { success: false, error };
+  return { success: true };
+}
+
+// Extended outlet row shape (with local-override columns added in migration_outlet_catalog.sql)
+export interface OutletInventoryRowV2 extends OutletInventoryRow {
+  localSupplier:       string | null;
+  localPurchaseOption: string | null;
+  localPrice:          number | null;
+  localProductCode:    string | null;
+}
+
+function mapOutletRowV2(db: any): OutletInventoryRowV2 {
+  const base = {
+    id:            db.id,
+    itemId:        db.item_id,
+    locationId:    db.location_id,
+    currentStock:  parseFloat(db.current_stock)  || 0,
+    physicalCount: db.physical_count != null ? parseFloat(db.physical_count) : null,
+    minOnHand:     parseFloat(db.min_on_hand)    || 0,
+    parLevel:      parseFloat(db.par_level)      || 0,
+    localEnabled:  db.local_enabled !== false,
+    localNotes:    db.local_notes    ?? null,
+    lastCountedAt: db.last_counted_at ?? null,
+    createdAt:     db.created_at,
+    updatedAt:     db.updated_at,
+  };
+  return {
+    ...base,
+    localSupplier:       db.local_supplier        ?? null,
+    localPurchaseOption: db.local_purchase_option ?? null,
+    localPrice:          db.local_price != null ? parseFloat(db.local_price) : null,
+    localProductCode:    db.local_product_code    ?? null,
+  };
+}
+
+/** Load outlet inventory rows for a location (v2 — includes local overrides) */
+export async function loadOutletInventoryV2(
+  locationId: string
+): Promise<OutletInventoryRowV2[]> {
+  const { data, error } = await supabase
+    .from('location_inventory_items')
+    .select('*')
+    .eq('location_id', locationId)
+    .order('item_id', { ascending: true });
+  if (error) {
+    console.error('[loadOutletInventoryV2] error:', error);
+    return [];
+  }
+  return (data ?? []).map(mapOutletRowV2);
+}
+
+/** Upsert outlet inventory row (v2 — includes local overrides) */
+export async function upsertOutletInventoryRowV2(
+  row: {
+    item_id:              string;
+    location_id:          string;
+    current_stock:        number;
+    physical_count:       number | null;
+    min_on_hand:          number;
+    par_level:            number;
+    local_enabled:        boolean;
+    local_notes:          string | null;
+    local_supplier?:      string | null;
+    local_purchase_option?: string | null;
+    local_price?:         number | null;
+    local_product_code?:  string | null;
+    last_counted_at?:     string | null;
+  }
+): Promise<{ success: boolean; error?: any }> {
+  const payload: any = {
+    item_id:        row.item_id,
+    location_id:    row.location_id,
+    current_stock:  isNaN(row.current_stock) ? 0 : row.current_stock,
+    physical_count: row.physical_count ?? null,
+    min_on_hand:    isNaN(row.min_on_hand)   ? 0 : row.min_on_hand,
+    par_level:      isNaN(row.par_level)     ? 0 : row.par_level,
+    local_enabled:  row.local_enabled,
+    local_notes:    row.local_notes ?? null,
+    local_supplier:        row.local_supplier        ?? null,
+    local_purchase_option: row.local_purchase_option ?? null,
+    local_price:           row.local_price           ?? null,
+    local_product_code:    row.local_product_code    ?? null,
+    updated_at:     new Date().toISOString(),
+  };
+  if (row.last_counted_at !== undefined) payload.last_counted_at = row.last_counted_at;
+
+  const { error } = await supabase
+    .from('location_inventory_items')
+    .upsert(payload, { onConflict: 'item_id,location_id' });
+  if (error) {
+    console.error('[upsertOutletInventoryRowV2] error:', error);
+    return { success: false, error };
+  }
+  return { success: true };
+}
+
+/** Bulk upsert v2 rows (Excel import) */
+export async function bulkUpsertOutletInventoryV2(
+  rows: Parameters<typeof upsertOutletInventoryRowV2>[0][]
+): Promise<{ succeeded: number; failed: number; errors: string[] }> {
+  let succeeded = 0; let failed = 0; const errors: string[] = [];
+  for (const row of rows) {
+    const res = await upsertOutletInventoryRowV2(row);
+    if (res.success) { succeeded++; }
+    else { failed++; errors.push(`${row.item_id}@${row.location_id}: ${res.error?.message ?? 'error'}`); }
+  }
+  return { succeeded, failed, errors };
+}
