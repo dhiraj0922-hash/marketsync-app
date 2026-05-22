@@ -5,6 +5,7 @@ import { isHqAdmin } from "@/lib/roles";
 import {
   loadLocations, loadOutletCatalog, loadOutletInventoryV2,
   upsertOutletInventoryRowV2, bulkUpsertOutletInventoryV2,
+  saveNewRequisition,
   type OutletCatalogItem, type OutletInventoryRowV2,
 } from "@/lib/storage";
 import {
@@ -13,16 +14,18 @@ import {
 } from "@/lib/excel";
 import {
   MapPin, Download, Upload, Save, Search, CheckCircle2,
-  RefreshCw, X, Store, Package, Plus,
+  RefreshCw, X, Store, Package, Plus, FileSpreadsheet, ClipboardList,
+  AlertCircle
 } from "lucide-react";
 
 type SourceFilter = "all" | "hq_supplied" | "local_vendor";
-type ViewMode = "active" | "catalog" | "disabled";
+type ViewMode = "active" | "catalog" | "disabled" | "suggested";
 
 interface MergedRow {
   itemId: string; name: string; category: string; uom: string;
   type: string; sourceType: "hq_supplied" | "local_vendor";
   supplier: string; price: number; taxRate: number; orderingEnabled: boolean;
+  hqSaleItemId: string | null;
   // outlet
   outletRowId: string | null;
   currentStock: number; physicalCount: number | null;
@@ -40,7 +43,7 @@ function merge(catalog: OutletCatalogItem[], outlet: OutletInventoryRowV2[]): Me
       itemId: c.itemId, name: c.name, category: c.category ?? "",
       uom: c.uom ?? "", type: c.type, sourceType: c.sourceType,
       supplier: c.supplier ?? "", price: c.price, taxRate: c.taxRate,
-      orderingEnabled: c.orderingEnabled,
+      orderingEnabled: c.orderingEnabled, hqSaleItemId: c.hqSaleItemId ?? null,
       outletRowId: o?.id ?? null,
       currentStock: o?.currentStock ?? 0,
       physicalCount: o?.physicalCount ?? null,
@@ -66,6 +69,14 @@ export default function OutletInventoryPage() {
   const [srcFilter,    setSrcFilter]    = useState<SourceFilter>("all");
   const [viewMode,     setViewMode]     = useState<ViewMode>("active");
   const [savingAll,    setSavingAll]    = useState(false);
+
+  // Suggested Order View Filters
+  const [suggestedQtyOnly, setSuggestedQtyOnly] = useState(false);
+
+  // Requisition Modal State
+  const [reqModalOpen, setReqModalOpen] = useState(false);
+  const [reqNotes,     setReqNotes]     = useState("");
+  const [reqSaving,    setReqSaving]    = useState(false);
 
   // import state
   const [importModalOpen, setImportModalOpen] = useState(false);
@@ -105,18 +116,44 @@ export default function OutletInventoryPage() {
   useEffect(() => { if (activeLoc) loadAll(activeLoc); }, [activeLoc, loadAll]);
   useEffect(() => { setRows(merge(catalog, outletData)); }, [catalog, outletData]);
 
+  // Suggested order helpers
+  const getRowPrice = useCallback((r: MergedRow) => {
+    if (r.localPrice !== "" && r.localPrice != null) {
+      const p = parseFloat(r.localPrice);
+      if (!isNaN(p)) return p;
+    }
+    return r.price;
+  }, []);
+
+  const getRowSupplier = useCallback((r: MergedRow) => {
+    return r.localSupplier || r.supplier || "—";
+  }, []);
+
+  const getRowSuggestedQty = useCallback((r: MergedRow) => {
+    if (!r.parLevel || r.parLevel <= 0) return 0;
+    return Math.max(r.parLevel - r.currentStock, 0);
+  }, []);
+
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
     return rows.filter((r) => {
       // View mode gates
-      if (viewMode === "active")   { if (!r.outletRowId || !r.localEnabled) return false; }
-      if (viewMode === "disabled") { if (!r.outletRowId ||  r.localEnabled) return false; }
-      // catalog mode: show all catalog items (outletRowId may be null)
+      if (viewMode === "active") {
+        if (!r.outletRowId || !r.localEnabled) return false;
+      }
+      if (viewMode === "disabled") {
+        if (!r.outletRowId || r.localEnabled) return false;
+      }
+      if (viewMode === "suggested") {
+        if (!r.outletRowId || !r.localEnabled) return false;
+        if (suggestedQtyOnly && getRowSuggestedQty(r) <= 0) return false;
+      }
+
       if (srcFilter !== "all" && r.sourceType !== srcFilter) return false;
       if (q && !r.name.toLowerCase().includes(q) && !r.category.toLowerCase().includes(q) && !r.supplier.toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [rows, search, srcFilter, viewMode]);
+  }, [rows, search, srcFilter, viewMode, suggestedQtyOnly, getRowSuggestedQty]);
 
   const patch = (itemId: string, p: Partial<MergedRow>) =>
     setRows((prev) => prev.map((r) => r.itemId === itemId ? { ...r, ...p, dirty: true } : r));
@@ -167,6 +204,114 @@ export default function OutletInventoryPage() {
     exportToExcel(data, `outlet_inventory_${activeLoc}`);
   };
 
+  // Exports the entire active suggested order list to Excel
+  const handleExportSuggested = () => {
+    const data = rows
+      .filter((r) => r.outletRowId && r.localEnabled)
+      .map((r) => {
+        const suggestedQty = getRowSuggestedQty(r);
+        const price = getRowPrice(r);
+        const cost = suggestedQty * price;
+        return {
+          "Item": r.name,
+          "Source Type": r.sourceType === "hq_supplied" ? "HQ Supplied" : "Local Vendor",
+          "Category": r.category,
+          "UOM": r.uom,
+          "Current Stock": r.currentStock,
+          "Min On Hand": r.minOnHand,
+          "Par Level": r.parLevel,
+          "Suggested Order Qty": suggestedQty,
+          "Supplier": getRowSupplier(r),
+          "Price": price,
+          "Estimated Cost": cost,
+        };
+      });
+    exportToExcel(data, `suggested_order_${activeLoc}`);
+  };
+
+  // Exports only the local vendor items where suggested qty > 0 to Excel
+  const handleExportLocalVendor = () => {
+    const data = rows
+      .filter((r) => r.outletRowId && r.localEnabled && r.sourceType === "local_vendor" && getRowSuggestedQty(r) > 0)
+      .map((r) => {
+        const suggestedQty = getRowSuggestedQty(r);
+        const price = getRowPrice(r);
+        const cost = suggestedQty * price;
+        return {
+          "Local Vendor Item": r.name,
+          "Category": r.category,
+          "UOM": r.uom,
+          "Current Stock": r.currentStock,
+          "Min On Hand": r.minOnHand,
+          "Par Level": r.parLevel,
+          "Suggested Order Qty": suggestedQty,
+          "Local Supplier": getRowSupplier(r),
+          "Local Price": price,
+          "Estimated Cost": cost,
+        };
+      });
+    exportToExcel(data, `local_vendor_purchase_list_${activeLoc}`);
+  };
+
+  // Create HQ Requisition list (HQ supplied items with qty > 0)
+  const hqRequisitionLines = useMemo(() => {
+    return rows
+      .filter((r) => r.outletRowId && r.localEnabled && r.sourceType === "hq_supplied" && getRowSuggestedQty(r) > 0)
+      .map((r) => {
+        const qty = getRowSuggestedQty(r);
+        const price = getRowPrice(r);
+        return {
+          row: r,
+          qty,
+          price,
+          total: qty * price
+        };
+      });
+  }, [rows, getRowSuggestedQty, getRowPrice]);
+
+  const hqRequisitionGrandTotal = useMemo(() => {
+    return hqRequisitionLines.reduce((sum, line) => sum + line.total, 0);
+  }, [hqRequisitionLines]);
+
+  const handleSubmitRequisition = async () => {
+    if (hqRequisitionLines.length === 0) return;
+    setReqSaving(true);
+    try {
+      const header = {
+        id: `req_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+        location_id: activeLoc,
+        created_by: user?.email || "Location Manager",
+        status: "pending",
+        notes: reqNotes.trim(),
+        date: new Date().toISOString().split("T")[0],
+      };
+
+      const items = hqRequisitionLines.map((line) => ({
+        finished_good_id: line.row.hqSaleItemId || line.row.itemId,
+        item_name_snapshot: line.row.name,
+        unit_snapshot: line.row.uom,
+        quantity_requested: line.qty,
+        unit_price: line.price,
+        line_total: line.total,
+      }));
+
+      const res = await saveNewRequisition(header, items);
+      if (res.success) {
+        setToast(`Successfully created Requisition Header ID ${header.id} with ${items.length} items!`);
+        setReqModalOpen(false);
+        setReqNotes("");
+        // Reload all stock levels
+        await loadAll(activeLoc);
+      } else {
+        alert(`Failed to save requisition: ${res.error?.message || "Unknown Database Error"}`);
+      }
+    } catch (err: any) {
+      alert(`Error submitting requisition: ${err?.message || err}`);
+    } finally {
+      setReqSaving(false);
+    }
+  };
+
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -210,20 +355,43 @@ export default function OutletInventoryPage() {
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <button onClick={downloadOutletTemplate} className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50">
-            <Download className="h-3.5 w-3.5" /> Template
-          </button>
-          <button onClick={handleExport} disabled={loading} className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50 disabled:opacity-50">
-            <Download className="h-3.5 w-3.5" /> Export
-          </button>
-          <label className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50 cursor-pointer">
-            <Upload className="h-3.5 w-3.5" /> Import
-            <input type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleFileChange} />
-          </label>
-          {dirtyCount > 0 && (
-            <button onClick={saveAll} disabled={savingAll} className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-60">
-              <Save className="h-3.5 w-3.5" />{savingAll ? "Saving…" : `Save Changes (${dirtyCount})`}
-            </button>
+          {viewMode === "suggested" ? (
+            <>
+              <button onClick={handleExportSuggested} className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50">
+                <FileSpreadsheet className="h-3.5 w-3.5 text-green-600" /> Export Suggested Order
+              </button>
+              <button
+                onClick={handleExportLocalVendor}
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50"
+              >
+                <Download className="h-3.5 w-3.5 text-teal-600" /> Export Local Purchase List
+              </button>
+              <button
+                onClick={() => setReqModalOpen(true)}
+                disabled={hqRequisitionLines.length === 0}
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <ClipboardList className="h-3.5 w-3.5" /> Requisition HQ Items ({hqRequisitionLines.length})
+              </button>
+            </>
+          ) : (
+            <>
+              <button onClick={downloadOutletTemplate} className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50">
+                <Download className="h-3.5 w-3.5" /> Template
+              </button>
+              <button onClick={handleExport} disabled={loading} className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50 disabled:opacity-50">
+                <Download className="h-3.5 w-3.5" /> Export
+              </button>
+              <label className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50 cursor-pointer">
+                <Upload className="h-3.5 w-3.5" /> Import
+                <input type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleFileChange} />
+              </label>
+              {dirtyCount > 0 && (
+                <button onClick={saveAll} disabled={savingAll} className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-60">
+                  <Save className="h-3.5 w-3.5" />{savingAll ? "Saving…" : `Save Changes (${dirtyCount})`}
+                </button>
+              )}
+            </>
           )}
         </div>
       </div>
@@ -256,9 +424,10 @@ export default function OutletInventoryPage() {
             className="pl-9 pr-3 py-2 text-sm border border-neutral-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white w-48" />
         </div>
         {([
-          ["active",   "Active Items"],
-          ["catalog",  "Add From Catalog"],
-          ["disabled", "Disabled"],
+          ["active",    "Active Items"],
+          ["catalog",   "Add From Catalog"],
+          ["disabled",  "Disabled"],
+          ["suggested", "Suggested Order"],
         ] as [ViewMode, string][]).map(([m, label]) => (
           <button key={m} onClick={() => setViewMode(m)}
             className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${viewMode === m ? "bg-brand-600 text-white border-brand-600" : "bg-white border-neutral-200 text-neutral-600 hover:bg-neutral-50"}`}>
@@ -271,6 +440,14 @@ export default function OutletInventoryPage() {
             {f === "all" ? "All" : f === "hq_supplied" ? "HQ" : "Local"}
           </button>
         ))}
+        {viewMode === "suggested" && (
+          <button
+            onClick={() => setSuggestedQtyOnly(!suggestedQtyOnly)}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${suggestedQtyOnly ? "bg-amber-600 text-white border-amber-600 hover:bg-amber-700" : "bg-white border-neutral-200 text-neutral-600 hover:bg-neutral-50"}`}
+          >
+            Suggested Qty &gt; 0
+          </button>
+        )}
         <span className="text-xs text-neutral-400 ml-auto">{filtered.length} items</span>
       </div>
 
@@ -279,6 +456,16 @@ export default function OutletInventoryPage() {
         <div className="flex items-center gap-2 bg-violet-50 border border-violet-200 rounded-lg px-4 py-2.5 text-xs text-violet-800">
           <Plus className="h-3.5 w-3.5 shrink-0" />
           <span><strong>Add From Catalog:</strong> Click <strong>Enable</strong> on any item to activate it for this location. Already-enabled items show their current outlet data.</span>
+        </div>
+      )}
+
+      {/* Suggested Mode header alert */}
+      {viewMode === "suggested" && (
+        <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2.5 text-xs text-amber-800">
+          <AlertCircle className="h-4 w-4 shrink-0 text-amber-600" />
+          <span>
+            <strong>Suggested Order view:</strong> Order quantities are calculated as <code>max(Par Level - Stock, 0)</code>. Items with Par Level = 0 or null result in 0 suggested order. Adjust Par Levels on the <strong>Active Items</strong> tab.
+          </span>
         </div>
       )}
 
@@ -296,99 +483,227 @@ export default function OutletInventoryPage() {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="text-[10px] uppercase tracking-wider text-neutral-500 border-b border-neutral-200">
-                <tr>
-                  <th className="px-4 py-3 text-left bg-neutral-100 font-semibold">Item</th>
-                  <th className="px-3 py-3 text-left bg-neutral-100 font-semibold">Source</th>
-                  <th className="px-3 py-3 text-left bg-neutral-100 font-semibold">Category</th>
-                  <th className="px-3 py-3 text-left bg-neutral-100 font-semibold">UOM</th>
-                  <th className="px-3 py-3 text-left bg-neutral-100 font-semibold">Supplier</th>
-                  <th className="px-3 py-3 text-right bg-neutral-100 font-semibold">Price</th>
-                  <th className="px-3 py-3 text-right font-semibold">Stock</th>
-                  <th className="px-3 py-3 text-right font-semibold">Count</th>
-                  <th className="px-3 py-3 text-right font-semibold">Min</th>
-                  <th className="px-3 py-3 text-right font-semibold">Par</th>
-                  <th className="px-3 py-3 text-left font-semibold">Local Supplier</th>
-                  <th className="px-3 py-3 text-right font-semibold">Local $</th>
-                  <th className="px-3 py-3 text-center font-semibold">On</th>
-                  <th className="px-3 py-3 text-left font-semibold">Notes</th>
-                  <th className="px-4 py-3 text-right font-semibold">Save</th>
-                </tr>
+                {viewMode === "suggested" ? (
+                  <tr>
+                    <th className="px-4 py-3 text-left bg-neutral-100 font-semibold">Item</th>
+                    <th className="px-3 py-3 text-left bg-neutral-100 font-semibold">Source</th>
+                    <th className="px-3 py-3 text-left bg-neutral-100 font-semibold">Category</th>
+                    <th className="px-3 py-3 text-left bg-neutral-100 font-semibold">UOM</th>
+                    <th className="px-3 py-3 text-right bg-neutral-100 font-semibold">Stock</th>
+                    <th className="px-3 py-3 text-right bg-neutral-100 font-semibold">Min</th>
+                    <th className="px-3 py-3 text-right bg-neutral-100 font-semibold">Par</th>
+                    <th className="px-3 py-3 text-right bg-neutral-100 font-semibold text-amber-700 bg-amber-50">Suggested</th>
+                    <th className="px-3 py-3 text-left bg-neutral-100 font-semibold">Supplier</th>
+                    <th className="px-3 py-3 text-right bg-neutral-100 font-semibold">Price</th>
+                    <th className="px-4 py-3 text-right bg-neutral-100 font-semibold text-brand-700 bg-brand-50">Est. Cost</th>
+                  </tr>
+                ) : (
+                  <tr>
+                    <th className="px-4 py-3 text-left bg-neutral-100 font-semibold">Item</th>
+                    <th className="px-3 py-3 text-left bg-neutral-100 font-semibold">Source</th>
+                    <th className="px-3 py-3 text-left bg-neutral-100 font-semibold">Category</th>
+                    <th className="px-3 py-3 text-left bg-neutral-100 font-semibold">UOM</th>
+                    <th className="px-3 py-3 text-left bg-neutral-100 font-semibold">Supplier</th>
+                    <th className="px-3 py-3 text-right bg-neutral-100 font-semibold">Price</th>
+                    <th className="px-3 py-3 text-right font-semibold">Stock</th>
+                    <th className="px-3 py-3 text-right font-semibold">Count</th>
+                    <th className="px-3 py-3 text-right font-semibold">Min</th>
+                    <th className="px-3 py-3 text-right font-semibold">Par</th>
+                    <th className="px-3 py-3 text-left font-semibold">Local Supplier</th>
+                    <th className="px-3 py-3 text-right font-semibold">Local $</th>
+                    <th className="px-3 py-3 text-center font-semibold">On</th>
+                    <th className="px-3 py-3 text-left font-semibold">Notes</th>
+                    <th className="px-4 py-3 text-right font-semibold">Save</th>
+                  </tr>
+                )}
               </thead>
               <tbody className="divide-y divide-neutral-100">
                 {filtered.length === 0 ? (
-                  <tr><td colSpan={15} className="py-10 text-center text-neutral-400 text-sm">
-                    {viewMode === "active" ? "No active items — switch to Add From Catalog to enable items for this location." :
-                     viewMode === "disabled" ? "No disabled items for this location." :
-                     "No catalog items match your filters."}
-                  </td></tr>
-                ) : filtered.map((row) => (
-                  <tr key={row.itemId} className={`${row.dirty ? "bg-amber-50/40" : "hover:bg-neutral-50/30"} ${!row.localEnabled ? "opacity-50" : ""}`}>
-                    {/* Read-only catalog columns */}
-                    <td className="px-4 py-2 bg-neutral-50/60">
-                      <div className="font-semibold text-neutral-900 text-xs leading-tight">{row.name}</div>
-                      <div className="text-[9px] text-neutral-400 font-mono">{row.itemId}</div>
-                    </td>
-                    <td className="px-3 py-2 bg-neutral-50/60">{srcBadge(row.sourceType)}</td>
-                    <td className="px-3 py-2 bg-neutral-50/60 text-xs text-neutral-600">{row.category || "—"}</td>
-                    <td className="px-3 py-2 bg-neutral-50/60 text-xs text-neutral-600">{row.uom || "—"}</td>
-                    <td className="px-3 py-2 bg-neutral-50/60 text-xs text-neutral-500">{row.supplier || "—"}</td>
-                    <td className="px-3 py-2 bg-neutral-50/60 text-right text-xs tabular-nums text-neutral-700">{row.price > 0 ? `$${row.price.toFixed(2)}` : "—"}</td>
-                    {/* Editable outlet columns */}
-                    {[
-                      ["currentStock", row.currentStock],
-                      ["minOnHand",    row.minOnHand],
-                      ["parLevel",     row.parLevel],
-                    ].map(([key, val]) => (
-                      <td key={key as string} className="px-2 py-1.5">
-                        <input type="number" min={0} value={val as number}
-                          onChange={(e) => patch(row.itemId, { [key]: parseFloat(e.target.value) || 0 })}
-                          className="w-16 text-right text-xs tabular-nums border border-neutral-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-brand-500" />
-                      </td>
-                    ))}
-                    <td className="px-2 py-1.5">
-                      <input type="number" min={0} value={row.physicalCount ?? ""} placeholder="—"
-                        onChange={(e) => patch(row.itemId, { physicalCount: e.target.value === "" ? null : parseFloat(e.target.value) })}
-                        className="w-16 text-right text-xs tabular-nums border border-neutral-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-brand-500" />
-                    </td>
-                    <td className="px-2 py-1.5">
-                      <input type="text" value={row.localSupplier} placeholder="Supplier…"
-                        onChange={(e) => patch(row.itemId, { localSupplier: e.target.value })}
-                        className="w-28 text-xs border border-neutral-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-brand-500" />
-                    </td>
-                    <td className="px-2 py-1.5">
-                      <input type="number" min={0} value={row.localPrice} placeholder="—"
-                        onChange={(e) => patch(row.itemId, { localPrice: e.target.value })}
-                        className="w-16 text-right text-xs tabular-nums border border-neutral-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-brand-500" />
-                    </td>
-                    <td className="px-2 py-1.5 text-center">
-                      <input type="checkbox" checked={row.localEnabled}
-                        onChange={(e) => patch(row.itemId, { localEnabled: e.target.checked })}
-                        className="accent-brand-600 w-3.5 h-3.5" />
-                    </td>
-                    <td className="px-2 py-1.5">
-                      <input type="text" value={row.localNotes} placeholder="Notes…"
-                        onChange={(e) => patch(row.itemId, { localNotes: e.target.value })}
-                        className="w-28 text-xs border border-neutral-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-brand-500" />
-                    </td>
-                    <td className="px-4 py-1.5 text-right">
-                      {viewMode === "catalog" && !row.outletRowId ? (
-                        <button onClick={() => enableItem(row)} disabled={row.saving}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 text-[10px] font-semibold bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50">
-                          {row.saving ? <RefreshCw className="h-2.5 w-2.5 animate-spin" /> : <Plus className="h-2.5 w-2.5" />}
-                          {row.saving ? "…" : "Enable"}
-                        </button>
-                      ) : row.dirty ? (
-                        <button onClick={() => saveRow(row)} disabled={row.saving}
-                          className="inline-flex items-center gap-1 px-2 py-1 text-[10px] font-semibold bg-brand-600 text-white rounded hover:bg-brand-700 disabled:opacity-50">
-                          {row.saving ? <RefreshCw className="h-2.5 w-2.5 animate-spin" /> : <Save className="h-2.5 w-2.5" />}
-                          {row.saving ? "…" : "Save"}
-                        </button>
-                      ) : null}
+                  <tr>
+                    <td colSpan={viewMode === "suggested" ? 11 : 15} className="py-10 text-center text-neutral-400 text-sm">
+                      {viewMode === "active" ? "No active items — switch to Add From Catalog to enable items for this location." :
+                       viewMode === "disabled" ? "No disabled items for this location." :
+                       viewMode === "suggested" ? (suggestedQtyOnly ? "No items need ordering (Suggested Qty > 0)." : "No active items to compute suggestions.") :
+                       "No catalog items match your filters."}
                     </td>
                   </tr>
-                ))}
+                ) : filtered.map((row) => {
+                  const suggestedQty = getRowSuggestedQty(row);
+                  const price = getRowPrice(row);
+                  const supplier = getRowSupplier(row);
+                  const estCost = suggestedQty * price;
+
+                  if (viewMode === "suggested") {
+                    return (
+                      <tr key={row.itemId} className={`hover:bg-neutral-50/30 ${suggestedQty > 0 ? "bg-amber-50/20" : "opacity-75"}`}>
+                        <td className="px-4 py-2 font-semibold text-neutral-900 text-xs">
+                          {row.name}
+                          <div className="text-[9px] text-neutral-400 font-mono font-normal">{row.itemId}</div>
+                        </td>
+                        <td className="px-3 py-2">{srcBadge(row.sourceType)}</td>
+                        <td className="px-3 py-2 text-xs text-neutral-600">{row.category || "—"}</td>
+                        <td className="px-3 py-2 text-xs text-neutral-600">{row.uom || "—"}</td>
+                        <td className="px-3 py-2 text-right text-xs tabular-nums text-neutral-700">{row.currentStock}</td>
+                        <td className="px-3 py-2 text-right text-xs tabular-nums text-neutral-700">{row.minOnHand}</td>
+                        <td className="px-3 py-2 text-right text-xs tabular-nums text-neutral-700">{row.parLevel}</td>
+                        <td className="px-3 py-2 text-right text-xs tabular-nums font-bold text-amber-700 bg-amber-50/50">
+                          {suggestedQty}
+                        </td>
+                        <td className="px-3 py-2 text-xs text-neutral-600">{supplier}</td>
+                        <td className="px-3 py-2 text-right text-xs tabular-nums text-neutral-700">${price.toFixed(2)}</td>
+                        <td className="px-4 py-2 text-right text-xs tabular-nums font-bold text-brand-700 bg-brand-50/40">
+                          ${estCost.toFixed(2)}
+                        </td>
+                      </tr>
+                    );
+                  }
+
+                  return (
+                    <tr key={row.itemId} className={`${row.dirty ? "bg-amber-50/40" : "hover:bg-neutral-50/30"} ${!row.localEnabled ? "opacity-50" : ""}`}>
+                      {/* Read-only catalog columns */}
+                      <td className="px-4 py-2 bg-neutral-50/60">
+                        <div className="font-semibold text-neutral-900 text-xs leading-tight">{row.name}</div>
+                        <div className="text-[9px] text-neutral-400 font-mono">{row.itemId}</div>
+                      </td>
+                      <td className="px-3 py-2 bg-neutral-50/60">{srcBadge(row.sourceType)}</td>
+                      <td className="px-3 py-2 bg-neutral-50/60 text-xs text-neutral-600">{row.category || "—"}</td>
+                      <td className="px-3 py-2 bg-neutral-50/60 text-xs text-neutral-600">{row.uom || "—"}</td>
+                      <td className="px-3 py-2 bg-neutral-50/60 text-xs text-neutral-500">{row.supplier || "—"}</td>
+                      <td className="px-3 py-2 bg-neutral-50/60 text-right text-xs tabular-nums text-neutral-700">{row.price > 0 ? `$${row.price.toFixed(2)}` : "—"}</td>
+                      {/* Editable outlet columns */}
+                      {[
+                        ["currentStock", row.currentStock],
+                        ["minOnHand",    row.minOnHand],
+                        ["parLevel",     row.parLevel],
+                      ].map(([key, val]) => (
+                        <td key={key as string} className="px-2 py-1.5">
+                          <input type="number" min={0} value={val as number}
+                            onChange={(e) => patch(row.itemId, { [key]: parseFloat(e.target.value) || 0 })}
+                            className="w-16 text-right text-xs tabular-nums border border-neutral-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-brand-500" />
+                        </td>
+                      ))}
+                      <td className="px-2 py-1.5">
+                        <input type="number" min={0} value={row.physicalCount ?? ""} placeholder="—"
+                          onChange={(e) => patch(row.itemId, { physicalCount: e.target.value === "" ? null : parseFloat(e.target.value) })}
+                          className="w-16 text-right text-xs tabular-nums border border-neutral-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-brand-500" />
+                      </td>
+                      <td className="px-2 py-1.5">
+                        <input type="text" value={row.localSupplier} placeholder="Supplier…"
+                          onChange={(e) => patch(row.itemId, { localSupplier: e.target.value })}
+                          className="w-28 text-xs border border-neutral-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-brand-500" />
+                      </td>
+                      <td className="px-2 py-1.5">
+                        <input type="number" min={0} value={row.localPrice} placeholder="—"
+                          onChange={(e) => patch(row.itemId, { localPrice: e.target.value })}
+                          className="w-16 text-right text-xs tabular-nums border border-neutral-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-brand-500" />
+                      </td>
+                      <td className="px-2 py-1.5 text-center">
+                        <input type="checkbox" checked={row.localEnabled}
+                          onChange={(e) => patch(row.itemId, { localEnabled: e.target.checked })}
+                          className="accent-brand-600 w-3.5 h-3.5" />
+                      </td>
+                      <td className="px-2 py-1.5">
+                        <input type="text" value={row.localNotes} placeholder="Notes…"
+                          onChange={(e) => patch(row.itemId, { localNotes: e.target.value })}
+                          className="w-28 text-xs border border-neutral-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-brand-500" />
+                      </td>
+                      <td className="px-4 py-1.5 text-right">
+                        {viewMode === "catalog" && !row.outletRowId ? (
+                          <button onClick={() => enableItem(row)} disabled={row.saving}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 text-[10px] font-semibold bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50">
+                            {row.saving ? <RefreshCw className="h-2.5 w-2.5 animate-spin" /> : <Plus className="h-2.5 w-2.5" />}
+                            {row.saving ? "…" : "Enable"}
+                          </button>
+                        ) : row.dirty ? (
+                          <button onClick={() => saveRow(row)} disabled={row.saving}
+                            className="inline-flex items-center gap-1 px-2 py-1 text-[10px] font-semibold bg-brand-600 text-white rounded hover:bg-brand-700 disabled:opacity-50">
+                            {row.saving ? <RefreshCw className="h-2.5 w-2.5 animate-spin" /> : <Save className="h-2.5 w-2.5" />}
+                            {row.saving ? "…" : "Save"}
+                          </button>
+                        ) : null}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {/* HQ Requisition Confirmation Review Modal */}
+      {reqModalOpen && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-6 space-y-4">
+            <div className="flex items-center justify-between border-b pb-3">
+              <div className="flex items-center gap-2">
+                <ClipboardList className="h-5 w-5 text-brand-600" />
+                <h3 className="text-base font-bold text-neutral-900">Review Draft HQ Requisition</h3>
+              </div>
+              <button onClick={() => setReqModalOpen(false)}><X className="h-5 w-5 text-neutral-400" /></button>
+            </div>
+
+            <p className="text-xs text-neutral-500">
+              The following active HQ Supplied items have suggested order quantities. Please review their quantities and prices before saving this requisition to the database.
+            </p>
+
+            <div className="max-h-64 overflow-y-auto border border-neutral-200 rounded-lg">
+              <table className="w-full text-xs">
+                <thead className="bg-neutral-50 sticky top-0 text-[10px] uppercase font-semibold text-neutral-500 border-b">
+                  <tr>
+                    <th className="px-4 py-2 text-left">Item Name</th>
+                    <th className="px-3 py-2 text-left">UOM</th>
+                    <th className="px-3 py-2 text-right">Suggested Qty</th>
+                    <th className="px-3 py-2 text-right">Unit Price</th>
+                    <th className="px-4 py-2 text-right">Total Price</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-neutral-100">
+                  {hqRequisitionLines.map(({ row, qty, price, total }) => (
+                    <tr key={row.itemId} className="hover:bg-neutral-50/50">
+                      <td className="px-4 py-2 font-medium text-neutral-900">{row.name}</td>
+                      <td className="px-3 py-2 text-neutral-500">{row.uom || "ea"}</td>
+                      <td className="px-3 py-2 text-right font-bold text-amber-700">{qty}</td>
+                      <td className="px-3 py-2 text-right text-neutral-700">${price.toFixed(2)}</td>
+                      <td className="px-4 py-2 text-right font-bold text-neutral-900">${total.toFixed(2)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="flex justify-between items-center bg-neutral-50 p-3 rounded-lg border">
+              <span className="text-xs font-semibold text-neutral-600 uppercase">Grand Total Requisition Value:</span>
+              <span className="text-base font-extrabold text-brand-700">${hqRequisitionGrandTotal.toFixed(2)}</span>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-xs font-semibold text-neutral-700 block">Requisition Notes / Instructions:</label>
+              <textarea
+                value={reqNotes}
+                onChange={(e) => setReqNotes(e.target.value)}
+                placeholder="Add commissary instructions, delivery details, or special requests..."
+                rows={3}
+                className="w-full text-xs border border-neutral-200 rounded-lg p-2.5 focus:outline-none focus:ring-2 focus:ring-brand-500"
+              />
+            </div>
+
+            <div className="flex gap-3 pt-2">
+              <button
+                onClick={() => setReqModalOpen(false)}
+                className="flex-1 px-4 py-2.5 text-xs font-semibold border border-neutral-200 rounded-lg hover:bg-neutral-50 transition"
+              >
+                Cancel &amp; Edit Levels
+              </button>
+              <button
+                onClick={handleSubmitRequisition}
+                disabled={reqSaving}
+                className="flex-1 px-4 py-2.5 text-xs font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50 transition flex items-center justify-center gap-2"
+              >
+                {reqSaving ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                {reqSaving ? "Submitting Requisition..." : "Submit HQ Requisition"}
+              </button>
+            </div>
           </div>
         </div>
       )}
