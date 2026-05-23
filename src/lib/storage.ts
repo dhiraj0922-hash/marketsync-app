@@ -730,8 +730,36 @@ export interface SaleItem {
   effectivePrice:       number;          // COALESCE(manualPrice, suggestedPrice)
   stockStatus:          'in_stock' | 'low_stock' | 'out_of_stock';
   packQty:              number;          // how many base units make up one sellable pack/case; default 1
+  /**
+   * Optional HQ-controlled override for the availability badge shown to outlet users.
+   * When null, the system calculates from instock / par_level.
+   * Allowed values: 'available' | 'low_stock' | 'out_of_stock' | 'not_available'
+   */
+  availabilityOverride: 'available' | 'low_stock' | 'out_of_stock' | 'not_available' | null;
   createdAt:            string | null;
   updatedAt:            string | null;
+}
+
+// ─── Outlet-facing availability helper ──────────────────────────────────────
+/**
+ * Returns the 4-state availability label for a finished good as seen by
+ * outlet / location-manager users.  Never exposes exact stock numbers.
+ *
+ * Priority:
+ *   1. If item is inactive or not requisitionable → 'not_available'
+ *   2. If HQ has set availability_override        → use override
+ *   3. Auto-calculate from instock vs par_level
+ */
+export type HQAvailability = 'available' | 'low_stock' | 'out_of_stock' | 'not_available';
+
+export function getHQAvailabilityLabel(item: SaleItem): HQAvailability {
+  if (!item.isActive || !item.isRequisitionable) return 'not_available';
+  if (item.availabilityOverride) return item.availabilityOverride;
+  if (item.instock <= 0) return 'out_of_stock';
+  // Use par_level as low-stock threshold; fall back to a safe default of 5
+  const threshold = item.parLevel > 0 ? item.parLevel : 5;
+  if (item.instock <= threshold) return 'low_stock';
+  return 'available';
 }
 
 const mapSaleItemToFrontend = (db: any): SaleItem => ({
@@ -760,6 +788,7 @@ const mapSaleItemToFrontend = (db: any): SaleItem => ({
                           Number(db.instock ?? 0) <= Number(db.par_level ?? 0) ? 'low_stock' :
                           'in_stock'
                         )) as SaleItem['stockStatus'],
+  availabilityOverride: (db.availability_override ?? null) as SaleItem['availabilityOverride'],
   packQty:              Number(db.pack_qty ?? 1) || 1,  // default 1 if null/0
   createdAt:            db.created_at ?? null,
   updatedAt:            db.updated_at ?? null,
@@ -783,6 +812,7 @@ const mapSaleItemToDB = (item: Partial<SaleItem> & { id: string }) => ({
   pack_qty:                (item.packQty != null && !isNaN(Number(item.packQty)) && Number(item.packQty) > 0)
                              ? Number(item.packQty)
                              : 1,
+  availability_override:   item.availabilityOverride ?? null,
   // suggested_price is a generated column — never write it
   updated_at:              new Date().toISOString(),
 });
@@ -1634,7 +1664,7 @@ export function generateOrderId(): { id: string; poNumber: string } {
   };
 }
 
-const mapOrderToFrontend = (db: any) => ({
+const mapOrderToFrontend = (db: any): any => ({
      id: db.id,
      // poNumber: human-readable display label (e.g. "PO-550E8400").
      // Falls back to db.id for legacy rows inserted before this field existed.
@@ -1652,10 +1682,12 @@ const mapOrderToFrontend = (db: any) => ({
      receivedBy:  db.receivedby,
      receivedAt:  db.receivedat,
      notes:       db.notes,
-     lineItems:   db.lineitems || []
+     lineItems:   db.lineitems || [],
+     emailSentAt: db.email_sent_at ?? null,
+     emailError:  db.email_error ?? null
 });
 
-const mapOrderToDB = (o: any) => ({
+const mapOrderToDB = (o: any): any => ({
      id:          String(o.id || ''),
      // ponumber: human-readable display label, stored separately from pk.
      // If the column doesn't exist in DB yet, Supabase silently ignores unknown keys
@@ -1674,7 +1706,9 @@ const mapOrderToDB = (o: any) => ({
      receivedby:  o.receivedBy || '',
      receivedat:  o.receivedAt || '',
      notes:       o.notes || '',
-     lineitems:   Array.isArray(o.lineItems) ? o.lineItems : []
+     lineitems:   Array.isArray(o.lineItems) ? o.lineItems : [],
+     ...(o.emailSentAt !== undefined ? { email_sent_at: o.emailSentAt } : {}),
+     ...(o.emailError !== undefined ? { email_error: o.emailError } : {})
 });
 
 /**
@@ -1783,6 +1817,31 @@ export async function deleteOrder(
   const { error } = await supabase.from('orders').delete().eq('id', id);
   if (error) return { success: false, error: error.message };
   return { success: true };
+}
+
+export async function sendOrderToSupplier(
+  orderId: string
+): Promise<{ success: boolean; order?: any; error?: string }> {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session?.access_token) {
+    return { success: false, error: 'No active auth session. Please sign out and sign back in.' };
+  }
+
+  const resp = await fetch('/api/purchase-orders/send', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${session.access_token}`,
+    },
+    body: JSON.stringify({ orderId }),
+  });
+
+  const body = await resp.json().catch(() => ({}));
+  if (!resp.ok || !body?.success) {
+    return { success: false, error: body?.error || resp.statusText || 'Supplier email failed.' };
+  }
+
+  return { success: true, order: body.order ? mapOrderToFrontend(body.order) : undefined };
 }
 
 

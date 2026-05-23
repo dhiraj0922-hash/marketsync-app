@@ -37,6 +37,7 @@ import {
   loadRequisitionItemsBatch,
   updateRequisitionStatus,
   updateRequisitionItemFulfilled,
+  getHQAvailabilityLabel,
   type SaleItem,
 } from "@/lib/storage";
 import {
@@ -677,10 +678,13 @@ function LocationManagerView({
                         const packLabel = pQty > 1
                           ? `${pQty} ${s.baseUnit}/pack — $${packPrice.toFixed(2)}/pack`
                           : `$${s.effectivePrice.toFixed(2)}/${s.baseUnit}`;
-                        const stockLabel =
-                          s.stockStatus === 'in_stock'  ? '✓ In Stock'   :
-                          s.stockStatus === 'low_stock' ? '⚠ Low Stock' :
-                                                          '✗ Out of Stock';
+                        const stockLabel = (() => {
+                          const avail = getHQAvailabilityLabel(s);
+                          return avail === 'available'     ? '✓ Available'    :
+                                 avail === 'low_stock'    ? '⚠ Low Stock'    :
+                                 avail === 'out_of_stock' ? '✗ Out of Stock'  :
+                                                            '— Not Available';
+                        })();
                         return (
                           <option key={s.id} value={s.id}>
                             {s.name} — {packLabel} · {stockLabel}

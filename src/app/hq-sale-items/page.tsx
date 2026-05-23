@@ -263,6 +263,7 @@ function HQSaleItemsContent() {
   const [formPackQty, setFormPackQty]         = useState<number>(1);
   const [formActive, setFormActive]           = useState(true);
   const [formRequisitionable, setFormRequisitionable] = useState(true);
+  const [formAvailabilityOverride, setFormAvailabilityOverride] = useState<SaleItem['availabilityOverride']>(null);
 
   // ── Load data ────────────────────────────────────────────────────────────────
   const fetchData = useCallback(async () => {
@@ -304,7 +305,7 @@ function HQSaleItemsContent() {
     setEditing(null);
     setFormName(""); setFormCategory(""); setFormCommissary("Commissary HQ"); setFormDesc(""); setFormUnit("ea");
     setFormParLevel(0); setFormManualPrice(""); setFormRecipeId(""); setFormPackQty(1);
-    setFormActive(true); setFormRequisitionable(true);
+    setFormActive(true); setFormRequisitionable(true); setFormAvailabilityOverride(null);
     setLocationPricing([]);
     setNewPricingLocId(""); setNewPricingPrice(""); setNewPricingNotes("");
     setSaveError(null); setPricingError(null);
@@ -324,6 +325,7 @@ function HQSaleItemsContent() {
     setFormPackQty(item.packQty ?? 1);
     setFormActive(item.isActive);
     setFormRequisitionable(item.isRequisitionable);
+    setFormAvailabilityOverride(item.availabilityOverride ?? null);
     setNewPricingLocId(""); setNewPricingPrice(""); setNewPricingNotes("");
     setSaveError(null); setPricingError(null);
     loadPricing(item.id);
@@ -406,6 +408,7 @@ function HQSaleItemsContent() {
         suggestedPrice:       0,
         effectivePrice:       0,
         stockStatus:          'in_stock',
+        availabilityOverride: formAvailabilityOverride ?? null,
         makingCostUpdatedAt:  null,
         createdAt:            null,
         updatedAt:            null,
@@ -1101,6 +1104,30 @@ function HQSaleItemsContent() {
                 <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${formRequisitionable ? "translate-x-5" : ""}`} />
               </div>
             </label>
+
+            {/* Outlet Availability Override */}
+            <div className="space-y-1.5 p-3 bg-violet-50 border border-violet-200 rounded-lg">
+              <label className="text-xs font-semibold text-violet-800 uppercase tracking-wider flex items-center gap-1.5">
+                <MapPin className="h-3 w-3" /> Outlet Availability Override
+              </label>
+              <select
+                value={formAvailabilityOverride ?? ""}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setFormAvailabilityOverride(v === "" ? null : v as SaleItem['availabilityOverride']);
+                }}
+                className="w-full px-3 py-2 text-sm border border-violet-200 rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-violet-500"
+              >
+                <option value="">Auto-calculate (based on HQ stock)</option>
+                <option value="available">🟢 Available</option>
+                <option value="low_stock">🟡 Low Stock</option>
+                <option value="out_of_stock">🔴 Out of Stock</option>
+                <option value="not_available">⚫ Not Available</option>
+              </select>
+              <p className="text-[11px] text-violet-600">
+                Controls the availability badge shown to outlet users. When set, overrides auto-calculated status. Outlets never see exact HQ stock quantities.
+              </p>
+            </div>
           </div>
 
           {/* Pricing info box for existing items — always recomputed from linked recipe */}
