@@ -38,6 +38,7 @@ import {
   updateRequisitionStatus,
   updateRequisitionItemFulfilled,
   getHQAvailabilityLabel,
+  sendHqRequisitionNotification,
   type SaleItem,
 } from "@/lib/storage";
 import {
@@ -179,6 +180,7 @@ function LocationManagerView({
   const [selectedQty, setSelectedQty] = useState<number>(1);
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [submitNotice, setSubmitNotice] = useState<{ type: "success" | "warning"; message: string } | null>(null);
 
   // ── Load this location's requisitions ─────────────────────────────────────
   // RLS on public.requisitions ensures the query already returns only rows
@@ -283,6 +285,11 @@ function LocationManagerView({
       prev.map(li => (li.finishedGoodId ?? li.itemId) === id ? { ...li, quantityRequested: Math.max(0, qty) } : li)
     );
 
+  const showSubmitNotice = (type: "success" | "warning", message: string) => {
+    setSubmitNotice({ type, message });
+    window.setTimeout(() => setSubmitNotice(null), 5200);
+  };
+
   // ── Commit create ─────────────────────────────────────────────────────────
   const handleCreate = async () => {
     setSaveError(null);
@@ -326,6 +333,14 @@ function LocationManagerView({
         return;
       }
 
+      const notifyRes = await sendHqRequisitionNotification(reqId);
+      if (notifyRes.success) {
+        showSubmitNotice("success", "Order submitted. HQ notification email sent.");
+      } else {
+        console.warn("[Requisitions] HQ notification failed:", notifyRes.error);
+        showSubmitNotice("warning", "Order submitted. HQ email notification failed.");
+      }
+
       setLineItems([]);
       setDraftNotes("");
       setIsCreateOpen(false);
@@ -338,6 +353,15 @@ function LocationManagerView({
   if (isLoading) {
     return (
       <DarkPageShell>
+        {submitNotice && (
+          <div className={`fixed right-4 top-4 z-50 rounded-lg border px-4 py-3 text-sm font-semibold shadow-lg ${
+            submitNotice.type === "success"
+              ? "border-success-200 bg-success-50 text-success-700"
+              : "border-warning-200 bg-warning-50 text-warning-700"
+          }`}>
+            {submitNotice.message}
+          </div>
+        )}
         <div className="flex items-center justify-center p-16 text-zinc-500 gap-2">
           <Loader2 className="h-5 w-5 animate-spin" /> Loading your requisitions…
         </div>
@@ -347,6 +371,15 @@ function LocationManagerView({
 
   return (
     <DarkPageShell>
+      {submitNotice && (
+        <div className={`fixed right-4 top-4 z-50 rounded-lg border px-4 py-3 text-sm font-semibold shadow-lg ${
+          submitNotice.type === "success"
+            ? "border-success-200 bg-success-50 text-success-700"
+            : "border-warning-200 bg-warning-50 text-warning-700"
+        }`}>
+          {submitNotice.message}
+        </div>
+      )}
 
       {/* ── Header ─────────────────────────────────────────────────────── */}
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">

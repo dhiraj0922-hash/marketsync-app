@@ -2650,6 +2650,31 @@ export async function saveNewRequisition(
   return { success: true };
 }
 
+export async function sendHqRequisitionNotification(
+  requisitionId: string
+): Promise<{ success: boolean; error?: string }> {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session?.access_token) {
+    return { success: false, error: 'No active auth session. Please sign out and sign back in.' };
+  }
+
+  const resp = await fetch('/api/requisitions/notify-hq', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${session.access_token}`,
+    },
+    body: JSON.stringify({ requisitionId }),
+  });
+
+  const body = await resp.json().catch(() => ({}));
+  if (!resp.ok || !body?.success) {
+    return { success: false, error: body?.error || resp.statusText || 'HQ notification failed.' };
+  }
+
+  return { success: true };
+}
+
 
 
 
@@ -3588,13 +3613,15 @@ export async function deletePurchaseOption(id: string) {
 // ────────────────────────────────────────────────────────────────────────────
 //
 // Table: location_inventory_items
-//   item_id, location_id  — UNIQUE composite key (matches inventory_items)
+//   item_id, location_id  — UNIQUE composite key
 //   current_stock, physical_count, min_on_hand, par_level — outlet-only fields
 //   local_enabled, local_notes, last_counted_at
 //
-// Master item data (name, category, uom, price, supplier…) is always read
-// from inventory_items WHERE location_id = 'LOC-HQ' and joined in memory
-// on the page — this table stores ONLY outlet-specific overrides.
+// IMPORTANT: location_inventory_items is INDEPENDENT of inventory_items.
+// Master item data (name, category, uom, price, supplier…) comes from
+// outlet_catalog_items (NOT inventory_items). HQ Inventory (inventory_items)
+// and Location Inventory are completely separate systems. Changes in one
+// never affect the other.
 // ────────────────────────────────────────────────────────────────────────────
 
 /** Shape of one outlet inventory row after DB read */
@@ -3770,13 +3797,17 @@ function mapCatalogItem(db: any): OutletCatalogItem {
   };
 }
 
-/** Load all active outlet catalog items (global — same for every location) */
-export async function loadOutletCatalog(): Promise<OutletCatalogItem[]> {
-  const { data, error } = await supabase
+/** Load outlet catalog items (global — same for every location) */
+export async function loadOutletCatalog(all: boolean = false): Promise<OutletCatalogItem[]> {
+  let query = supabase
     .from('outlet_catalog_items')
-    .select('*')
-    .eq('is_active', true)
-    .order('name', { ascending: true });
+    .select('*');
+
+  if (!all) {
+    query = query.eq('is_active', true);
+  }
+
+  const { data, error } = await query.order('name', { ascending: true });
   if (error) {
     console.error('[loadOutletCatalog] error:', error);
     return [];
@@ -3823,6 +3854,18 @@ export async function deactivateOutletCatalogItem(
   const { error } = await supabase
     .from('outlet_catalog_items')
     .update({ is_active: false, updated_at: new Date().toISOString() })
+    .eq('item_id', itemId);
+  if (error) return { success: false, error };
+  return { success: true };
+}
+
+/** HQ-only: activate a catalog item */
+export async function activateOutletCatalogItem(
+  itemId: string
+): Promise<{ success: boolean; error?: any }> {
+  const { error } = await supabase
+    .from('outlet_catalog_items')
+    .update({ is_active: true, updated_at: new Date().toISOString() })
     .eq('item_id', itemId);
   if (error) return { success: false, error };
   return { success: true };
@@ -3930,6 +3973,19 @@ export async function bulkUpsertOutletInventoryV2(
     const res = await upsertOutletInventoryRowV2(row);
     if (res.success) { succeeded++; }
     else { failed++; errors.push(`${row.item_id}@${row.location_id}: ${res.error?.message ?? 'error'}`); }
+  }
+  return { succeeded, failed, errors };
+}
+
+/** HQ-only: bulk upsert catalog items (used by Location Catalog Excel import) */
+export async function bulkUpsertOutletCatalogItems(
+  items: (Omit<OutletCatalogItem, 'isActive'> & { isActive?: boolean })[]
+): Promise<{ succeeded: number; failed: number; errors: string[] }> {
+  let succeeded = 0; let failed = 0; const errors: string[] = [];
+  for (const item of items) {
+    const res = await upsertOutletCatalogItem(item);
+    if (res.success) { succeeded++; }
+    else { failed++; errors.push(`${item.itemId} (${item.name}): ${res.error?.message ?? 'error'}`); }
   }
   return { succeeded, failed, errors };
 }

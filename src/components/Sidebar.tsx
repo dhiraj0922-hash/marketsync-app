@@ -41,6 +41,7 @@ import {
   Settings,
   MapPin,
   Database,
+  BookOpen,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/components/AuthProvider";
@@ -58,6 +59,7 @@ const navigation: NavItem[] = [
   { name: "Approvals",     href: "/approvals",     icon: CheckSquare,    hqOnly: true },
   { name: "Inventory",     href: "/inventory",     icon: Package },
   { name: "Outlet Inventory", href: "/outlet-inventory", icon: MapPin },
+  { name: "Location Catalog", href: "/location-catalog", icon: BookOpen, hqOnly: true },
   { name: "Counts",        href: "/counts",        icon: ClipboardList },
   { name: "Orders",        href: "/orders",        icon: ShoppingCart },
   { name: "Requisitions",  href: "/requisitions",  icon: Inbox },
