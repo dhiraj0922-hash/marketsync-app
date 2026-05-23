@@ -30,7 +30,7 @@ import {
   Trash,
   X
 } from "lucide-react";
-import { loadOrders, saveOrders, insertOrder, updateOrder, deleteOrder, generateOrderId, loadInventory, saveInventory, loadSuppliers, resolveSupplier, loadLocations, logMovement } from "@/lib/storage";
+import { loadOrders, saveOrders, insertOrder, updateOrder, deleteOrder, generateOrderId, loadInventory, saveInventory, loadSuppliers, resolveSupplier, loadLocations, logMovement, sendOrderToSupplier } from "@/lib/storage";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/components/AuthProvider";
 import { isHqAdmin, resolveLocationId } from "@/lib/roles";
@@ -160,6 +160,7 @@ export default function Orders() {
   const [isCatalogOpen, setIsCatalogOpen] = useState(false);
   const [isSavingOrder, setIsSavingOrder] = useState(false);
   const [orderSaveError, setOrderSaveError] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
   // Receive PO State
   const [receivingOrder, setReceivingOrder] = useState<any>(null);
@@ -269,6 +270,16 @@ export default function Orders() {
   const currentTotal = draftItems.reduce((sum, item) => sum + (item.expectedPrice * item.qty), 0);
   const receivingTotal = receivingItems.reduce((sum, item) => sum + (item.actualPrice * item.receivedQty), 0);
 
+  const showToast = (type: "success" | "error", message: string) => {
+    setToast({ type, message });
+    window.setTimeout(() => setToast(null), 4200);
+  };
+
+  const resolveSelectedLocationId = () => {
+    if (!isHqAdmin(user)) return resolveLocationId(user);
+    return locations.find((l: any) => l.name === selectedLocation)?.id || resolveLocationId(user);
+  };
+
   const openCreatePO = () => {
     setSelectedSupplier(null);
     setOrderSaveError(null);
@@ -350,7 +361,7 @@ export default function Orders() {
   };
 
   const openEditPO = (order: any) => {
-    const isReadOnly = order.status !== "Draft";
+    const isReadOnly = order.status !== "Draft" && order.status !== "Failed";
     
     // Simulate loading order details
     const supp = suppliersData.find(s => s.id === order.supplierId);
@@ -397,7 +408,7 @@ export default function Orders() {
     setOrderSaveError(null);
 
     // Resolve canonical location_id FRESH via roles helper — always returns a string.
-    const canonicalLocationId: string = resolveLocationId(user);
+    const canonicalLocationId: string = resolveSelectedLocationId();
 
     // Only block location_managers who are missing their location assignment
     if (!isHqAdmin(user) && !user?.locationId) {
@@ -417,6 +428,8 @@ export default function Orders() {
 
     setIsSavingOrder(true);
     try {
+      let savedOrder: any | null = null;
+
       if (editorState.orderId) {
       // ── UPDATE existing order (single-row — RLS-safe) ───────────────────────
         const existing = orders.find(o => o.id === editorState.orderId);
@@ -429,15 +442,17 @@ export default function Orders() {
           lineItems:   draftItems,
           total:       currentTotal,
           notes:       notes,
-          status:      status,
+          status:      status === "Sent" ? "Draft" : status,
           date:        new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+          emailError:  null,
         };
         const res = await updateOrder(editorState.orderId, patch);
         if (!res.success) {
           setOrderSaveError(`Save error: ${res.error}`);
           return;
         }
-        setOrders(prev => prev.map(o => o.id === editorState.orderId ? (res.order ?? patch) : o));
+        savedOrder = res.order ?? patch;
+        setOrders(prev => prev.map(o => o.id === editorState.orderId ? savedOrder : o));
       } else {
         // ── INSERT new order ──────────────────────────────────────────────────
         const { id, poNumber } = generateOrderId(); // fresh UUID — no duplicate PK on retry
@@ -450,7 +465,7 @@ export default function Orders() {
           items:        draftItems.length,
           lineItems:    draftItems,
           total:        currentTotal,
-          status:       status,
+          status:       status === "Sent" ? "Draft" : status,
           location:     selectedLocation || "HQ",
           locationId:   canonicalLocationId,
           notes:        notes,
@@ -463,7 +478,23 @@ export default function Orders() {
           setOrderSaveError(`Save error: ${res.error}`);
           return;
         }
-        setOrders(prev => [res.order ?? newOrder, ...prev]);
+        savedOrder = res.order ?? newOrder;
+        setOrders(prev => [savedOrder, ...prev]);
+      }
+
+      if (status === "Sent" && savedOrder?.id) {
+        const sendRes = await sendOrderToSupplier(savedOrder.id);
+        if (!sendRes.success) {
+          const message = `Email error: ${sendRes.error}`;
+          setOrderSaveError(message);
+          setOrders(prev => prev.map(o => o.id === savedOrder.id ? { ...o, status: "Failed", emailError: sendRes.error } : o));
+          showToast("error", message);
+          return;
+        }
+        setOrders(prev => prev.map(o => o.id === savedOrder.id ? (sendRes.order ?? { ...o, status: "Sent", emailSentAt: new Date().toISOString(), emailError: null }) : o));
+        showToast("success", "Order sent to supplier.");
+      } else {
+        showToast("success", "Draft saved.");
       }
 
       setEditorState({ isOpen: false, orderId: null, readOnly: false });
@@ -635,6 +666,16 @@ export default function Orders() {
 
   return (
     <div className="space-y-6">
+      {toast && (
+        <div className={`fixed right-4 top-4 z-50 rounded-lg border px-4 py-3 text-sm font-semibold shadow-lg ${
+          toast.type === "success"
+            ? "border-success-200 bg-success-50 text-success-700"
+            : "border-danger-200 bg-danger-50 text-danger-700"
+        }`}>
+          {toast.message}
+        </div>
+      )}
+
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
           <h2 className="text-2xl font-bold tracking-tight">Purchase Orders</h2>
@@ -696,6 +737,7 @@ export default function Orders() {
                <option value="All">All Statuses</option>
                <option value="Draft">Draft</option>
                <option value="Sent">Sent</option>
+               <option value="Failed">Failed</option>
                <option value="Delivered">Delivered</option>
             </select>
             <select 
@@ -772,7 +814,7 @@ export default function Orders() {
                   <TableCell className="px-6 py-4 font-semibold text-brand-900">
                     <div className="flex items-center gap-2 group-hover:text-brand-600 transition-colors">
                       <FileText className={`h-4 w-4 ${order.status === 'Draft' ? 'text-brand-400' : 'text-neutral-400'}`} />
-                      {order.id}
+                      {order.poNumber || order.id}
                     </div>
                   </TableCell>
                   <TableCell className="py-4 font-medium text-neutral-900 text-sm">{getSupplierName(order.supplierId)}</TableCell>
@@ -781,11 +823,16 @@ export default function Orders() {
                   <TableCell className="py-4 text-sm text-neutral-500">{order.deliveryDate || "-"}</TableCell>
                   <TableCell className="py-4">
                     <Badge 
-                      variant={order.status === "Delivered" ? "success" : order.status === "Sent" ? "default" : "warning"}
+                      variant={order.status === "Delivered" ? "success" : order.status === "Sent" ? "default" : order.status === "Failed" ? "danger" : "warning"}
                       className={order.status === "Draft" ? "bg-warning-50 text-warning-700" : ""}
                     >
                       {order.status}
                     </Badge>
+                    {order.status === "Failed" && order.emailError && (
+                      <div className="mt-1 max-w-[180px] truncate text-[10px] font-medium text-danger-600" title={order.emailError}>
+                        {order.emailError}
+                      </div>
+                    )}
                   </TableCell>
                   <TableCell className="py-4 font-medium text-neutral-900 text-sm">${order.total.toFixed(2)}</TableCell>
                   <TableCell className="py-4">
@@ -808,12 +855,12 @@ export default function Orders() {
                           <CheckCircle2 className="h-3.5 w-3.5" /> Receive
                         </button>
                       )}
-                      {order.status === "Draft" && (
+                      {(order.status === "Draft" || order.status === "Failed") && (
                         <button 
                           onClick={(e) => { e.stopPropagation(); openEditPO(order); }}
                           className="px-2.5 py-1.5 bg-white border border-neutral-200 hover:bg-neutral-50 text-neutral-700 text-xs font-semibold rounded-md transition-colors flex items-center gap-1"
                         >
-                          <FileEdit className="h-3.5 w-3.5" /> Edit
+                          <FileEdit className="h-3.5 w-3.5" /> {order.status === "Failed" ? "Retry" : "Edit"}
                         </button>
                       )}
                     </div>
@@ -877,7 +924,7 @@ export default function Orders() {
                   {isSavingOrder
                     ? <span className="h-4 w-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
                     : <Send className="h-4 w-4" />}
-                  {isSavingOrder ? "Sending…" : "Send Order"}
+                  {isSavingOrder ? "Sending…" : "Send to Supplier"}
                 </button>
               )}
             </div>
