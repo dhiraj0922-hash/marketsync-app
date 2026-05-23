@@ -78,6 +78,10 @@ export default function OutletInventoryPage() {
   const [reqNotes,     setReqNotes]     = useState("");
   const [reqSaving,    setReqSaving]    = useState(false);
 
+  // Bulk enable state (catalog mode)
+  const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(new Set());
+  const [bulkEnabling,    setBulkEnabling]    = useState(false);
+
   // import state
   const [importModalOpen, setImportModalOpen] = useState(false);
   const [importRows,   setImportRows]   = useState<any[]>([]);
@@ -115,6 +119,8 @@ export default function OutletInventoryPage() {
 
   useEffect(() => { if (activeLoc) loadAll(activeLoc); }, [activeLoc, loadAll]);
   useEffect(() => { setRows(merge(catalog, outletData)); }, [catalog, outletData]);
+  // Clear selection when location or view mode changes
+  useEffect(() => { setSelectedItemIds(new Set()); }, [activeLoc, viewMode]);
 
   // Suggested order helpers
   const getRowPrice = useCallback((r: MergedRow) => {
@@ -188,6 +194,37 @@ export default function OutletInventoryPage() {
     });
     await loadAll(activeLoc);          // reload so row appears in Active view
     setToast(`"${row.name}" enabled for ${activeLoc}.`);
+  };
+
+  // Bulk-enable a set of catalog items for the active location
+  const handleBulkEnable = async (itemIds: string[]) => {
+    if (itemIds.length === 0 || !activeLoc) return;
+    setBulkEnabling(true);
+    try {
+      const outletMap = new Map(outletData.map((o) => [o.itemId, o]));
+      const records = itemIds.map((id) => {
+        const existing = outletMap.get(id);
+        return {
+          item_id:        id,
+          location_id:    activeLoc,
+          local_enabled:  true,
+          current_stock:  existing?.currentStock  ?? 0,
+          physical_count: existing?.physicalCount ?? null,
+          min_on_hand:    existing?.minOnHand     ?? 0,
+          par_level:      existing?.parLevel      ?? 0,
+          local_notes:    existing?.localNotes    ?? null,
+          local_supplier: existing?.localSupplier ?? null,
+          local_price:    existing?.localPrice    ?? null,
+        };
+      });
+      const result = await bulkUpsertOutletInventoryV2(records);
+      const locLabel = locations.find((l: any) => l.id === activeLoc)?.name ?? activeLoc;
+      setToast(`Enabled ${result.succeeded} item${result.succeeded !== 1 ? "s" : ""} for ${locLabel}.${result.failed ? ` (${result.failed} failed)` : ""}`);
+      setSelectedItemIds(new Set());
+      await loadAll(activeLoc);
+    } finally {
+      setBulkEnabling(false);
+    }
   };
 
   const handleExport = () => {
@@ -464,11 +501,39 @@ export default function OutletInventoryPage() {
         <span className="text-xs text-neutral-400 ml-auto">{filtered.length} items</span>
       </div>
 
-      {/* Catalog mode hint */}
+      {/* Catalog mode: hint + bulk-enable toolbar */}
       {viewMode === "catalog" && (
-        <div className="flex items-center gap-2 bg-violet-50 border border-violet-200 rounded-lg px-4 py-2.5 text-xs text-violet-800">
-          <Plus className="h-3.5 w-3.5 shrink-0" />
-          <span><strong>Add From Catalog:</strong> Click <strong>Enable</strong> on any item to activate it for this location. Already-enabled items show their current outlet data.</span>
+        <div className="space-y-2">
+          <div className="flex items-center gap-2 bg-violet-50 border border-violet-200 rounded-lg px-4 py-2.5 text-xs text-violet-800">
+            <Plus className="h-3.5 w-3.5 shrink-0" />
+            <span><strong>Add From Catalog:</strong> Check items and click <strong>Enable Selected</strong>, or use <strong>Enable All Visible</strong> to bulk-activate items matching your current search/filter.</span>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={() => handleBulkEnable(Array.from(selectedItemIds))}
+              disabled={selectedItemIds.size === 0 || bulkEnabling || !activeLoc}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              {bulkEnabling ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+              {bulkEnabling ? "Enabling…" : `Enable Selected (${selectedItemIds.size})`}
+            </button>
+            <button
+              onClick={() => handleBulkEnable(filtered.filter((r) => !r.localEnabled).map((r) => r.itemId))}
+              disabled={filtered.filter((r) => !r.localEnabled).length === 0 || bulkEnabling || !activeLoc}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-violet-600 text-white rounded-lg hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              {bulkEnabling ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+              Enable All Visible ({filtered.filter((r) => !r.localEnabled).length})
+            </button>
+            {selectedItemIds.size > 0 && (
+              <button
+                onClick={() => setSelectedItemIds(new Set())}
+                className="inline-flex items-center gap-1 px-2.5 py-2 text-xs text-neutral-500 hover:text-neutral-700 border border-neutral-200 rounded-lg bg-white hover:bg-neutral-50"
+              >
+                <X className="h-3 w-3" /> Clear Selection
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -512,6 +577,25 @@ export default function OutletInventoryPage() {
                   </tr>
                 ) : (
                   <tr>
+                    {/* Checkbox column — only in catalog mode */}
+                    {viewMode === "catalog" && (
+                      <th className="px-3 py-3 text-center bg-neutral-100 w-8">
+                        <input
+                          type="checkbox"
+                          aria-label="Select all visible catalog items"
+                          className="accent-green-600 w-3.5 h-3.5"
+                          checked={filtered.filter((r) => !r.localEnabled).length > 0 && filtered.filter((r) => !r.localEnabled).every((r) => selectedItemIds.has(r.itemId))}
+                          onChange={(e) => {
+                            const notEnabled = filtered.filter((r) => !r.localEnabled).map((r) => r.itemId);
+                            if (e.target.checked) {
+                              setSelectedItemIds((prev) => new Set([...prev, ...notEnabled]));
+                            } else {
+                              setSelectedItemIds((prev) => { const next = new Set(prev); notEnabled.forEach((id) => next.delete(id)); return next; });
+                            }
+                          }}
+                        />
+                      </th>
+                    )}
                     <th className="px-4 py-3 text-left bg-neutral-100 font-semibold">Item</th>
                     <th className="px-3 py-3 text-left bg-neutral-100 font-semibold">Source</th>
                     <th className="px-3 py-3 text-left bg-neutral-100 font-semibold">Category</th>
@@ -533,7 +617,7 @@ export default function OutletInventoryPage() {
               <tbody className="divide-y divide-neutral-100">
                 {filtered.length === 0 ? (
                   <tr>
-                    <td colSpan={viewMode === "suggested" ? 11 : 15} className="py-10 text-center text-neutral-400 text-sm">
+                    <td colSpan={viewMode === "suggested" ? 11 : viewMode === "catalog" ? 16 : 15} className="py-10 text-center text-neutral-400 text-sm">
                       {viewMode === "active" ? "No active items — switch to Add From Catalog to enable items for this location." :
                        viewMode === "disabled" ? "No disabled items for this location." :
                        viewMode === "suggested" ? (suggestedQtyOnly ? "No items need ordering (Suggested Qty > 0)." : "No active items to compute suggestions.") :
@@ -572,7 +656,30 @@ export default function OutletInventoryPage() {
                   }
 
                   return (
-                    <tr key={row.itemId} className={`${row.dirty ? "bg-amber-50/40" : "hover:bg-neutral-50/30"} ${!row.localEnabled ? "opacity-50" : ""}`}>
+                    <tr key={row.itemId} className={`${row.dirty ? "bg-amber-50/40" : "hover:bg-neutral-50/30"} ${viewMode === "catalog" && !row.localEnabled ? "" : !row.localEnabled ? "opacity-50" : ""}`}>
+                      {/* Checkbox cell — catalog mode only, only for not-yet-enabled items */}
+                      {viewMode === "catalog" && (
+                        <td className="px-3 py-2 text-center">
+                          {!row.localEnabled ? (
+                            <input
+                              type="checkbox"
+                              aria-label={`Select ${row.name}`}
+                              className="accent-green-600 w-3.5 h-3.5"
+                              checked={selectedItemIds.has(row.itemId)}
+                              onChange={(e) => {
+                                setSelectedItemIds((prev) => {
+                                  const next = new Set(prev);
+                                  if (e.target.checked) next.add(row.itemId);
+                                  else next.delete(row.itemId);
+                                  return next;
+                                });
+                              }}
+                            />
+                          ) : (
+                            <CheckCircle2 className="h-3.5 w-3.5 text-green-500 mx-auto" />
+                          )}
+                        </td>
+                      )}
                       {/* Read-only catalog columns */}
                       <td className="px-4 py-2 bg-neutral-50/60">
                         <div className="font-semibold text-neutral-900 text-xs leading-tight">{row.name}</div>
