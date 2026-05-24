@@ -4047,14 +4047,17 @@ export async function applyPhysicalCount(
   const now = new Date().toISOString();
 
   for (const entry of entries) {
-    // 1. Update location_inventory_items: set current_stock = physical_count, last_counted_at = now()
+    // 1. Update location_inventory_items:
+    //    current_stock  = physical_count (the reconciled value)
+    //    physical_count = null           (clear — audit history lives in location_inventory_count_logs)
+    //    last_counted_at = now()
     const { error: upsertError } = await supabase
       .from('location_inventory_items')
       .upsert({
         item_id:        entry.itemId,
         location_id:    entry.locationId,
         current_stock:  entry.physicalCount,
-        physical_count: entry.physicalCount,  // preserve — UX clears after session
+        physical_count: null,             // ← cleared so the row is no longer "pending count"
         min_on_hand:    entry.minOnHand,
         par_level:      entry.parLevel,
         local_enabled:  entry.localEnabled,

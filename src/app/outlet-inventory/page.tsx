@@ -232,6 +232,22 @@ export default function OutletInventoryPage() {
       setCountNotes("");
 
       if (result.failed === 0) {
+        // Optimistically clear physicalCount for all applied rows in local state
+        // so countableRows empties immediately (before DB reload arrives).
+        // Also update currentStock to match what we just wrote to DB.
+        const appliedIds = new Set(entries.map((e) => e.itemId));
+        setRows((prev) =>
+          prev.map((r) =>
+            appliedIds.has(r.itemId)
+              ? {
+                  ...r,
+                  physicalCount: null,
+                  currentStock: entries.find((e) => e.itemId === r.itemId)?.physicalCount ?? r.currentStock,
+                  dirty: false,
+                }
+              : r
+          )
+        );
         setToast(`Physical count applied for ${result.succeeded} item${result.succeeded !== 1 ? "s" : ""}. Stock updated.`);
       } else {
         setToast(`Count applied: ${result.succeeded} succeeded, ${result.failed} failed.`);
