@@ -96,7 +96,7 @@ export default function LoginPage() {
             </div>
             <div>
               <p className="text-sm font-black tracking-[0.28em] text-white">STOCK DHARMA</p>
-              <p className="text-[11px] font-medium text-zinc-500">Inventory command center</p>
+              <p className="text-[11px] font-medium text-zinc-500">Restaurant inventory command center</p>
             </div>
           </div>
           <a
@@ -114,8 +114,8 @@ export default function LoginPage() {
               Purpose-built restaurant stock control
             </div>
 
-            <h1 className="mt-7 max-w-4xl text-5xl font-black tracking-tight text-white sm:text-6xl lg:text-7xl">
-              See every count, order, and requisition before it costs you.
+            <h1 className="mt-7 max-w-4xl text-5xl font-black tracking-tight text-white sm:text-6xl lg:text-[64px]">
+              Control every count, order, and requisition before it costs you.
             </h1>
             <p className="mt-6 max-w-2xl text-base leading-8 text-zinc-400 sm:text-lg">
               STOCK DHARMA gives HQ and franchise teams a single operating layer for live inventory, supplier orders, production, and location requisitions.
@@ -193,7 +193,7 @@ export default function LoginPage() {
                       value={forgotMode ? resetEmail : email}
                       onChange={(e) => forgotMode ? setResetEmail(e.target.value) : setEmail(e.target.value)}
                       className="w-full rounded-xl border border-white/10 bg-black/25 py-3 pl-10 pr-4 text-sm font-medium text-white outline-none transition-all placeholder:text-zinc-600 focus:border-emerald-300/60 focus:ring-2 focus:ring-emerald-400/15"
-                      placeholder={forgotMode ? "your-email@example.com" : "admin@hq.com"}
+                      placeholder={forgotMode ? "your-email@example.com" : "example@stockdharma.com"}
                     />
                   </div>
                 </div>
