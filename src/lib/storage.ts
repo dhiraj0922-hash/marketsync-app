@@ -3766,6 +3766,8 @@ export interface OutletCatalogItem {
   sourceType:      'hq_supplied' | 'local_vendor';
   hqSaleItemId:    string | null;
   supplier:        string | null;
+  /** FK to suppliers.id — null when supplier is free-text only (backward compat) */
+  supplierId:      number | null;
   purchaseOption:  string | null;
   productCode:     string | null;
   scanBarcode:     string | null;
@@ -3786,6 +3788,7 @@ function mapCatalogItem(db: any): OutletCatalogItem {
     sourceType:      db.source_type === 'hq_supplied' ? 'hq_supplied' : 'local_vendor',
     hqSaleItemId:    db.hq_sale_item_id ?? null,
     supplier:        db.supplier  ?? null,
+    supplierId:      db.supplier_id != null ? Number(db.supplier_id) : null,
     purchaseOption:  db.purchase_option ?? null,
     productCode:     db.product_code    ?? null,
     scanBarcode:     db.scan_barcode    ?? null,
@@ -3830,6 +3833,7 @@ export async function upsertOutletCatalogItem(
       source_type:      item.sourceType,
       hq_sale_item_id:  item.hqSaleItemId     ?? null,
       supplier:         item.supplier         ?? null,
+      supplier_id:      item.supplierId       ?? null,
       purchase_option:  item.purchaseOption   ?? null,
       product_code:     item.productCode      ?? null,
       scan_barcode:     item.scanBarcode      ?? null,
@@ -3977,7 +3981,7 @@ export async function bulkUpsertOutletInventoryV2(
   return { succeeded, failed, errors };
 }
 
-/** Bulk upsert catalog items (Location Catalog Excel import) */
+/** Bulk upsert catalog items (Location Catalog Excel / MarketMan import) */
 export async function bulkUpsertOutletCatalogItems(
   items: (Omit<OutletCatalogItem, 'isActive'> & { isActive?: boolean })[]
 ): Promise<{ succeeded: number; failed: number; errors: string[] }> {
@@ -3988,6 +3992,48 @@ export async function bulkUpsertOutletCatalogItems(
     else { failed++; errors.push(`${item.itemId} (${item.name}): ${res.error?.message ?? 'error'}`); }
   }
   return { succeeded, failed, errors };
+}
+
+/**
+ * Find an existing outlet catalog item by normalized name + supplier + uom.
+ *
+ * Used during MarketMan import to match an incoming row to an existing catalog
+ * item BEFORE generating a new item_id. If a match is found, the existing
+ * item_id is reused so the upsert updates rather than duplicates the row.
+ *
+ * Normalization: lowercase → trim → collapse whitespace.
+ * Returns the item_id string if found, null otherwise.
+ */
+export async function findOutletCatalogItemByNormalized(
+  name:     string,
+  supplier: string | null,
+  uom:      string | null,
+): Promise<string | null> {
+  const norm = (s: string | null) =>
+    (s ?? '').toLowerCase().trim().replace(/\s+/g, ' ');
+
+  const { data, error } = await supabase
+    .from('outlet_catalog_items')
+    .select('item_id, name, supplier, uom')
+    .eq('source_type', 'local_vendor');
+
+  if (error || !data) {
+    console.warn('[findOutletCatalogItemByNormalized] query error:', error);
+    return null;
+  }
+
+  const normName     = norm(name);
+  const normSupplier = norm(supplier);
+  const normUom      = norm(uom);
+
+  const match = data.find(row => {
+    const sameName     = norm(row.name)     === normName;
+    const sameSupplier = normSupplier === '' || norm(row.supplier) === normSupplier;
+    const sameUom      = normUom      === '' || norm(row.uom)      === normUom;
+    return sameName && sameSupplier && sameUom;
+  });
+
+  return match?.item_id ?? null;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -4099,3 +4145,177 @@ export async function applyPhysicalCount(
   return { succeeded, failed, errors };
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// 21. MONTHLY LOCATION INVOICES
+// ────────────────────────────────────────────────────────────────────────────
+
+export interface Invoice {
+  id: string;
+  invoiceNumber: string;
+  locationId: string;
+  invoiceMonth: string;
+  status: "draft" | "finalized" | "sent" | "paid" | "void";
+  subtotal: number;
+  taxAmount: number;
+  totalAmount: number;
+  generatedAt: string;
+  finalizedAt: string | null;
+  paidAt: string | null;
+  notes: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface InvoiceItem {
+  id: string;
+  invoiceId: string;
+  requisitionId: string | null;
+  requisitionItemId: string | null;
+  itemId: string | null;
+  itemName: string;
+  quantity: number;
+  unitPrice: number;
+  lineTotal: number;
+  createdAt: string;
+}
+
+export interface MonthlyInvoiceSummary {
+  invoiceId: string;
+  invoiceNumber: string;
+  locationId: string;
+  invoiceMonth: string;
+  subtotal: number;
+  taxAmount: number;
+  totalAmount: number;
+  requisitionCount: number;
+  itemCount: number;
+}
+
+const mapInvoiceToFrontend = (db: any): Invoice => ({
+  id: db.id,
+  invoiceNumber: db.invoice_number,
+  locationId: db.location_id,
+  invoiceMonth: db.invoice_month,
+  status: db.status,
+  subtotal: Number(db.subtotal ?? 0),
+  taxAmount: Number(db.tax_amount ?? 0),
+  totalAmount: Number(db.total_amount ?? 0),
+  generatedAt: db.generated_at,
+  finalizedAt: db.finalized_at ?? null,
+  paidAt: db.paid_at ?? null,
+  notes: db.notes ?? null,
+  createdBy: db.created_by ?? null,
+  createdAt: db.created_at,
+  updatedAt: db.updated_at,
+});
+
+const mapInvoiceItemToFrontend = (db: any): InvoiceItem => ({
+  id: db.id,
+  invoiceId: db.invoice_id,
+  requisitionId: db.requisition_id ?? null,
+  requisitionItemId: db.requisition_item_id ?? null,
+  itemId: db.item_id ?? null,
+  itemName: db.item_name,
+  quantity: Number(db.quantity ?? 0),
+  unitPrice: Number(db.unit_price ?? 0),
+  lineTotal: Number(db.line_total ?? 0),
+  createdAt: db.created_at,
+});
+
+export async function loadInvoices(filters?: {
+  month?: string | null;
+  locationId?: string | null;
+}): Promise<Invoice[]> {
+  let query = supabase
+    .from('invoices')
+    .select('*')
+    .order('generated_at', { ascending: false });
+
+  if (filters?.month) {
+    const monthStart = `${filters.month.slice(0, 7)}-01`;
+    query = query.eq('invoice_month', monthStart);
+  }
+  if (filters?.locationId) {
+    query = query.eq('location_id', filters.locationId);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    console.error('[loadInvoices]', error);
+    return [];
+  }
+  return Array.isArray(data) ? data.map(mapInvoiceToFrontend) : [];
+}
+
+export async function loadInvoiceItems(invoiceId: string): Promise<InvoiceItem[]> {
+  const { data, error } = await supabase
+    .from('invoice_items')
+    .select('*')
+    .eq('invoice_id', invoiceId)
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    console.error('[loadInvoiceItems]', error);
+    return [];
+  }
+  return Array.isArray(data) ? data.map(mapInvoiceItemToFrontend) : [];
+}
+
+export async function generateMonthlyInvoices(
+  month: string,
+  locationId?: string | null
+): Promise<{ success: boolean; data?: MonthlyInvoiceSummary[]; error?: any }> {
+  const invoiceMonth = `${month.slice(0, 7)}-01`;
+  const { data, error } = await supabase.rpc('generate_monthly_invoices', {
+    p_invoice_month: invoiceMonth,
+    p_location_id: locationId || null,
+  } as any);
+
+  if (error) {
+    console.error('[generateMonthlyInvoices]', error);
+    return { success: false, error };
+  }
+
+  const summaries: MonthlyInvoiceSummary[] = (Array.isArray(data) ? data : []).map((row: any) => ({
+    invoiceId: row.invoice_id,
+    invoiceNumber: row.invoice_number,
+    locationId: row.location_id,
+    invoiceMonth: row.invoice_month,
+    subtotal: Number(row.subtotal ?? 0),
+    taxAmount: Number(row.tax_amount ?? 0),
+    totalAmount: Number(row.total_amount ?? 0),
+    requisitionCount: Number(row.requisition_count ?? 0),
+    itemCount: Number(row.item_count ?? 0),
+  }));
+
+  return { success: true, data: summaries };
+}
+
+export async function finalizeInvoice(invoiceId: string): Promise<{ success: boolean; error?: any }> {
+  const { error } = await supabase
+    .from('invoices')
+    .update({ status: 'finalized', finalized_at: new Date().toISOString() })
+    .eq('id', invoiceId)
+    .eq('status', 'draft');
+
+  if (error) {
+    console.error('[finalizeInvoice]', error);
+    return { success: false, error };
+  }
+  return { success: true };
+}
+
+export async function markInvoicePaid(invoiceId: string): Promise<{ success: boolean; error?: any }> {
+  const { error } = await supabase
+    .from('invoices')
+    .update({ status: 'paid', paid_at: new Date().toISOString() })
+    .eq('id', invoiceId)
+    .in('status', ['draft', 'finalized', 'sent']);
+
+  if (error) {
+    console.error('[markInvoicePaid]', error);
+    return { success: false, error };
+  }
+  return { success: true };
+}

@@ -5,6 +5,7 @@ import { isHqAdmin } from "@/lib/roles";
 import {
   loadOutletCatalog, upsertOutletCatalogItem, deactivateOutletCatalogItem,
   activateOutletCatalogItem, loadSaleItems, bulkUpsertOutletCatalogItems,
+  loadSuppliers, findOutletCatalogItemByNormalized,
   type OutletCatalogItem, type SaleItem,
 } from "@/lib/storage";
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
@@ -24,7 +25,8 @@ function SrcBadge({ src }: { src: "hq_supplied" | "local_vendor" }) {
 const EMPTY_FORM: OutletCatalogItem = {
   itemId: "", name: "", category: "", uom: "", type: "Inventory item",
   sourceType: "local_vendor", hqSaleItemId: null,
-  supplier: "", purchaseOption: null, productCode: null, scanBarcode: null,
+  supplier: "", supplierId: null,
+  purchaseOption: null, productCode: null, scanBarcode: null,
   price: 0, taxRate: 0, packQty: 1, orderingEnabled: true,
   isActive: true,
 };
@@ -35,6 +37,7 @@ function LocationCatalogContent() {
 
   const [catalog, setCatalog] = useState<OutletCatalogItem[]>([]);
   const [saleItems, setSaleItems] = useState<SaleItem[]>([]);
+  const [suppliers, setSuppliers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [srcFilter, setSrcFilter] = useState<"all" | "hq_supplied" | "local_vendor">("all");
@@ -54,9 +57,14 @@ function LocationCatalogContent() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [cat, si] = await Promise.all([loadOutletCatalog(true), loadSaleItems()]);
+      const [cat, si, supps] = await Promise.all([
+        loadOutletCatalog(true),
+        loadSaleItems(),
+        loadSuppliers(),
+      ]);
       setCatalog(Array.isArray(cat) ? cat : []);
       setSaleItems(Array.isArray(si) ? si : []);
+      setSuppliers(Array.isArray(supps) ? supps : []);
     } finally { setLoading(false); }
   }, []);
 
@@ -84,7 +92,8 @@ function LocationCatalogContent() {
     setForm({
       itemId: item.itemId, name: item.name, category: item.category ?? "",
       uom: item.uom ?? "", type: item.type, sourceType: item.sourceType,
-      hqSaleItemId: item.hqSaleItemId, supplier: item.supplier ?? "",
+      hqSaleItemId: item.hqSaleItemId,
+      supplier: item.supplier ?? "", supplierId: item.supplierId ?? null,
       purchaseOption: item.purchaseOption, productCode: item.productCode,
       scanBarcode: item.scanBarcode, price: item.price, taxRate: item.taxRate,
       packQty: item.packQty, orderingEnabled: item.orderingEnabled,
@@ -137,6 +146,7 @@ function LocationCatalogContent() {
       hqSaleItemId: si.id,
       price: si.effectivePrice,
       supplier: "Commissary HQ",
+      supplierId: null,
     }));
   };
 
@@ -156,7 +166,10 @@ function LocationCatalogContent() {
     XLSX.writeFile(wb, "location_catalog.xlsx");
   };
 
-  // Excel import of local_vendor catalog items
+  // ── MarketMan / Excel import of local_vendor catalog items ─────────────────
+  // Supports both native Location Catalog column names and MarketMan export aliases.
+  // Before generating a new item_id, checks for an existing catalog row by
+  // normalized name + supplier + uom to prevent duplicates on re-import.
   const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -166,25 +179,88 @@ function LocationCatalogContent() {
       const data = await file.arrayBuffer();
       const wb = XLSX.read(new Uint8Array(data), { type: "array" });
       const ws = wb.Sheets[wb.SheetNames[0]];
-      const rows: any[] = XLSX.utils.sheet_to_json(ws, { defval: "" });
-      const items: (Omit<OutletCatalogItem, "isActive"> & { isActive?: boolean })[] = rows
-        .filter(r => String(r["Name"] ?? "").trim())
-        .map(r => ({
-          itemId: String(r["Item ID"] ?? "").trim() || `LOC-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`,
-          name: String(r["Name"]).trim(),
-          category: String(r["Category"] ?? "").trim() || null,
-          uom: String(r["UOM"] ?? "").trim() || null,
-          type: String(r["Type"] ?? "Inventory item").trim() || "Inventory item",
-          sourceType: "local_vendor" as const,
-          hqSaleItemId: null,
-          supplier: String(r["Supplier"] ?? "").trim() || null,
-          purchaseOption: null, productCode: null, scanBarcode: null,
-          price: parseFloat(String(r["Price"] ?? "0")) || 0,
-          taxRate: parseFloat(String(r["Tax Rate"] ?? "0")) || 0,
-          packQty: parseFloat(String(r["Pack Qty"] ?? "1")) || 1,
+      const rawRows: any[] = XLSX.utils.sheet_to_json(ws, { defval: "" });
+
+      // ── MarketMan column aliases ──────────────────────────────────────────
+      // Map MarketMan/alternate header names → canonical Location Catalog names.
+      const ALIASES: Record<string, string> = {
+        "Product":              "Name",
+        "Item":                 "Name",
+        "Item Name":            "Name",
+        "Vendor":               "Supplier",
+        "Vendor Product Name":  "Supplier Product Name",
+        "Pack":                 "Pack Qty",
+        "Pack Size":            "Pack Qty",
+        "Ordering Unit":        "UOM",
+        "Unit":                 "UOM",
+        "Unit Price":           "Price",
+        "Pack Price":           "Price",
+      };
+
+      // Normalize each row: remap aliased keys to canonical keys
+      const rows = rawRows.map(raw => {
+        const out: Record<string, any> = {};
+        for (const [k, v] of Object.entries(raw)) {
+          const canonical = ALIASES[k] ?? k;
+          // Don't overwrite a canonical key that was already set directly
+          if (!(canonical in out)) out[canonical] = v;
+        }
+        return out;
+      });
+
+      // ── Build supplier name → supplier.id lookup from global master ───────
+      const normStr = (s: any) => String(s ?? "").toLowerCase().trim().replace(/\s+/g, " ");
+      const supplierNameToId = new Map<string, number>();
+      for (const s of suppliers) {
+        if (s.name) supplierNameToId.set(normStr(s.name), Number(s.id));
+      }
+
+      // ── Process each row ──────────────────────────────────────────────────
+      const items: (Omit<OutletCatalogItem, "isActive"> & { isActive?: boolean })[] = [];
+
+      for (const r of rows) {
+        const nameRaw = String(r["Name"] ?? "").trim();
+        if (!nameRaw) continue; // skip blank rows
+
+        const supplierRaw = String(r["Supplier"] ?? "").trim() || null;
+        const uomRaw      = String(r["UOM"] ?? "").trim() || null;
+
+        // Resolve supplier_id from global master (null if not found — graceful degradation)
+        const suppId = supplierRaw
+          ? (supplierNameToId.get(normStr(supplierRaw)) ?? null)
+          : null;
+
+        // ── Duplicate-safe item_id resolution ─────────────────────────────
+        // 1. If the file provides an Item ID, use it directly (upsert by item_id).
+        // 2. Otherwise, check for an existing catalog row by name+supplier+uom.
+        // 3. Only generate a new item_id if no existing row matches.
+        let itemId = String(r["Item ID"] ?? "").trim();
+        if (!itemId) {
+          const existing = await findOutletCatalogItemByNormalized(nameRaw, supplierRaw, uomRaw);
+          itemId = existing ?? `LOC-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+        }
+
+        items.push({
+          itemId,
+          name:           nameRaw,
+          category:       String(r["Category"] ?? "").trim() || null,
+          uom:            uomRaw,
+          type:           String(r["Type"] ?? "Inventory item").trim() || "Inventory item",
+          sourceType:     "local_vendor" as const,
+          hqSaleItemId:   null,
+          supplier:       supplierRaw,
+          supplierId:     suppId,
+          purchaseOption: null,
+          productCode:    String(r["Product Code"] ?? "").trim() || null,
+          scanBarcode:    String(r["Barcode"] ?? "").trim() || null,
+          price:          parseFloat(String(r["Price"] ?? "0")) || 0,
+          taxRate:        parseFloat(String(r["Tax Rate"] ?? "0")) || 0,
+          packQty:        parseFloat(String(r["Pack Qty"] ?? "1")) || 1,
           orderingEnabled: String(r["Ordering Enabled"] ?? "true").toLowerCase() !== "false",
-          isActive: true,
-        }));
+          isActive:       true,
+        });
+      }
+
       const result = await bulkUpsertOutletCatalogItems(items);
       setImportResult(result);
       if (result.succeeded > 0) {
@@ -442,7 +518,45 @@ function LocationCatalogContent() {
                 </select>
               </div>
 
-              {fld("supplier", "Default Supplier")}
+              {/* Supplier: dropdown from global master + free-text fallback */}
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-neutral-600 uppercase tracking-wider">
+                  Default Supplier
+                </label>
+                <select
+                  value={form.supplierId != null ? String(form.supplierId) : "__free__"}
+                  onChange={e => {
+                    const val = e.target.value;
+                    if (val === "__free__") {
+                      setForm(prev => ({ ...prev, supplierId: null }));
+                    } else {
+                      const picked = suppliers.find((s: any) => String(s.id) === val);
+                      setForm(prev => ({
+                        ...prev,
+                        supplierId: picked ? Number(picked.id) : null,
+                        supplier: picked ? picked.name : prev.supplier,
+                      }));
+                    }
+                  }}
+                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                >
+                  <option value="__free__">— Free text / not in master —</option>
+                  {suppliers.map((s: any) => (
+                    <option key={s.id} value={String(s.id)}>{s.name}</option>
+                  ))}
+                </select>
+                {/* Free-text override — always saved as supplier text column */}
+                <input
+                  type="text"
+                  value={form.supplier ?? ""}
+                  onChange={e => setForm(prev => ({ ...prev, supplier: e.target.value }))}
+                  placeholder="Supplier name (displayed on catalog)"
+                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                />
+                <p className="text-[11px] text-neutral-400">
+                  Select from master to link supplier_id. The text name is always saved for display.
+                </p>
+              </div>
               {fld("price", "Default Price ($)", "number")}
               {fld("taxRate", "Tax Rate (%)", "number")}
               {fld("packQty", "Pack Qty", "number")}
