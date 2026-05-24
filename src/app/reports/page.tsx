@@ -11,6 +11,7 @@ import {
   deriveMarginInsights,
   isLabourItem,
   type CogsReport,
+  type MovementRow,
   type MovementReport,
   type ProfitReport,
   type MarginInsights,
@@ -369,6 +370,58 @@ function CogsView({ report, locName }: { report: CogsReport; locName: (id: strin
   );
 }
 
+// ─── Movement context helper ─────────────────────────────────────────────────
+// Derives a human-readable context label from inventory_movements.notes.
+// Notes format varies by movement_type — see finished-goods/page.tsx executeProduction
+// and fg-count/page.tsx saveRow for the exact strings written.
+// No SQL change needed — all context is already stored in notes.
+function getMovementContextLabel(r: MovementRow): string | null {
+  // ── production_consumption ─────────────────────────────────────────────────
+  // Note: "Production: 2× AGNI SAUCE PREP — consumed 500 g of PEPPERS, GREEN THAI"
+  // × is Unicode U+00D7, — is em-dash U+2014
+  if (r.movement_type === "production_consumption" && r.notes) {
+    const m = r.notes.match(/Production:\s+\d+[\u00d7x]\s+(.+?)\s+[\u2014-]/);
+    if (m) return `Used for: ${m[1].trim()}`;
+    return r.notes; // plain-text fallback
+  }
+
+  // ── production_in ──────────────────────────────────────────────────────────
+  // Note: "Production output: 2 batches of AGNI SAUCE PREP [prep_item]"
+  if (r.movement_type === "production_in" && r.notes) {
+    const m = r.notes.match(/Production output:\s+\d+ batches? of\s+(.+?)(\s+\[|$)/);
+    if (m) return `Produced: ${m[1].trim()}`;
+    return r.notes;
+  }
+
+  // ── count_variance_gain / count_variance_loss ──────────────────────────────
+  // Note: JSON blob with display_note + optional session_name
+  // e.g. { display_note: "FG count: system 44 -> counted 40 (-4) - DOSA BATTER", session_name: "Night Closing" }
+  if (
+    (r.movement_type === "count_variance_gain" ||
+      r.movement_type === "count_variance_loss") &&
+    r.notes
+  ) {
+    try {
+      const parsed = JSON.parse(r.notes);
+      const base    = typeof parsed.display_note === "string" ? parsed.display_note : null;
+      const session = typeof parsed.session_name === "string" && parsed.session_name
+        ? ` — ${parsed.session_name}`
+        : "";
+      if (base) return `${base}${session}`;
+    } catch {
+      // notes is plain text — fall through to return it directly
+    }
+    return r.notes;
+  }
+
+  // ── requisition / transfer / adjustment / other ────────────────────────────
+  // notes is already human-readable plain text
+  if (r.notes) return r.notes;
+
+  // ── Fallback: reference_id or reference_type ───────────────────────────────
+  return r.reference_id ?? r.reference_type ?? null;
+}
+
 // ─── Movement view ──────────────────────────────────────────────────────────────────
 
 function MovementView({ report, locName }: { report: MovementReport; locName: (id: string | null) => string }) {
@@ -408,7 +461,7 @@ function MovementView({ report, locName }: { report: MovementReport; locName: (i
           <table className="w-full text-sm">
             <thead className="bg-neutral-50 border-b border-neutral-100">
               <tr>
-                {["Date", "Location", "Item", "Type", "Bucket", "Qty", "Unit Cost", "Net Value", "Ref"].map(h => (
+                {["Date", "Location", "Item", "Type", "Bucket", "Qty", "Unit Cost", "Net Value", "Context"].map(h => (
                   <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-neutral-500 uppercase tracking-wider whitespace-nowrap">{h}</th>
                 ))}
               </tr>
@@ -434,8 +487,22 @@ function MovementView({ report, locName }: { report: MovementReport; locName: (i
                   <td className={`px-4 py-2.5 tabular-nums font-semibold ${r.signed_cost >= 0 ? "text-green-700" : "text-red-700"}`}>
                     {r.signed_cost >= 0 ? "+" : ""}{$(r.signed_cost)}
                   </td>
-                  <td className="px-4 py-2.5 text-xs text-neutral-400 font-mono">
-                    {r.reference_type ?? ""}
+                  <td className="px-4 py-2.5 text-xs text-neutral-600 max-w-[260px]">
+                    {(() => {
+                      const label = getMovementContextLabel(r);
+                      return label ? (
+                        <span className="block truncate leading-snug" title={label}>
+                          {label}
+                        </span>
+                      ) : (
+                        <span className="text-neutral-400">—</span>
+                      );
+                    })()}
+                    {r.reference_id && (
+                      <span className="block font-mono text-[10px] text-neutral-400 truncate mt-0.5">
+                        {r.reference_id}
+                      </span>
+                    )}
                   </td>
                 </tr>
               ))}
