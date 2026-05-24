@@ -6,7 +6,8 @@ import {
   loadLocations, loadOutletCatalog, loadOutletInventoryV2,
   upsertOutletInventoryRowV2, bulkUpsertOutletInventoryV2,
   saveNewRequisition, sendHqRequisitionNotification,
-  type OutletCatalogItem, type OutletInventoryRowV2,
+  applyPhysicalCount,
+  type OutletCatalogItem, type OutletInventoryRowV2, type CountApplyEntry,
 } from "@/lib/storage";
 import {
   exportToExcel, downloadOutletTemplate, parseExcelFile,
@@ -15,7 +16,7 @@ import {
 import {
   MapPin, Download, Upload, Save, Search, CheckCircle2,
   RefreshCw, X, Store, Package, Plus, FileSpreadsheet, ClipboardList,
-  AlertCircle
+  AlertCircle, ClipboardCheck, TrendingUp, TrendingDown, Minus,
 } from "lucide-react";
 
 type SourceFilter = "all" | "hq_supplied" | "local_vendor";
@@ -77,6 +78,11 @@ export default function OutletInventoryPage() {
   const [reqModalOpen, setReqModalOpen] = useState(false);
   const [reqNotes,     setReqNotes]     = useState("");
   const [reqSaving,    setReqSaving]    = useState(false);
+
+  // Physical Count Modal State
+  const [countModalOpen,  setCountModalOpen]  = useState(false);
+  const [countNotes,      setCountNotes]      = useState("");
+  const [countApplying,   setCountApplying]   = useState(false);
 
   // Bulk enable state (catalog mode)
   const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(new Set());
@@ -181,6 +187,51 @@ export default function OutletInventoryPage() {
     setSavingAll(true);
     await Promise.all(rows.filter((r) => r.dirty).map(saveRow));
     setSavingAll(false);
+  };
+
+  // Rows eligible for physical count: active (localEnabled), has a physicalCount entered
+  const countableRows = useMemo(() =>
+    rows.filter((r) => r.localEnabled && r.outletRowId && r.physicalCount !== null),
+  [rows]);
+
+  const handleApplyCount = async () => {
+    if (countableRows.length === 0) return;
+    setCountApplying(true);
+    try {
+      const entries: CountApplyEntry[] = countableRows.map((r) => ({
+        itemId:        r.itemId,
+        locationId:    activeLoc,
+        previousStock: r.currentStock,
+        physicalCount: r.physicalCount as number,
+        varianceQty:   (r.physicalCount as number) - r.currentStock,
+        minOnHand:     r.minOnHand,
+        parLevel:      r.parLevel,
+        localEnabled:  r.localEnabled,
+        localNotes:    r.localNotes || null,
+        localSupplier: r.localSupplier || null,
+        localPrice:    r.localPrice !== "" ? parseFloat(r.localPrice) : null,
+      }));
+
+      const result = await applyPhysicalCount(
+        entries,
+        user?.id ?? null,
+        countNotes.trim() || null
+      );
+
+      setCountModalOpen(false);
+      setCountNotes("");
+
+      if (result.failed === 0) {
+        setToast(`Physical count applied for ${result.succeeded} item${result.succeeded !== 1 ? "s" : ""}. Stock updated.`);
+      } else {
+        setToast(`Count applied: ${result.succeeded} succeeded, ${result.failed} failed.`);
+        console.warn("[ApplyCount] errors:", result.errors);
+      }
+
+      await loadAll(activeLoc);
+    } finally {
+      setCountApplying(false);
+    }
   };
 
   // Lazy-create a location row with local_enabled=true (catalog → active)
@@ -445,6 +496,16 @@ export default function OutletInventoryPage() {
                 <Upload className="h-3.5 w-3.5" /> Import
                 <input type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleFileChange} />
               </label>
+              {/* Apply Physical Count — only shown in Active Items view with pending counts */}
+              {viewMode === "active" && countableRows.length > 0 && (
+                <button
+                  onClick={() => setCountModalOpen(true)}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors shadow-sm"
+                >
+                  <ClipboardCheck className="h-3.5 w-3.5" />
+                  Apply Physical Count ({countableRows.length})
+                </button>
+              )}
               {dirtyCount > 0 && (
                 <button onClick={saveAll} disabled={savingAll} className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-60">
                   <Save className="h-3.5 w-3.5" />{savingAll ? "Saving…" : `Save Changes (${dirtyCount})`}
@@ -882,6 +943,117 @@ export default function OutletInventoryPage() {
           </div>
         </div>
       )}
+
+      {/* ── Physical Count Confirmation Modal ──────────────────────────────── */}
+      {countModalOpen && (() => {
+        const positive = countableRows.filter((r) => (r.physicalCount as number) > r.currentStock).length;
+        const negative = countableRows.filter((r) => (r.physicalCount as number) < r.currentStock).length;
+        const zero     = countableRows.filter((r) => (r.physicalCount as number) === r.currentStock).length;
+        return (
+          <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-5">
+              {/* Header */}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <ClipboardCheck className="h-5 w-5 text-indigo-600" />
+                  <h3 className="text-base font-bold text-neutral-900">Apply Physical Count</h3>
+                </div>
+                <button onClick={() => { setCountModalOpen(false); setCountNotes(""); }}>
+                  <X className="h-5 w-5 text-neutral-400" />
+                </button>
+              </div>
+
+              {/* Summary */}
+              <p className="text-sm text-neutral-600">
+                Apply count for <strong>{countableRows.length} item{countableRows.length !== 1 ? "s" : ""}</strong>?
+                This will set <strong>Current Stock = Physical Count</strong> and update <code className="bg-neutral-100 px-1 rounded text-xs">last_counted_at</code> for each item.
+              </p>
+
+              {/* Variance breakdown */}
+              <div className="grid grid-cols-3 gap-3">
+                <div className="flex flex-col items-center gap-1 rounded-xl border border-green-200 bg-green-50 px-4 py-3">
+                  <TrendingUp className="h-4 w-4 text-green-600" />
+                  <span className="text-xl font-bold text-green-700">{positive}</span>
+                  <span className="text-[10px] font-semibold text-green-600 uppercase tracking-wider">Positive</span>
+                </div>
+                <div className="flex flex-col items-center gap-1 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+                  <TrendingDown className="h-4 w-4 text-red-500" />
+                  <span className="text-xl font-bold text-red-600">{negative}</span>
+                  <span className="text-[10px] font-semibold text-red-500 uppercase tracking-wider">Negative</span>
+                </div>
+                <div className="flex flex-col items-center gap-1 rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-3">
+                  <Minus className="h-4 w-4 text-neutral-400" />
+                  <span className="text-xl font-bold text-neutral-600">{zero}</span>
+                  <span className="text-[10px] font-semibold text-neutral-400 uppercase tracking-wider">No Change</span>
+                </div>
+              </div>
+
+              {/* Item preview — up to 6 rows */}
+              <div className="border border-neutral-200 rounded-xl overflow-hidden max-h-48 overflow-y-auto">
+                <table className="w-full text-xs">
+                  <thead className="bg-neutral-50 text-[10px] uppercase tracking-wider text-neutral-500 border-b border-neutral-200">
+                    <tr>
+                      <th className="px-3 py-2 text-left font-semibold">Item</th>
+                      <th className="px-3 py-2 text-right font-semibold">Current</th>
+                      <th className="px-3 py-2 text-right font-semibold">Count</th>
+                      <th className="px-3 py-2 text-right font-semibold">Variance</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-neutral-100">
+                    {countableRows.map((r) => {
+                      const variance = (r.physicalCount as number) - r.currentStock;
+                      return (
+                        <tr key={r.itemId} className="hover:bg-neutral-50/50">
+                          <td className="px-3 py-2 font-medium text-neutral-800 max-w-[160px] truncate">{r.name}</td>
+                          <td className="px-3 py-2 text-right tabular-nums text-neutral-600">{r.currentStock}</td>
+                          <td className="px-3 py-2 text-right tabular-nums font-semibold text-neutral-800">{r.physicalCount}</td>
+                          <td className={`px-3 py-2 text-right tabular-nums font-bold ${variance > 0 ? "text-green-600" : variance < 0 ? "text-red-500" : "text-neutral-400"}`}>
+                            {variance > 0 ? "+" : ""}{variance}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Optional notes */}
+              <div>
+                <label className="block text-xs font-semibold text-neutral-600 uppercase tracking-wider mb-1.5">
+                  Count Notes (optional)
+                </label>
+                <textarea
+                  rows={2}
+                  value={countNotes}
+                  onChange={(e) => setCountNotes(e.target.value)}
+                  placeholder="Reason for count, counted by, shift, etc."
+                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-neutral-50 resize-none"
+                />
+              </div>
+
+              {/* Footer buttons */}
+              <div className="flex gap-3 pt-1">
+                <button
+                  onClick={() => { setCountModalOpen(false); setCountNotes(""); }}
+                  className="flex-1 px-4 py-2.5 text-xs font-semibold border border-neutral-200 rounded-lg hover:bg-neutral-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleApplyCount}
+                  disabled={countApplying}
+                  className="flex-1 px-4 py-2.5 text-xs font-semibold bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+                >
+                  {countApplying
+                    ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Applying…</>
+                    : <><ClipboardCheck className="h-3.5 w-3.5" /> Apply Count ({countableRows.length})</>}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
+

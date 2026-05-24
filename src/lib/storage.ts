@@ -3977,7 +3977,7 @@ export async function bulkUpsertOutletInventoryV2(
   return { succeeded, failed, errors };
 }
 
-/** HQ-only: bulk upsert catalog items (used by Location Catalog Excel import) */
+/** Bulk upsert catalog items (Location Catalog Excel import) */
 export async function bulkUpsertOutletCatalogItems(
   items: (Omit<OutletCatalogItem, 'isActive'> & { isActive?: boolean })[]
 ): Promise<{ succeeded: number; failed: number; errors: string[] }> {
@@ -3989,3 +3989,110 @@ export async function bulkUpsertOutletCatalogItems(
   }
   return { succeeded, failed, errors };
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// 20. LOCATION PHYSICAL COUNT  (location_inventory_items + location_inventory_count_logs)
+// ────────────────────────────────────────────────────────────────────────────
+//
+// Applies physical counts entered by a location manager.
+// For each item with physical_count != null:
+//   - variance = physical_count - current_stock
+//   - Sets current_stock = physical_count
+//   - Sets last_counted_at = now()
+//   - Preserves physical_count (cleared by UX once acknowledged)
+//   - Inserts an audit row into location_inventory_count_logs
+//
+// IMPORTANT: Only touches location_inventory_items and location_inventory_count_logs.
+// Never reads or writes inventory_items, hq_sale_items, or any HQ table.
+// ────────────────────────────────────────────────────────────────────────────
+
+export interface CountApplyEntry {
+  /** item_id from outlet_catalog_items / location_inventory_items */
+  itemId:        string;
+  locationId:    string;
+  previousStock: number;
+  physicalCount: number;
+  varianceQty:   number;
+  /** Current outlet inventory row fields — preserved on upsert */
+  minOnHand:     number;
+  parLevel:      number;
+  localEnabled:  boolean;
+  localNotes:    string | null;
+  localSupplier: string | null;
+  localPrice:    number | null;
+}
+
+export interface CountApplyResult {
+  succeeded: number;
+  failed:    number;
+  errors:    string[];
+}
+
+/**
+ * Apply physical count for a batch of location inventory items.
+ *
+ * @param entries   Array of items to update (only those with physical_count not null)
+ * @param countedBy UUID of the authenticated user performing the count
+ * @param notes     Optional free-text notes for the count session
+ */
+export async function applyPhysicalCount(
+  entries:   CountApplyEntry[],
+  countedBy: string | null,
+  notes:     string | null
+): Promise<CountApplyResult> {
+  let succeeded = 0;
+  let failed    = 0;
+  const errors: string[] = [];
+
+  const now = new Date().toISOString();
+
+  for (const entry of entries) {
+    // 1. Update location_inventory_items: set current_stock = physical_count, last_counted_at = now()
+    const { error: upsertError } = await supabase
+      .from('location_inventory_items')
+      .upsert({
+        item_id:        entry.itemId,
+        location_id:    entry.locationId,
+        current_stock:  entry.physicalCount,
+        physical_count: entry.physicalCount,  // preserve — UX clears after session
+        min_on_hand:    entry.minOnHand,
+        par_level:      entry.parLevel,
+        local_enabled:  entry.localEnabled,
+        local_notes:    entry.localNotes ?? null,
+        local_supplier: entry.localSupplier ?? null,
+        local_price:    entry.localPrice ?? null,
+        last_counted_at: now,
+        updated_at:     now,
+      }, { onConflict: 'item_id,location_id' });
+
+    if (upsertError) {
+      console.error('[applyPhysicalCount] upsert failed:', entry.itemId, upsertError);
+      errors.push(`${entry.itemId}: ${upsertError.message}`);
+      failed++;
+      continue;
+    }
+
+    // 2. Insert audit log into location_inventory_count_logs
+    const { error: logError } = await supabase
+      .from('location_inventory_count_logs')
+      .insert({
+        location_id:    entry.locationId,
+        item_id:        entry.itemId,
+        previous_stock: entry.previousStock,
+        physical_count: entry.physicalCount,
+        variance_qty:   entry.varianceQty,
+        counted_by:     countedBy ?? null,
+        notes:          notes ?? null,
+      });
+
+    if (logError) {
+      // Log failure is non-fatal — stock is already updated. Warn and continue.
+      console.warn('[applyPhysicalCount] audit log insert failed (non-fatal):', entry.itemId, logError);
+    }
+
+    succeeded++;
+  }
+
+  return { succeeded, failed, errors };
+}
+
