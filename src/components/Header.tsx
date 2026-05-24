@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { Bell, Search, MapPin, ChevronDown, LogOut, User, Check } from "lucide-react";
+import { Bell, Search, MapPin, ChevronDown, LogOut, User, Check, Menu } from "lucide-react";
 import { useAuth } from "./AuthProvider";
 import { useState, useEffect, useRef } from "react";
 import { isHqAdmin, accessScopeLabel } from "@/lib/roles";
@@ -14,7 +14,7 @@ const getPageTitle = (pathname: string) => {
   return segment ? segment.charAt(0).toUpperCase() + segment.slice(1) : "";
 };
 
-export function Header() {
+export function Header({ onMenuToggle }: { onMenuToggle?: () => void }) {
   const pathname = usePathname();
   const title = getPageTitle(pathname);
   const { user, signOut } = useAuth();
@@ -64,7 +64,16 @@ export function Header() {
 
   return (
     <header className="h-12 sm:h-16 flex items-center justify-between px-3 sm:px-6 lg:px-8 border-b border-neutral-200 bg-white sticky top-0 z-10 w-full shadow-sm">
-      <div className="flex items-center gap-2 sm:gap-6">
+      <div className="flex items-center gap-2 sm:gap-4">
+        {/* Hamburger — mobile only */}
+        <button
+          onClick={onMenuToggle}
+          className="md:hidden p-2 -ml-1 rounded-lg text-neutral-500 hover:text-neutral-800 hover:bg-neutral-100 transition-colors"
+          aria-label="Open navigation"
+        >
+          <Menu className="h-5 w-5" />
+        </button>
+
         <h1 className="text-base sm:text-xl font-semibold text-neutral-800 tracking-tight">{title}</h1>
         <div className="h-6 w-px bg-neutral-200 hidden md:block" />
 

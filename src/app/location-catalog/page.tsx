@@ -213,7 +213,7 @@ function LocationCatalogContent() {
   );
 
   return (
-    <div className="space-y-5 p-6">
+    <div className="space-y-4 p-3 sm:p-5 lg:p-6">
       {/* Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
@@ -269,23 +269,25 @@ function LocationCatalogContent() {
       )}
 
       {/* Filters */}
-      <div className="flex items-center gap-3 flex-wrap">
-        <div className="relative">
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 flex-wrap">
+        <div className="relative w-full sm:w-auto">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-neutral-400" />
           <input type="text" placeholder="Search catalog…" value={search} onChange={e => setSearch(e.target.value)}
-            className="pl-9 pr-3 py-2 text-sm border border-neutral-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white w-48" />
+            className="pl-9 pr-3 py-2.5 sm:py-2 text-sm border border-neutral-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white w-full sm:w-48" />
         </div>
-        {(["all", "hq_supplied", "local_vendor"] as const).map(f => (
-          <button key={f} onClick={() => setSrcFilter(f)}
-            className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${srcFilter === f ? "bg-neutral-700 text-white border-neutral-700" : "bg-white border-neutral-200 text-neutral-600 hover:bg-neutral-50"}`}>
-            {f === "all" ? "All" : f === "hq_supplied" ? "HQ Supplied" : "Local Vendor"}
-          </button>
-        ))}
-        <span className="text-xs text-neutral-400 ml-auto">{filtered.length} items</span>
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {(["all", "hq_supplied", "local_vendor"] as const).map(f => (
+            <button key={f} onClick={() => setSrcFilter(f)}
+              className={`px-3 py-2 text-xs font-semibold rounded-lg border transition-colors min-h-[40px] ${srcFilter === f ? "bg-neutral-700 text-white border-neutral-700" : "bg-white border-neutral-200 text-neutral-600 hover:bg-neutral-50"}`}>
+              {f === "all" ? "All" : f === "hq_supplied" ? "HQ Supplied" : "Local Vendor"}
+            </button>
+          ))}
+        </div>
+        <span className="text-xs text-neutral-400 sm:ml-auto">{filtered.length} items</span>
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         {[
           { label: "Total Catalog Items", value: catalog.length, icon: <BookOpen className="h-4 w-4" />, color: "text-brand-600" },
           { label: "HQ Supplied", value: catalog.filter(i => i.sourceType === "hq_supplied").length, icon: <Package className="h-4 w-4" />, color: "text-violet-600" },
@@ -375,7 +377,7 @@ function LocationCatalogContent() {
       {/* Drawer */}
       {drawerOpen && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex justify-end">
-          <div className="bg-white w-full max-w-md h-full overflow-y-auto shadow-2xl flex flex-col">
+          <div className="bg-white w-full sm:max-w-md h-full overflow-y-auto shadow-2xl flex flex-col">
             <div className="flex items-center justify-between px-6 py-4 border-b border-neutral-100">
               <div>
                 <h3 className="text-base font-bold text-neutral-900">{editing ? `Edit: ${editing.name}` : "New Catalog Item"}</h3>

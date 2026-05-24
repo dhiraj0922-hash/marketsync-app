@@ -486,62 +486,69 @@ export default function OutletInventoryPage() {
       : <span className="inline-flex items-center gap-0.5 text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-teal-50 text-teal-700 border border-teal-200">LOCAL</span>;
 
   return (
-    <div className="space-y-5 p-6">
+    <div className="space-y-4 p-3 sm:p-5 lg:p-6">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-        <div>
-          <h2 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-            <Store className="h-6 w-6 text-brand-600" /> Outlet Level Inventory
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+        <div className="min-w-0">
+          <h2 className="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2">
+            <Store className="h-5 w-5 sm:h-6 sm:w-6 text-brand-600 shrink-0" /> Outlet Inventory
           </h2>
-          <p className="text-neutral-500 text-sm mt-0.5">
-            HQ-supplied and local vendor items per outlet. Grey = catalog read-only. White = outlet-editable.
+          <p className="text-neutral-500 text-xs sm:text-sm mt-0.5">
+            HQ-supplied and local vendor items per outlet.
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {viewMode === "suggested" ? (
             <>
               <button onClick={handleExportSuggested} className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50">
-                <FileSpreadsheet className="h-3.5 w-3.5 text-green-600" /> Export Suggested Order
+                <FileSpreadsheet className="h-3.5 w-3.5 text-green-600" />
+                <span className="hidden sm:inline">Export Suggested</span>
               </button>
-              <button
-                onClick={handleExportLocalVendor}
-                className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50"
-              >
-                <Download className="h-3.5 w-3.5 text-teal-600" /> Export Local Purchase List
+              <button onClick={handleExportLocalVendor} className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50">
+                <Download className="h-3.5 w-3.5 text-teal-600" />
+                <span className="hidden sm:inline">Export Local PO</span>
               </button>
               <button
                 onClick={() => setReqModalOpen(true)}
                 disabled={hqRequisitionLines.length === 0}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="inline-flex items-center gap-1.5 px-3 sm:px-4 py-2 text-xs font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <ClipboardList className="h-3.5 w-3.5" /> Requisition HQ Items ({hqRequisitionLines.length})
+                <ClipboardList className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">HQ Requisition ({hqRequisitionLines.length})</span>
+                <span className="sm:hidden">{hqRequisitionLines.length}</span>
               </button>
             </>
           ) : (
             <>
-              <button onClick={downloadOutletTemplate} className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50">
-                <Download className="h-3.5 w-3.5" /> Template
+              <button onClick={downloadOutletTemplate} className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50" title="Download template">
+                <Download className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Template</span>
               </button>
-              <button onClick={handleExport} disabled={loading} className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50 disabled:opacity-50">
-                <Download className="h-3.5 w-3.5" /> Export
+              <button onClick={handleExport} disabled={loading} className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50 disabled:opacity-50" title="Export">
+                <Download className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Export</span>
               </button>
-              <label className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50 cursor-pointer">
-                <Upload className="h-3.5 w-3.5" /> Import
+              <label className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50 cursor-pointer" title="Import">
+                <Upload className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Import</span>
                 <input type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleFileChange} />
               </label>
               {/* Apply Physical Count — only shown in Active Items view with pending counts */}
               {viewMode === "active" && countableRows.length > 0 && (
                 <button
                   onClick={() => setCountModalOpen(true)}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors shadow-sm"
+                  className="inline-flex items-center gap-1.5 px-3 sm:px-4 py-2 text-xs font-semibold bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors shadow-sm"
                 >
                   <ClipboardCheck className="h-3.5 w-3.5" />
-                  Apply Physical Count ({countableRows.length})
+                  <span className="hidden sm:inline">Apply Count ({countableRows.length})</span>
+                  <span className="sm:hidden">{countableRows.length}</span>
                 </button>
               )}
               {dirtyCount > 0 && (
-                <button onClick={saveAll} disabled={savingAll} className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-60">
-                  <Save className="h-3.5 w-3.5" />{savingAll ? "Saving…" : `Save Changes (${dirtyCount})`}
+                <button onClick={saveAll} disabled={savingAll} className="inline-flex items-center gap-1.5 px-3 sm:px-4 py-2 text-xs font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-60">
+                  <Save className="h-3.5 w-3.5" />
+                  <span className="hidden sm:inline">{savingAll ? "Saving…" : `Save (${dirtyCount})`}</span>
+                  <span className="sm:hidden">{dirtyCount}</span>
                 </button>
               )}
             </>
@@ -579,38 +586,40 @@ export default function OutletInventoryPage() {
       )}
 
       {/* Filters */}
-      <div className="flex items-center gap-3 flex-wrap">
-        <div className="relative">
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 flex-wrap">
+        <div className="relative w-full sm:w-auto">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-neutral-400" />
           <input type="text" placeholder="Search…" value={search} onChange={(e) => setSearch(e.target.value)}
-            className="pl-9 pr-3 py-2 text-sm border border-neutral-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white w-48" />
+            className="pl-9 pr-3 py-2.5 sm:py-2 text-sm border border-neutral-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white w-full sm:w-48" />
         </div>
-        {([
-          ["active",    "Active Items"],
-          ["catalog",   "Add From Catalog"],
-          ["disabled",  "Disabled"],
-          ["suggested", "Suggested Order"],
-        ] as [ViewMode, string][]).map(([m, label]) => (
-          <button key={m} onClick={() => setViewMode(m)}
-            className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${viewMode === m ? "bg-brand-600 text-white border-brand-600" : "bg-white border-neutral-200 text-neutral-600 hover:bg-neutral-50"}`}>
-            {label}
-          </button>
-        ))}
-        {(["all", "hq_supplied", "local_vendor"] as SourceFilter[]).map((f) => (
-          <button key={f} onClick={() => setSrcFilter(f)}
-            className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${srcFilter === f ? "bg-neutral-700 text-white border-neutral-700" : "bg-white border-neutral-200 text-neutral-500 hover:bg-neutral-50"} text-[10px]`}>
-            {f === "all" ? "All" : f === "hq_supplied" ? "HQ" : "Local"}
-          </button>
-        ))}
-        {viewMode === "suggested" && (
-          <button
-            onClick={() => setSuggestedQtyOnly(!suggestedQtyOnly)}
-            className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${suggestedQtyOnly ? "bg-amber-600 text-white border-amber-600 hover:bg-amber-700" : "bg-white border-neutral-200 text-neutral-600 hover:bg-neutral-50"}`}
-          >
-            Suggested Qty &gt; 0
-          </button>
-        )}
-        <span className="text-xs text-neutral-400 ml-auto">{filtered.length} items</span>
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {([
+            ["active",    "Active"],
+            ["catalog",   "Add"],
+            ["disabled",  "Disabled"],
+            ["suggested", "Suggested"],
+          ] as [ViewMode, string][]).map(([m, label]) => (
+            <button key={m} onClick={() => setViewMode(m)}
+              className={`px-3 py-2 text-xs font-semibold rounded-lg border transition-colors min-h-[40px] ${viewMode === m ? "bg-brand-600 text-white border-brand-600" : "bg-white border-neutral-200 text-neutral-600 hover:bg-neutral-50"}`}>
+              {label}
+            </button>
+          ))}
+          {(["all", "hq_supplied", "local_vendor"] as SourceFilter[]).map((f) => (
+            <button key={f} onClick={() => setSrcFilter(f)}
+              className={`px-3 py-2 text-xs font-semibold rounded-lg border transition-colors min-h-[40px] ${srcFilter === f ? "bg-neutral-700 text-white border-neutral-700" : "bg-white border-neutral-200 text-neutral-500 hover:bg-neutral-50"} text-[10px]`}>
+              {f === "all" ? "All" : f === "hq_supplied" ? "HQ" : "Local"}
+            </button>
+          ))}
+          {viewMode === "suggested" && (
+            <button
+              onClick={() => setSuggestedQtyOnly(!suggestedQtyOnly)}
+              className={`px-3 py-2 text-xs font-semibold rounded-lg border transition-colors min-h-[40px] ${suggestedQtyOnly ? "bg-amber-600 text-white border-amber-600 hover:bg-amber-700" : "bg-white border-neutral-200 text-neutral-600 hover:bg-neutral-50"}`}
+            >
+              Qty &gt; 0
+            </button>
+          )}
+        </div>
+        <span className="text-xs text-neutral-400 sm:ml-auto">{filtered.length} items</span>
       </div>
 
       {/* Catalog mode: hint + bulk-enable toolbar */}
@@ -659,7 +668,7 @@ export default function OutletInventoryPage() {
         </div>
       )}
 
-      {/* Table */}
+      {/* Table — desktop (md+) */}
       {loading ? (
         <div className="flex justify-center py-16 text-neutral-400 animate-pulse text-sm">Loading outlet inventory…</div>
       ) : catalog.length === 0 ? (
@@ -669,9 +678,93 @@ export default function OutletInventoryPage() {
           <p className="text-xs">Run <code className="bg-neutral-100 px-1 rounded">migration_outlet_catalog.sql</code> to seed from HQ finished goods, then import local vendor items via Excel.</p>
         </div>
       ) : (
-        <div className="border border-neutral-200 rounded-xl overflow-hidden bg-white">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+        <>
+          {/* ── Mobile card list (active / disabled views only; < md) ───────── */}
+          {(viewMode === "active" || viewMode === "disabled") && (
+            <div className="md:hidden space-y-3">
+              {filtered.length === 0 ? (
+                <div className="py-10 text-center text-neutral-400 text-sm">
+                  {viewMode === "active" ? "No active items — switch to Add to enable items." : "No disabled items."}
+                </div>
+              ) : filtered.map((row) => (
+                <div
+                  key={row.itemId}
+                  className={`bg-white border border-neutral-200 rounded-xl p-4 space-y-3 ${row.dirty ? "border-amber-300 bg-amber-50/30" : ""}`}
+                >
+                  {/* Card header */}
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="font-semibold text-neutral-900 text-sm leading-tight truncate">{row.name}</p>
+                      <p className="text-[10px] text-neutral-400 font-mono mt-0.5">{row.itemId}</p>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {srcBadge(row.sourceType)}
+                      {row.dirty && (
+                        <button onClick={() => saveRow(row)} disabled={row.saving}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50 min-h-[36px]">
+                          {row.saving ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+                          {row.saving ? "…" : "Save"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Key fields grid */}
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="bg-neutral-50 rounded-lg p-2 text-center">
+                      <p className="text-[10px] text-neutral-400 font-medium uppercase tracking-wide">Stock</p>
+                      <input type="number" min={0} value={row.currentStock}
+                        onChange={(e) => patch(row.itemId, { currentStock: parseFloat(e.target.value) || 0 })}
+                        className="w-full text-center text-sm font-bold text-neutral-900 bg-transparent border-none outline-none mt-0.5 tabular-nums" />
+                    </div>
+                    <div className="bg-indigo-50 rounded-lg p-2 text-center border border-indigo-100">
+                      <p className="text-[10px] text-indigo-500 font-medium uppercase tracking-wide">Count</p>
+                      <input type="number" min={0}
+                        value={row.physicalCount ?? ""}
+                        placeholder="—"
+                        onChange={(e) => {
+                          if (e.target.value === "") { patch(row.itemId, { physicalCount: null }); }
+                          else { const p = parseFloat(e.target.value); patch(row.itemId, { physicalCount: Number.isFinite(p) ? p : null }); }
+                        }}
+                        className="w-full text-center text-sm font-bold text-indigo-700 bg-transparent border-none outline-none mt-0.5 tabular-nums placeholder:text-indigo-300" />
+                    </div>
+                    <div className="bg-neutral-50 rounded-lg p-2 text-center">
+                      <p className="text-[10px] text-neutral-400 font-medium uppercase tracking-wide">Par</p>
+                      <input type="number" min={0} value={row.parLevel}
+                        onChange={(e) => patch(row.itemId, { parLevel: parseFloat(e.target.value) || 0 })}
+                        className="w-full text-center text-sm font-bold text-neutral-900 bg-transparent border-none outline-none mt-0.5 tabular-nums" />
+                    </div>
+                  </div>
+
+                  {/* Secondary info */}
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-neutral-500">
+                    {row.category && <span>{row.category}</span>}
+                    {row.uom && <span className="text-neutral-400">{row.uom}</span>}
+                    {row.supplier && <span>{row.supplier}</span>}
+                    {row.localPrice && <span className="font-semibold text-neutral-700">${parseFloat(row.localPrice).toFixed(2)}</span>}
+                  </div>
+
+                  {/* On/Off toggle */}
+                  <div className="flex items-center justify-between border-t border-neutral-100 pt-2">
+                    <span className="text-xs text-neutral-500">Active for location</span>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="checkbox" checked={row.localEnabled}
+                        onChange={(e) => patch(row.itemId, { localEnabled: e.target.checked })}
+                        className="accent-brand-600 w-4 h-4" />
+                      <span className="text-xs font-medium text-neutral-700">{row.localEnabled ? "On" : "Off"}</span>
+                    </label>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* ── Desktop table (md+) / all views ─────────────────────────────── */}
+          <div className={`border border-neutral-200 rounded-xl overflow-hidden bg-white ${
+            (viewMode === "active" || viewMode === "disabled") ? "hidden md:block" : ""
+          }`}>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
               <thead className="text-[10px] uppercase tracking-wider text-neutral-500 border-b border-neutral-200">
                 {viewMode === "suggested" ? (
                   <tr>
@@ -872,15 +965,16 @@ export default function OutletInventoryPage() {
                 })}
               </tbody>
             </table>
+            </div>
           </div>
-        </div>
+        </>
       )}
 
       {/* HQ Requisition Confirmation Review Modal */}
       {reqModalOpen && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-6 space-y-4">
-            <div className="flex items-center justify-between border-b pb-3">
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-white rounded-t-2xl sm:rounded-2xl shadow-2xl w-full sm:max-w-2xl max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between border-b px-6 py-4">
               <div className="flex items-center gap-2">
                 <ClipboardList className="h-5 w-5 text-brand-600" />
                 <h3 className="text-base font-bold text-neutral-900">Review Draft HQ Requisition</h3>
@@ -888,6 +982,8 @@ export default function OutletInventoryPage() {
               <button onClick={() => setReqModalOpen(false)}><X className="h-5 w-5 text-neutral-400" /></button>
             </div>
 
+            {/* Scrollable body */}
+            <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
             <p className="text-xs text-neutral-500">
               The following active HQ Supplied items have suggested order quantities. Please review their quantities and prices before saving this requisition to the database.
             </p>
@@ -922,32 +1018,37 @@ export default function OutletInventoryPage() {
               <span className="text-base font-extrabold text-brand-700">${hqRequisitionGrandTotal.toFixed(2)}</span>
             </div>
 
-            <div className="space-y-1">
-              <label className="text-xs font-semibold text-neutral-700 block">Requisition Notes / Instructions:</label>
-              <textarea
-                value={reqNotes}
-                onChange={(e) => setReqNotes(e.target.value)}
-                placeholder="Add commissary instructions, delivery details, or special requests..."
-                rows={3}
-                className="w-full text-xs border border-neutral-200 rounded-lg p-2.5 focus:outline-none focus:ring-2 focus:ring-brand-500"
-              />
-            </div>
+            </div> {/* end scrollable body */}
 
-            <div className="flex gap-3 pt-2">
-              <button
-                onClick={() => setReqModalOpen(false)}
-                className="flex-1 px-4 py-2.5 text-xs font-semibold border border-neutral-200 rounded-lg hover:bg-neutral-50 transition"
-              >
-                Cancel &amp; Edit Levels
-              </button>
-              <button
-                onClick={handleSubmitRequisition}
-                disabled={reqSaving}
-                className="flex-1 px-4 py-2.5 text-xs font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50 transition flex items-center justify-center gap-2"
-              >
-                {reqSaving ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
-                {reqSaving ? "Submitting Requisition..." : "Submit HQ Requisition"}
-              </button>
+
+            {/* Sticky footer — always visible */}
+            <div className="px-6 pb-6 pt-4 border-t border-neutral-100 space-y-3">
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-neutral-700 block">Requisition Notes / Instructions:</label>
+                <textarea
+                  value={reqNotes}
+                  onChange={(e) => setReqNotes(e.target.value)}
+                  placeholder="Add commissary instructions, delivery details, or special requests..."
+                  rows={2}
+                  className="w-full text-xs border border-neutral-200 rounded-lg p-2.5 focus:outline-none focus:ring-2 focus:ring-brand-500"
+                />
+              </div>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setReqModalOpen(false)}
+                  className="flex-1 px-4 py-3 text-xs font-semibold border border-neutral-200 rounded-lg hover:bg-neutral-50 transition"
+                >
+                  Cancel &amp; Edit Levels
+                </button>
+                <button
+                  onClick={handleSubmitRequisition}
+                  disabled={reqSaving}
+                  className="flex-1 px-4 py-3 text-xs font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50 transition flex items-center justify-center gap-2"
+                >
+                  {reqSaving ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                  {reqSaving ? "Submitting…" : "Submit HQ Requisition"}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -955,8 +1056,8 @@ export default function OutletInventoryPage() {
 
       {/* Import modal */}
       {importModalOpen && validation && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4">
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-white rounded-t-2xl sm:rounded-2xl shadow-2xl w-full sm:max-w-md max-h-[90vh] overflow-y-auto p-6 space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-base font-bold">Import Validation</h3>
               <button onClick={() => setImportModalOpen(false)}><X className="h-5 w-5 text-neutral-400" /></button>
@@ -1005,10 +1106,10 @@ export default function OutletInventoryPage() {
         const negative = countableRows.filter((r) => (r.physicalCount as number) < r.currentStock).length;
         const zero     = countableRows.filter((r) => (r.physicalCount as number) === r.currentStock).length;
         return (
-          <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-5">
+          <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+            <div className="bg-white rounded-t-2xl sm:rounded-2xl shadow-2xl w-full sm:max-w-lg max-h-[90vh] flex flex-col">
               {/* Header */}
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between px-6 py-4 border-b border-neutral-100">
                 <div className="flex items-center gap-2">
                   <ClipboardCheck className="h-5 w-5 text-indigo-600" />
                   <h3 className="text-base font-bold text-neutral-900">Apply Physical Count</h3>
@@ -1017,7 +1118,8 @@ export default function OutletInventoryPage() {
                   <X className="h-5 w-5 text-neutral-400" />
                 </button>
               </div>
-
+              {/* Scrollable body */}
+              <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
               {/* Summary */}
               <p className="text-sm text-neutral-600">
                 Apply count for <strong>{countableRows.length} item{countableRows.length !== 1 ? "s" : ""}</strong>?
@@ -1086,18 +1188,20 @@ export default function OutletInventoryPage() {
                 />
               </div>
 
-              {/* Footer buttons */}
-              <div className="flex gap-3 pt-1">
+              </div> {/* end scrollable body */}
+
+              {/* Footer — sticky at bottom */}
+              <div className="px-6 pb-6 pt-4 border-t border-neutral-100 flex gap-3">
                 <button
                   onClick={() => { setCountModalOpen(false); setCountNotes(""); }}
-                  className="flex-1 px-4 py-2.5 text-xs font-semibold border border-neutral-200 rounded-lg hover:bg-neutral-50 transition-colors"
+                  className="flex-1 px-4 py-3 text-xs font-semibold border border-neutral-200 rounded-lg hover:bg-neutral-50 transition-colors"
                 >
                   Cancel
                 </button>
                 <button
                   onClick={handleApplyCount}
                   disabled={countApplying}
-                  className="flex-1 px-4 py-2.5 text-xs font-semibold bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+                  className="flex-1 px-4 py-3 text-xs font-semibold bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
                 >
                   {countApplying
                     ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Applying…</>
