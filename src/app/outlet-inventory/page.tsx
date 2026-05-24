@@ -184,7 +184,11 @@ export default function OutletInventoryPage() {
     setRows((prev) => prev.map((r) => r.itemId === row.itemId ? { ...r, saving: true } : r));
     await upsertOutletInventoryRowV2({
       item_id: row.itemId, location_id: activeLoc,
-      current_stock: row.currentStock, physical_count: row.physicalCount,
+      current_stock: row.currentStock,
+      // physical_count is NEVER written by saveRow — it is exclusively managed
+      // by applyPhysicalCount. Passing null here prevents stale count values
+      // from being persisted to DB when the user saves other fields.
+      physical_count: null,
       min_on_hand: row.minOnHand, par_level: row.parLevel,
       local_enabled: row.localEnabled, local_notes: row.localNotes || null,
       local_supplier: row.localSupplier || null,
@@ -199,9 +203,12 @@ export default function OutletInventoryPage() {
     setSavingAll(false);
   };
 
-  // Rows eligible for physical count: active (localEnabled), has a physicalCount entered
+  // Rows eligible for physical count:
+  //   - must be active (localEnabled) with an existing outlet row
+  //   - physicalCount must be a valid finite number (not null, not NaN, not undefined)
+  //   - 0 is a valid count (stock-out confirmation)
   const countableRows = useMemo(() =>
-    rows.filter((r) => r.localEnabled && r.outletRowId && r.physicalCount !== null),
+    rows.filter((r) => r.localEnabled && r.outletRowId && r.physicalCount !== null && Number.isFinite(r.physicalCount)),
   [rows]);
 
   const handleApplyCount = async () => {
@@ -808,9 +815,22 @@ export default function OutletInventoryPage() {
                         </td>
                       ))}
                       <td className="px-2 py-1.5">
-                        <input type="number" min={0} value={row.physicalCount ?? ""} placeholder="—"
-                          onChange={(e) => patch(row.itemId, { physicalCount: e.target.value === "" ? null : parseFloat(e.target.value) })}
-                          className="w-16 text-right text-xs tabular-nums border border-neutral-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-brand-500" />
+                        <input
+                          type="number"
+                          min={0}
+                          value={row.physicalCount ?? ""}
+                          placeholder="—"
+                          onChange={(e) => {
+                            if (e.target.value === "") {
+                              patch(row.itemId, { physicalCount: null });
+                            } else {
+                              const parsed = parseFloat(e.target.value);
+                              // Only accept valid finite numbers; reject NaN from partial input
+                              patch(row.itemId, { physicalCount: Number.isFinite(parsed) ? parsed : null });
+                            }
+                          }}
+                          className="w-16 text-right text-xs tabular-nums border border-neutral-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                        />
                       </td>
                       <td className="px-2 py-1.5">
                         <input type="text" value={row.localSupplier} placeholder="Supplier…"
