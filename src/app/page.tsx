@@ -537,7 +537,7 @@ export default function Dashboard() {
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-zinc-500">Dashboard</p>
-          <h1 className="mt-2 text-2xl font-semibold tracking-tight text-white">StockIQ Overview</h1>
+          <h1 className="mt-2 text-2xl font-semibold tracking-tight text-white">STOCK DHARMA Overview</h1>
           <p className="mt-1 text-sm text-zinc-500">Real-time inventory health, purchasing activity, and variance signals.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">

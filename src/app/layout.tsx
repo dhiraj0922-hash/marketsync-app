@@ -11,8 +11,8 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "Restaurant Inventory SaaS",
-  description: "Modern production-ready frontend for restaurant operations",
+  title: "STOCK DHARMA",
+  description: "Inventory command center for restaurant operations",
 };
 
 export default function RootLayout({
@@ -32,4 +32,3 @@ export default function RootLayout({
     </html>
   );
 }
-
