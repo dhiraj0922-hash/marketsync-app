@@ -5,7 +5,7 @@ import { isHqAdmin } from "@/lib/roles";
 import {
   loadLocations, loadOutletCatalog, loadOutletInventoryV2,
   upsertOutletInventoryRowV2, bulkUpsertOutletInventoryV2,
-  saveNewRequisition,
+  saveNewRequisition, sendHqRequisitionNotification,
   type OutletCatalogItem, type OutletInventoryRowV2,
 } from "@/lib/storage";
 import {
@@ -346,7 +346,16 @@ export default function OutletInventoryPage() {
 
       const res = await saveNewRequisition(header, items);
       if (res.success) {
-        setToast(`Successfully created Requisition Header ID ${header.id} with ${items.length} items!`);
+        // Non-blocking HQ notification — mirrors requisitions/page.tsx pattern.
+        // All lines here are hq_supplied (local_vendor items are filtered out
+        // by hqRequisitionLines which enforces sourceType === "hq_supplied").
+        const notifyRes = await sendHqRequisitionNotification(reqId);
+        if (notifyRes.success) {
+          setToast("HQ requisition created. HQ notification email sent.");
+        } else {
+          console.warn("[OutletInventory] HQ notification failed:", notifyRes.error);
+          setToast("HQ requisition created. HQ email notification failed.");
+        }
         setReqModalOpen(false);
         setReqNotes("");
         // Reload all stock levels
