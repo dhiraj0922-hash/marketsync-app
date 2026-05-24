@@ -21,6 +21,16 @@ import {
 
 type SourceFilter = "all" | "hq_supplied" | "local_vendor";
 type ViewMode = "active" | "catalog" | "disabled" | "suggested";
+const HQ_VIEW_MODES: [ViewMode, string][] = [
+  ["active",    "Active"],
+  ["catalog",   "Add"],
+  ["disabled",  "Disabled"],
+  ["suggested", "Suggested"],
+];
+const LOCATION_VIEW_MODES: [ViewMode, string][] = [
+  ["active",    "Active"],
+  ["suggested", "Suggested"],
+];
 
 interface MergedRow {
   itemId: string; name: string; category: string; uom: string;
@@ -137,6 +147,11 @@ export default function OutletInventoryPage() {
   useEffect(() => { setRows(merge(catalog, outletData)); }, [catalog, outletData]);
   // Clear selection when location or view mode changes
   useEffect(() => { setSelectedItemIds(new Set()); }, [activeLoc, viewMode]);
+  useEffect(() => {
+    if (!hq && (viewMode === "catalog" || viewMode === "disabled")) {
+      setViewMode("active");
+    }
+  }, [hq, viewMode]);
 
   // Suggested order helpers
   const getRowPrice = useCallback((r: MergedRow) => {
@@ -269,6 +284,7 @@ export default function OutletInventoryPage() {
 
   // Lazy-create a location row with local_enabled=true (catalog → active)
   const enableItem = async (row: MergedRow) => {
+    if (!hq) return;
     setRows((prev) => prev.map((r) => r.itemId === row.itemId ? { ...r, saving: true } : r));
     await upsertOutletInventoryRowV2({
       item_id: row.itemId, location_id: activeLoc,
@@ -282,6 +298,7 @@ export default function OutletInventoryPage() {
 
   // Bulk-enable a set of catalog items for the active location
   const handleBulkEnable = async (itemIds: string[]) => {
+    if (!hq) return;
     if (itemIds.length === 0 || !activeLoc) return;
     setBulkEnabling(true);
     try {
@@ -479,6 +496,7 @@ export default function OutletInventoryPage() {
   };
 
   const dirtyCount = rows.filter((r) => r.dirty).length;
+  const viewModes = hq ? HQ_VIEW_MODES : LOCATION_VIEW_MODES;
 
   const srcBadge = (src: "hq_supplied" | "local_vendor") =>
     src === "hq_supplied"
@@ -593,12 +611,7 @@ export default function OutletInventoryPage() {
             className="pl-9 pr-3 py-2.5 sm:py-2 text-sm border border-neutral-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white w-full sm:w-48" />
         </div>
         <div className="flex items-center gap-1.5 flex-wrap">
-          {([
-            ["active",    "Active"],
-            ["catalog",   "Add"],
-            ["disabled",  "Disabled"],
-            ["suggested", "Suggested"],
-          ] as [ViewMode, string][]).map(([m, label]) => (
+          {viewModes.map(([m, label]) => (
             <button key={m} onClick={() => setViewMode(m)}
               className={`px-3 py-2 text-xs font-semibold rounded-lg border transition-colors min-h-[40px] ${viewMode === m ? "bg-brand-600 text-white border-brand-600" : "bg-white border-neutral-200 text-neutral-600 hover:bg-neutral-50"}`}>
               {label}
@@ -623,7 +636,7 @@ export default function OutletInventoryPage() {
       </div>
 
       {/* Catalog mode: hint + bulk-enable toolbar */}
-      {viewMode === "catalog" && (
+      {hq && viewMode === "catalog" && (
         <div className="space-y-2">
           <div className="flex items-center gap-2 bg-violet-50 border border-violet-200 rounded-lg px-4 py-2.5 text-xs text-violet-800">
             <Plus className="h-3.5 w-3.5 shrink-0" />
@@ -1215,4 +1228,3 @@ export default function OutletInventoryPage() {
     </div>
   );
 }
-
