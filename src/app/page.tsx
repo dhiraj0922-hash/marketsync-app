@@ -98,6 +98,7 @@ import { loadInventory, loadOrders, saveOrders, loadCounts, loadSuppliers, loadR
 import { runAutomationEngine } from "@/lib/automation";
 import { CheckSquare } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
+import { isHqAdmin, resolveLocationId } from "@/lib/roles";
 import HQLocationReview from "@/components/HQLocationReview";
 
 export default function Dashboard() {
@@ -145,7 +146,34 @@ export default function Dashboard() {
              loadLocations(),
           ]);
           
-          setInventoryItems(loadedInventory);
+          // ── Location scoping — mirrors Inventory page logic —————————————
+          // loadInventory() returns ALL rows when called without a locationId.
+          // Non-HQ-admin users must only see their own location's stock.
+          const hqAdmin = isHqAdmin(user);
+          const userLocId = resolveLocationId(user);
+          const scopedInventory = hqAdmin
+            ? loadedInventory
+            : loadedInventory.filter((i: any) => i.locationId === userLocId);
+          setInventoryItems(scopedInventory);
+          // ── Debug: inventory value audit ———————————————————————————
+          const top10 = [...scopedInventory]
+            .map((i: any) => ({
+              name:    i.name,
+              locId:   i.locationId,
+              inStock: Number(i.inStock) || 0,
+              cost:    Number(i.cost)    || 0,
+              value:   (Number(i.inStock) || 0) * (Number(i.cost) || 0),
+            }))
+            .sort((a: any, b: any) => b.value - a.value)
+            .slice(0, 10);
+          console.group('[DashboardValueAudit]');
+          console.log(`Scope: ${hqAdmin ? 'ALL locations (HQ admin)' : `location=${userLocId}`}`);
+          console.log(`Rows: ${scopedInventory.length} (raw from DB: ${loadedInventory.length})`);
+          console.log('Top 10 highest value rows:');
+          console.table(top10);
+          const total = top10.reduce((s: number, i: any) => s + i.value, 0);
+          console.log(`Top-10 subtotal: $${total.toFixed(2)}`);
+          console.groupEnd();
           setOrders(loadedOrders);
           setCounts(loadedCounts);
           setSuppliersData(loadedSuppliers);
@@ -156,8 +184,14 @@ export default function Dashboard() {
           // Exclude HQ itself from location picker — HQ reviews store locations
           setLocations((loadedLocations as any[]).filter((l: any) => l.id !== "LOC-HQ"));
           
-          // Check clean-slate architecture boundary
-          const liveStockTotal = loadedInventory.reduce((acc: number, item: any) => acc + ((item.inStock || 0) * (item.cost || 0)), 0);
+          // Check clean-slate: use scoped inventory + item.cost (base unit, not pack price)
+          const liveStockTotal = scopedInventory.reduce(
+            (acc: number, item: any) => {
+              const stock = Number(item.inStock);
+              const cost  = Number(item.cost);
+              return acc + (Number.isFinite(stock) && stock >= 0 && Number.isFinite(cost) && cost >= 0
+                ? stock * cost : 0);
+            }, 0);
           if (liveStockTotal === 0 && loadedOrders.length === 0) {
             setDynamicUsageData([
               { name: 'Mon', actual: 0, theoretical: 0 },
@@ -187,7 +221,17 @@ export default function Dashboard() {
 
   const lowStockItems = inventoryItems.filter(item => item.inStock < item.parLevel);
   const recentOrdersRender = orders.slice(0, 4);
-  const totalInventoryValue = inventoryItems.reduce((acc, item) => acc + ((item.inStock || 0) * (item.cost || 0)), 0);
+  // ── Inventory Value — always use item.cost (per-base-unit cost) ──────────
+  // NEVER use preferredCost here — preferredCost = purchase_options.unit_price
+  // which is the CASE/PACK price (e.g. $230 for a case of 24 units at $9.60).
+  // Using it without dividing by conversion inflates value 10-40x.
+  const totalInventoryValue = inventoryItems.reduce((acc: number, item: any) => {
+    const stock = Number(item.inStock);
+    const cost  = Number(item.cost);  // base unit cost only
+    if (!Number.isFinite(stock) || stock < 0) return acc;
+    if (!Number.isFinite(cost)  || cost  < 0) return acc;
+    return acc + stock * cost;
+  }, 0);
   const isCleanSlate = totalInventoryValue === 0 && orders.length === 0;
 
   const handleAddToPO = (item: any) => {

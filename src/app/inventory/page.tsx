@@ -419,10 +419,38 @@ export default function Inventory() {
   const displayEnd   = pageEnd;
 
   const activeSkuCount = inventoryData.length;
-  const inventoryValue = inventoryData.reduce(
-    (sum, item) => sum + (Number(item.inStock) || 0) * (Number(item.preferredCost ?? item.cost) || 0),
-    0
-  );
+  // ── Inventory Value — use item.cost (per-base-unit cost) ──────────────────
+  // IMPORTANT: Do NOT use preferredCost here.
+  //   preferredCost = purchase_options.unit_price = PACK/CASE price.
+  //   e.g. a case of 24 units at $9.60/unit has unitPrice = $230.40.
+  //   Multiplying inStock (in base units) by the pack price inflates value by the
+  //   pack conversion factor (10x–40x depending on pack size).
+  //   item.cost is always the per-base-unit cost (set via handleEditSave → baseCost).
+  const inventoryValue = inventoryData.reduce((sum: number, item: any) => {
+    const stock = Number(item.inStock);
+    const cost  = Number(item.cost);   // base-unit cost — always correct denominator
+    if (!Number.isFinite(stock) || stock < 0) return sum;
+    if (!Number.isFinite(cost)  || cost  < 0) return sum;
+    return sum + stock * cost;
+  }, 0);
+  // Debug: surface the top contributors so bad data is immediately visible
+  if (process.env.NODE_ENV !== 'production') {
+    const top5 = [...inventoryData]
+      .map((i: any) => ({
+        name: i.name, loc: i.locationId,
+        inStock: Number(i.inStock) || 0,
+        cost: Number(i.cost) || 0,
+        preferredCost: i.preferredCost ?? null,
+        lineValue: (Number(i.inStock) || 0) * (Number(i.cost) || 0),
+      }))
+      .sort((a: any, b: any) => b.lineValue - a.lineValue)
+      .slice(0, 5);
+    console.group('[InventoryValueAudit]');
+    console.log(`Total: $${inventoryValue.toFixed(2)} across ${inventoryData.length} rows`);
+    console.log('Top 5 highest value rows (cost = base unit cost):');
+    console.table(top5);
+    console.groupEnd();
+  }
   const lowStockCount = inventoryData.filter(item => {
     const par = Number(item.parLevel) || 0;
     if (par <= 0) return false;
