@@ -198,12 +198,14 @@ export async function getInventoryMovementReport(
 export interface ProfitRow {
   movement_date: string;
   location_id:   string | null;
+  location_name: string | null;   // NEW (v2 RPC): human-readable location name
   item_name:     string | null;
-  qty:           number;
-  unit_price:    number;
+  qty:           number;           // quantity fulfilled, in packs
+  unit_price:    number;           // pack price (unit_price already includes packQty)
   revenue:       number;
-  making_cost:   number;
-  cogs:          number;
+  making_cost:   number;           // per-base-unit production cost
+  pack_qty:      number;           // NEW (v2 RPC): base units per pack — used for COGS
+  cogs:          number;           // qty × pack_qty × making_cost (fixed in v2)
   profit:        number;
   margin_pct:    number | null;   // null when revenue = 0 (DB returns NULL)
 }
@@ -233,11 +235,13 @@ export async function getFulfillmentProfitReport(
   const rows: ProfitRow[] = (data ?? []).map((r: any): ProfitRow => ({
     movement_date: r.movement_date ?? "",
     location_id:   r.location_id   ?? null,
+    location_name: r.location_name ?? null,     // v2 RPC: may be null for legacy rows
     item_name:     r.item_name     ?? null,
     qty:           Number(r.qty          ?? 0),
     unit_price:    Number(r.unit_price   ?? 0),
     revenue:       Number(r.revenue      ?? 0),
     making_cost:   Number(r.making_cost  ?? 0),
+    pack_qty:      Number(r.pack_qty     ?? 1), // default 1 so old rows stay correct
     cogs:          Number(r.cogs         ?? 0),
     profit:        Number(r.profit       ?? 0),
     margin_pct:    r.margin_pct != null ? Number(r.margin_pct) : null,
