@@ -495,54 +495,60 @@ function HQSaleItemsContent() {
   const outOfStock           = items.filter(i => i.stockStatus === "out_of_stock").length;
 
   if (isLoading) return (
-    <div className="flex items-center justify-center p-16 text-neutral-400 gap-2">
+    <div className="-m-6 flex min-h-[calc(100vh-4rem)] items-center justify-center gap-2 bg-slate-50 p-16 text-slate-400">
       <Loader2 className="h-5 w-5 animate-spin" /> Loading HQ Finished Goods...
     </div>
   );
 
   return (
-    <div className="space-y-6">
+    <div className="-m-6 min-h-[calc(100vh-4rem)] bg-slate-50 p-4 text-slate-900 sm:p-6">
+      <div className="mx-auto max-w-[1440px] space-y-6">
       {/* ── Header ─────────────────────────────────────────────────────── */}
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-        <div>
-          <h2 className="text-2xl font-bold tracking-tight">HQ Finished Goods</h2>
-          <p className="text-neutral-500 text-sm mt-0.5">
-            Manage the catalog that franchise locations requisition from.
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
+      <div className="rounded-3xl border border-emerald-100 bg-gradient-to-br from-white via-emerald-50/70 to-slate-50 p-5 shadow-sm sm:p-7">
+        <div className="flex flex-col justify-between gap-5 lg:flex-row lg:items-start">
+          <div className="max-w-3xl">
+            <p className="text-xs font-bold uppercase tracking-[0.24em] text-emerald-700">STOCK DHARMA</p>
+            <h2 className="mt-3 text-3xl font-semibold tracking-tight text-slate-950 sm:text-5xl">HQ Finished Goods</h2>
+            <p className="mt-3 text-base text-slate-600">
+              Manage the catalog franchise locations requisition from, including pack pricing, recipe costs, stock, and availability.
+            </p>
+          </div>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
           <button
             id="btn-import-sale-items"
             onClick={() => setIsImportOpen(true)}
-            className="flex items-center gap-2 px-4 py-2.5 text-sm font-semibold bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 shadow-sm transition-colors"
+            className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition-colors hover:bg-slate-50"
           >
             <Upload className="h-4 w-4" /> Import CSV
           </button>
           <button
             id="btn-create-sale-item"
             onClick={openCreate}
-            className="flex items-center gap-2 px-5 py-2.5 text-sm font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 shadow-sm transition-colors"
+            className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-emerald-800"
           >
             <Plus className="h-4 w-4" /> New Finished Good
           </button>
         </div>
+        </div>
       </div>
 
       {/* ── Metrics ────────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {[
-          { label: "Total SKUs",       value: items.length,          icon: <Layers className="h-4 w-4" />,          color: "text-neutral-800" },
-          { label: "Active",           value: totalActive,           icon: <CheckCircle2 className="h-4 w-4" />,    color: "text-brand-600" },
-          { label: "Requisitionable",  value: totalRequisitionable,  icon: <PackageCheck className="h-4 w-4" />,    color: "text-success-600" },
-          { label: "Out of Stock",     value: outOfStock,            icon: <AlertCircle className="h-4 w-4" />,     color: "text-danger-600" },
+          { label: "Total SKUs",       value: items.length,          icon: <Layers className="h-5 w-5" />,          color: "text-slate-950" },
+          { label: "Active",           value: totalActive,           icon: <CheckCircle2 className="h-5 w-5" />,    color: "text-emerald-700" },
+          { label: "Requisitionable",  value: totalRequisitionable,  icon: <PackageCheck className="h-5 w-5" />,    color: "text-emerald-700" },
+          { label: "Out of Stock",     value: outOfStock,            icon: <AlertCircle className="h-5 w-5" />,     color: "text-rose-700" },
         ].map((s, i) => (
-          <Card key={i} className="shadow-sm border-neutral-200">
-            <CardContent className="p-4">
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-xs text-neutral-500 font-medium">{s.label}</span>
-                <span className={s.color}>{s.icon}</span>
+          <Card key={i} className="rounded-2xl border-slate-200 bg-white shadow-sm">
+            <CardContent className="p-5">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <span className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">{s.label}</span>
+                  <span className={`mt-3 block text-2xl font-semibold ${s.color}`}>{s.value}</span>
+                </div>
+                <span className="rounded-xl bg-emerald-50 p-2 text-emerald-700">{s.icon}</span>
               </div>
-              <span className={`text-2xl font-bold ${s.color}`}>{s.value}</span>
             </CardContent>
           </Card>
         ))}
@@ -558,8 +564,8 @@ function HQSaleItemsContent() {
       )}
 
       {/* ── Stock value banner ───────────────────────────────────────────── */}
-      <div className="flex items-center gap-3 bg-gradient-to-r from-brand-600 to-brand-800 text-white rounded-xl px-5 py-4 shadow-sm">
-        <DollarSign className="h-5 w-5 opacity-80" />
+      <div className="flex items-center gap-3 rounded-2xl border border-emerald-200 bg-emerald-700 px-5 py-4 text-white shadow-sm">
+        <DollarSign className="h-5 w-5 opacity-90" />
         <div>
           <p className="text-xs font-medium opacity-75 uppercase tracking-wider">HQ Finished Goods Stock Value</p>
           <p className="text-2xl font-bold">
@@ -569,23 +575,27 @@ function HQSaleItemsContent() {
       </div>
 
       {/* ── Table ──────────────────────────────────────────────────────── */}
-      <Card className="shadow-sm border-neutral-200 overflow-hidden">
-        <CardHeader className="flex flex-col sm:flex-row gap-3 items-start sm:items-center pb-4 border-b border-neutral-100 bg-white pt-4 px-4">
-          <div className="relative w-full sm:w-72">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-neutral-400 pointer-events-none" />
+      <Card className="overflow-hidden rounded-2xl border-slate-200 bg-white shadow-sm">
+        <CardHeader className="flex flex-col gap-4 border-b border-slate-200 bg-white px-4 py-5 xl:flex-row xl:items-center">
+          <div className="min-w-0">
+            <h3 className="text-lg font-semibold text-slate-950">Finished Goods Catalog</h3>
+            <p className="mt-1 text-sm text-slate-500">Review pack quantities, live recipe costs, location visibility, and requisition availability.</p>
+          </div>
+          <div className="relative w-full xl:ml-auto xl:w-80">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
               placeholder="Search finished goods…"
               value={search}
               onChange={e => setSearch(e.target.value)}
-              className="pl-9 pr-4 py-1.5 border border-neutral-200 rounded-md text-sm w-full bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
+              className="min-h-11 w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-4 text-sm outline-none ring-emerald-600 transition focus:ring-2"
             />
           </div>
           {/* Category filter — always visible; options come from DB (or CATEGORY_OPTIONS fallback) */}
           <select
             value={filterCategory}
             onChange={e => setFilterCategory(e.target.value)}
-            className="px-3 py-1.5 text-sm border border-neutral-200 rounded-md bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
+            className="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none ring-emerald-600 transition focus:ring-2"
           >
             <option value="All">All categories</option>
             {allCategories.map(c => <option key={c} value={c}>{c}</option>)}
@@ -594,17 +604,17 @@ function HQSaleItemsContent() {
           <select
             value={filterCommissary}
             onChange={e => setFilterCommissary(e.target.value)}
-            className="px-3 py-1.5 text-sm border border-neutral-200 rounded-md bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
+            className="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none ring-emerald-600 transition focus:ring-2"
           >
             <option value="All">All commissaries</option>
             {COMMISSARY_OPTIONS.map(c => <option key={c} value={c}>{c}</option>)}
           </select>
         </CardHeader>
-        <CardContent className="p-0">
+        <CardContent className="overflow-x-auto p-0">
           <Table>
-            <TableHeader className="bg-neutral-50/80 text-xs text-neutral-500 uppercase tracking-wider">
+            <TableHeader className="bg-slate-50 text-xs uppercase tracking-[0.14em] text-slate-500">
               <TableRow>
-                <TableHead className="py-3 px-6">Item / SKU</TableHead>
+                <TableHead className="py-4 px-6">Item / SKU</TableHead>
                 <TableHead className="py-3">Category</TableHead>
                 <TableHead className="py-3">Commissary</TableHead>
                 <TableHead className="py-3">Unit</TableHead>
@@ -623,16 +633,18 @@ function HQSaleItemsContent() {
                 console.log('[FG Row]', item.id, item.sourceCommissary);
                 const linkedRecipe = recipes.find(r => r.id === item.sourceRecipeId);
                 return (
-                  <TableRow key={item.id} className="hover:bg-neutral-50/50 transition-colors">
+                  <TableRow key={item.id} className="border-slate-100 transition-colors hover:bg-emerald-50/30">
                     <TableCell className="px-6 py-4">
                       <div className="flex items-center gap-2">
-                        <Factory className="h-4 w-4 text-neutral-300 shrink-0" />
+                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-500">
+                          <Factory className="h-4 w-4" />
+                        </span>
                         <div>
-                          <p className="font-semibold text-neutral-900 text-sm">{item.name}</p>
-                          <p className="text-xs text-neutral-400 flex items-center gap-1">
+                          <p className="text-sm font-semibold text-slate-950">{item.name}</p>
+                          <p className="flex items-center gap-1 text-xs text-slate-400">
                             {item.id}
                             {linkedRecipe && (
-                              <><ChevronRight className="h-3 w-3" /> <span className="text-brand-500">{linkedRecipe.name}</span></>
+                              <><ChevronRight className="h-3 w-3" /> <span className="text-emerald-700">{linkedRecipe.name}</span></>
                             )}
                           </p>
                         </div>
@@ -664,7 +676,7 @@ function HQSaleItemsContent() {
                           </span>
                         );
                         return lc.makingCost > 0
-                          ? <><span className="font-medium text-neutral-800">${lc.makingCost.toFixed(4)}</span><span className="text-neutral-400">/{item.baseUnit}</span></>
+                          ? <><span className="font-semibold text-slate-900">${lc.makingCost.toFixed(4)}</span><span className="text-slate-400">/{item.baseUnit}</span></>
                           : <span className="text-neutral-300">—</span>;
                       })()}
                     </TableCell>
@@ -676,7 +688,7 @@ function HQSaleItemsContent() {
                           <span className="text-neutral-400 text-xs">—</span>
                         );
                         return (
-                          <span className="font-bold text-success-700 text-sm">
+                          <span className="font-bold text-emerald-700 text-sm">
                             ${lc.effectivePrice.toFixed(4)}
                             <span className="text-neutral-400 font-normal">/{item.baseUnit}</span>
                           </span>
@@ -703,7 +715,7 @@ function HQSaleItemsContent() {
                         }
                         const packPrice = lc.effectivePrice * packQty;
                         return (
-                          <span className="font-bold text-brand-700 text-sm">
+                          <span className="font-bold text-emerald-700 text-sm">
                             ${packPrice.toFixed(2)}
                             <span className="text-neutral-400 font-normal">/pack</span>
                           </span>
@@ -729,13 +741,13 @@ function HQSaleItemsContent() {
                         <button
                           onClick={() => toggleActive(item)}
                           title={item.isActive ? "Deactivate" : "Activate"}
-                          className="p-1.5 rounded-md text-neutral-400 hover:text-brand-600 hover:bg-brand-50 transition-colors"
+                          className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-emerald-50 hover:text-emerald-700"
                         >
-                          {item.isActive ? <ToggleRight className="h-4 w-4 text-brand-500" /> : <ToggleLeft className="h-4 w-4" />}
+                          {item.isActive ? <ToggleRight className="h-4 w-4 text-emerald-700" /> : <ToggleLeft className="h-4 w-4" />}
                         </button>
                         <button
                           onClick={() => openEdit(item)}
-                          className="p-1.5 rounded-md text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100 transition-colors"
+                          className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
                         >
                           <Edit2 className="h-4 w-4" />
                         </button>
@@ -1338,6 +1350,7 @@ function HQSaleItemsContent() {
         existingNames={items.map(i => i.name)}
         onSuccess={fetchData}
       />
+      </div>
     </div>
   );
 }
