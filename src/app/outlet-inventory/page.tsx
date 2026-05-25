@@ -98,12 +98,19 @@ export default function OutletInventoryPage() {
   const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(new Set());
   const [bulkEnabling,    setBulkEnabling]    = useState(false);
 
-  // import state
+  // import state (old excel.ts validation modal — kept for backward compat)
   const [importModalOpen, setImportModalOpen] = useState(false);
   const [importRows,   setImportRows]   = useState<any[]>([]);
   const [validation,   setValidation]   = useState<any>(null);
   const [importing,    setImporting]    = useState(false);
   const [toast,        setToast]        = useState<string | null>(null);
+
+  // ── Stock Import (Phase 2) ────────────────────────────────────────────────
+  // Separate from catalog import. Only updates location_inventory_items fields.
+  const [stockImportOpen,     setStockImportOpen]     = useState(false);
+  const [stockImportMatched,  setStockImportMatched]  = useState<any[]>([]);
+  const [stockImportUnmatched,setStockImportUnmatched]= useState<any[]>([]);
+  const [stockCommitting,     setStockCommitting]     = useState(false);
 
   // ── Location resolution ──────────────────────────────────────────────────
   // activeLoc is the single source of truth for all DB calls.
@@ -472,6 +479,198 @@ export default function OutletInventoryPage() {
   };
 
 
+  // ── Stock Import Phase 2 ─────────────────────────────────────────────────
+  // Parses a MarketMan-style CSV/XLSX and matches rows to outlet_catalog_items
+  // by item_id (if present) or by normalized name+supplier+uom.
+  // Only location_inventory_items fields are written — catalog is never touched.
+  const handleStockImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!activeLoc) {
+      alert("Select a location before importing stock.");
+      e.target.value = "";
+      return;
+    }
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";
+
+    try {
+      // ── Parse file (XLSX or CSV) ────────────────────────────────────────
+      let rawRows: Record<string, any>[];
+      if (file.name.match(/\.csv$/i)) {
+        const text = await file.text();
+        const lines = text.split(/\r?\n/).filter(l => l.trim());
+        if (lines.length < 2) { alert("CSV has no data rows."); return; }
+        const headers = lines[0].split(",").map(h => h.trim().replace(/^"|"$/g, ""));
+        rawRows = lines.slice(1).map(line => {
+          const cols = line.split(",").map(c => c.trim().replace(/^"|"$/g, ""));
+          const row: Record<string, any> = {};
+          headers.forEach((h, i) => { row[h] = cols[i] ?? ""; });
+          return row;
+        });
+      } else {
+        const buf = await file.arrayBuffer();
+        const XLSX = await import("xlsx");
+        const wb = XLSX.read(new Uint8Array(buf), { type: "array" });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        rawRows = XLSX.utils.sheet_to_json(ws, { defval: "" });
+      }
+
+      // ── MarketMan column aliases ─────────────────────────────────────────
+      const STOCK_ALIASES: Record<string, string> = {
+        "Product":               "Name",
+        "Item":                  "Name",
+        "Item Name":             "Name",
+        "Vendor":                "Supplier",
+        "Ordering Unit":         "UOM",
+        "Unit":                  "UOM",
+        "On Hand":               "Current Stock",
+        "Quantity On Hand":      "Current Stock",
+        "Stock":                 "Current Stock",
+        "Count":                 "Physical Count",
+        "Last Count":            "Physical Count",
+        "Min on hand":           "Min",
+        "Par Level":             "Par",
+      };
+
+      const rows = rawRows.map(raw => {
+        const out: Record<string, any> = {};
+        for (const [k, v] of Object.entries(raw)) {
+          const canon = STOCK_ALIASES[k] ?? k;
+          if (!(canon in out)) out[canon] = v;
+        }
+        return out;
+      });
+
+      // ── Build lookup maps from outlet_catalog_items ─────────────────────
+      const norm = (s: any) => String(s ?? "").toLowerCase().trim().replace(/\s+/g, " ");
+
+      // item_id → catalog row
+      const byItemId = new Map<string, OutletCatalogItem>();
+      // normalized "name|supplier|uom" → catalog row
+      const byNSU    = new Map<string, OutletCatalogItem>();
+      // normalized "name|uom" → catalog row (supplier-agnostic fallback)
+      const byNU     = new Map<string, OutletCatalogItem>();
+
+      for (const c of catalog) {
+        byItemId.set(c.itemId, c);
+        const nsu = `${norm(c.name)}|${norm(c.supplier)}|${norm(c.uom)}`;
+        const nu  = `${norm(c.name)}|${norm(c.uom)}`;
+        if (!byNSU.has(nsu)) byNSU.set(nsu, c);
+        if (!byNU.has(nu))   byNU.set(nu, c);
+      }
+
+      // ── Match each row ───────────────────────────────────────────────────
+      const matched:   any[] = [];
+      const unmatched: any[] = [];
+
+      for (const r of rows) {
+        const nameRaw     = String(r["Name"]     ?? "").trim();
+        const supplierRaw = String(r["Supplier"] ?? "").trim();
+        const uomRaw      = String(r["UOM"]      ?? "").trim();
+        const itemIdRaw   = String(r["Item ID"]  ?? "").trim();
+
+        if (!nameRaw && !itemIdRaw) continue; // totally blank row
+
+        // Parse numeric fields — undefined means column absent (don't update)
+        const hasStock = "Current Stock" in r && r["Current Stock"] !== "";
+        const hasCount = "Physical Count" in r && r["Physical Count"] !== "";
+        const hasMin   = "Min"            in r && r["Min"]           !== "";
+        const hasPar   = "Par"            in r && r["Par"]           !== "";
+
+        const parsedStock = hasStock ? parseFloat(String(r["Current Stock"])) : null;
+        const parsedCount = hasCount ? parseFloat(String(r["Physical Count"])) : null;
+        const parsedMin   = hasMin   ? parseFloat(String(r["Min"]))           : null;
+        const parsedPar   = hasPar   ? parseFloat(String(r["Par"]))           : null;
+
+        // Attempt match
+        let catalogRow: OutletCatalogItem | undefined;
+        if (itemIdRaw)                     catalogRow = byItemId.get(itemIdRaw);
+        if (!catalogRow && nameRaw) {
+          const nsu = `${norm(nameRaw)}|${norm(supplierRaw)}|${norm(uomRaw)}`;
+          catalogRow = byNSU.get(nsu);
+        }
+        if (!catalogRow && nameRaw) {
+          const nu = `${norm(nameRaw)}|${norm(uomRaw)}`;
+          catalogRow = byNU.get(nu);
+        }
+        if (!catalogRow && nameRaw) {
+          // last resort: name-only match
+          catalogRow = catalog.find(c => norm(c.name) === norm(nameRaw));
+        }
+
+        if (catalogRow) {
+          matched.push({
+            catalogRow,
+            rawName: nameRaw || catalogRow.name,
+            currentStock: hasStock && !isNaN(parsedStock!) ? parsedStock : null,
+            physicalCount: hasCount && !isNaN(parsedCount!) ? parsedCount : null,
+            minOnHand: hasMin && !isNaN(parsedMin!) ? parsedMin : null,
+            parLevel: hasPar && !isNaN(parsedPar!) ? parsedPar : null,
+          });
+        } else {
+          unmatched.push({ rawName: nameRaw || itemIdRaw, supplierRaw, uomRaw });
+        }
+      }
+
+      setStockImportMatched(matched);
+      setStockImportUnmatched(unmatched);
+      setStockImportOpen(true);
+    } catch (err: any) {
+      alert(`Stock import parse error: ${err?.message ?? err}`);
+    }
+  };
+
+  const commitStockImport = async () => {
+    if (!activeLoc || stockImportMatched.length === 0) return;
+    setStockCommitting(true);
+    const now = new Date().toISOString();
+    let succeeded = 0;
+    let failed = 0;
+    const errors: string[] = [];
+
+    for (const m of stockImportMatched) {
+      const cat: OutletCatalogItem = m.catalogRow;
+      // Find existing outlet row to preserve fields not being updated
+      const existing = outletData.find(o => o.itemId === cat.itemId);
+
+      const payload: Parameters<typeof upsertOutletInventoryRowV2>[0] = {
+        item_id:        cat.itemId,
+        location_id:    activeLoc,
+        // stock fields — use import value if present, else preserve existing
+        current_stock:  m.currentStock  !== null ? m.currentStock  : (existing?.currentStock  ?? 0),
+        physical_count: m.physicalCount !== null ? m.physicalCount : (existing?.physicalCount ?? null),
+        min_on_hand:    m.minOnHand     !== null ? m.minOnHand     : (existing?.minOnHand     ?? 0),
+        par_level:      m.parLevel      !== null ? m.parLevel      : (existing?.parLevel      ?? 0),
+        // preserve outlet-only non-stock fields from existing row
+        local_enabled:  existing?.localEnabled  ?? true,
+        local_notes:    existing?.localNotes    ?? null,
+        local_supplier: existing?.localSupplier ?? null,
+        local_purchase_option: existing?.localPurchaseOption ?? null,
+        local_price:    existing?.localPrice    ?? null,
+        local_product_code: existing?.localProductCode ?? null,
+        last_counted_at: (m.physicalCount !== null || m.currentStock !== null) ? now : (existing?.lastCountedAt ?? null),
+      };
+
+      const res = await upsertOutletInventoryRowV2(payload);
+      if (res.success) { succeeded++; } else {
+        failed++;
+        errors.push(`${cat.name}: ${res.error?.message ?? "error"}`);
+      }
+    }
+
+    setStockCommitting(false);
+    setStockImportOpen(false);
+    setStockImportMatched([]);
+    setStockImportUnmatched([]);
+    if (errors.length > 0) {
+      alert(`Stock import: ${succeeded} saved, ${failed} failed.\n${errors.join("\n")}`);
+    } else {
+      setToast(`Stock import done: ${succeeded} row${succeeded !== 1 ? "s" : ""} updated for ${activeLoc}.`);
+    }
+    await loadAll(activeLoc);
+  };
+
+  // legacy import handlers (kept for backward compat with excel.ts validation)
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -546,10 +745,19 @@ export default function OutletInventoryPage() {
                 <Download className="h-3.5 w-3.5" />
                 <span className="hidden sm:inline">Export</span>
               </button>
-              <label className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50 cursor-pointer" title="Import">
+              <label
+                className={`inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50 cursor-pointer ${!activeLoc ? "opacity-40 cursor-not-allowed" : ""}`}
+                title={activeLoc ? "Import stock levels from MarketMan or CSV/XLSX" : "Select a location first"}
+              >
                 <Upload className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline">Import</span>
-                <input type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleFileChange} />
+                <span className="hidden sm:inline">Import Stock</span>
+                <input
+                  type="file"
+                  accept=".xlsx,.xls,.csv"
+                  className="hidden"
+                  disabled={!activeLoc}
+                  onChange={handleStockImport}
+                />
               </label>
               {/* Apply Physical Count — only shown in Active Items view with pending counts */}
               {viewMode === "active" && countableRows.length > 0 && (
@@ -1062,6 +1270,148 @@ export default function OutletInventoryPage() {
                   {reqSaving ? "Submitting…" : "Submit HQ Requisition"}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Stock Import Preview Modal ─────────────────────────────────────── */}
+      {stockImportOpen && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-white rounded-t-2xl sm:rounded-2xl shadow-2xl w-full sm:max-w-lg max-h-[92vh] flex flex-col">
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-neutral-100 shrink-0">
+              <div className="flex items-center gap-2">
+                <Upload className="h-5 w-5 text-brand-600" />
+                <div>
+                  <h3 className="text-base font-bold text-neutral-900">Import Stock Levels</h3>
+                  <p className="text-xs text-neutral-400 mt-0.5">
+                    Location: <span className="font-semibold text-neutral-700">{locations.find((l: any) => l.id === activeLoc)?.name ?? activeLoc}</span>
+                    {" · "}Catalog items will <strong>not</strong> be modified.
+                  </p>
+                </div>
+              </div>
+              <button onClick={() => { setStockImportOpen(false); setStockImportMatched([]); setStockImportUnmatched([]); }}>
+                <X className="h-5 w-5 text-neutral-400" />
+              </button>
+            </div>
+
+            {/* Summary bar */}
+            <div className="grid grid-cols-3 gap-3 px-6 py-4 border-b border-neutral-100 shrink-0">
+              {[
+                { label: "Matched",   value: stockImportMatched.length,   color: "text-green-700",  bg: "bg-green-50",  border: "border-green-200" },
+                { label: "Unmatched", value: stockImportUnmatched.length,  color: "text-amber-700",  bg: "bg-amber-50",  border: "border-amber-200" },
+                { label: "Will Update", value: stockImportMatched.filter(m => m.currentStock !== null || m.physicalCount !== null).length, color: "text-brand-700", bg: "bg-brand-50", border: "border-brand-200" },
+              ].map(s => (
+                <div key={s.label} className={`rounded-xl border ${s.border} ${s.bg} px-3 py-2.5 text-center`}>
+                  <div className={`text-xl font-bold ${s.color}`}>{s.value}</div>
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-neutral-500 mt-0.5">{s.label}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Scrollable body */}
+            <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+
+              {/* Matched rows */}
+              {stockImportMatched.length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-neutral-500 mb-2">
+                    Matched rows — will update location_inventory_items
+                  </p>
+                  <div className="border border-neutral-200 rounded-xl overflow-hidden">
+                    <div className="overflow-x-auto max-h-52">
+                      <table className="w-full text-xs">
+                        <thead className="bg-neutral-50 text-[10px] uppercase tracking-wider text-neutral-500 border-b border-neutral-200 sticky top-0">
+                          <tr>
+                            <th className="px-3 py-2 text-left font-semibold">Item</th>
+                            <th className="px-3 py-2 text-right font-semibold">Stock</th>
+                            <th className="px-3 py-2 text-right font-semibold">Count</th>
+                            <th className="px-3 py-2 text-right font-semibold">Min</th>
+                            <th className="px-3 py-2 text-right font-semibold">Par</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-neutral-100">
+                          {stockImportMatched.map((m, i) => (
+                            <tr key={i} className="hover:bg-neutral-50/60">
+                              <td className="px-3 py-2 font-medium text-neutral-800 max-w-[160px] truncate">
+                                {m.catalogRow.name}
+                                {m.catalogRow.supplier && (
+                                  <span className="block text-[10px] text-neutral-400 font-normal">{m.catalogRow.supplier}</span>
+                                )}
+                              </td>
+                              <td className="px-3 py-2 text-right tabular-nums">
+                                {m.currentStock !== null
+                                  ? <span className="font-semibold text-green-700">{m.currentStock}</span>
+                                  : <span className="text-neutral-300">—</span>}
+                              </td>
+                              <td className="px-3 py-2 text-right tabular-nums">
+                                {m.physicalCount !== null
+                                  ? <span className="font-semibold text-indigo-700">{m.physicalCount}</span>
+                                  : <span className="text-neutral-300">—</span>}
+                              </td>
+                              <td className="px-3 py-2 text-right tabular-nums text-neutral-600">
+                                {m.minOnHand !== null ? m.minOnHand : <span className="text-neutral-300">—</span>}
+                              </td>
+                              <td className="px-3 py-2 text-right tabular-nums text-neutral-600">
+                                {m.parLevel !== null ? m.parLevel : <span className="text-neutral-300">—</span>}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Unmatched rows */}
+              {stockImportUnmatched.length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-amber-600 mb-2">
+                    Unmatched rows — not in Location Catalog, will be skipped
+                  </p>
+                  <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 max-h-32 overflow-y-auto space-y-1">
+                    {stockImportUnmatched.map((u, i) => (
+                      <div key={i} className="text-xs text-amber-800">
+                        • <span className="font-medium">{u.rawName}</span>
+                        {u.supplierRaw && <span className="text-amber-600"> — {u.supplierRaw}</span>}
+                        {u.uomRaw && <span className="text-amber-500"> ({u.uomRaw})</span>}
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-neutral-400 mt-1">
+                    Add these items to Location Catalog first, then re-import.
+                  </p>
+                </div>
+              )}
+
+              {stockImportMatched.length === 0 && (
+                <div className="flex flex-col items-center gap-2 py-6 text-neutral-400">
+                  <AlertCircle className="h-8 w-8" />
+                  <p className="text-sm font-medium">No rows matched any catalog items.</p>
+                  <p className="text-xs text-center">Check that items exist in the Location Catalog with matching names, suppliers, or UOMs.</p>
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 py-4 border-t border-neutral-100 flex gap-3 shrink-0">
+              <button
+                onClick={() => { setStockImportOpen(false); setStockImportMatched([]); setStockImportUnmatched([]); }}
+                className="flex-1 px-4 py-2.5 text-xs font-semibold border border-neutral-200 rounded-lg hover:bg-neutral-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={commitStockImport}
+                disabled={stockCommitting || stockImportMatched.length === 0}
+                className="flex-1 px-4 py-2.5 text-xs font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {stockCommitting
+                  ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Importing…</>
+                  : <><CheckCircle2 className="h-3.5 w-3.5" /> Update {stockImportMatched.length} Row{stockImportMatched.length !== 1 ? "s" : ""}</>}
+              </button>
             </div>
           </div>
         </div>
