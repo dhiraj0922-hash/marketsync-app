@@ -4060,6 +4060,123 @@ export async function findOutletCatalogItemByNormalized(
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// 19b. ASSIGN CATALOG ITEMS → LOCATIONS
+// ────────────────────────────────────────────────────────────────────────────
+//
+// Creates location_inventory_items rows for one or more (item_id, location_id)
+// pairs so those items appear in Outlet Inventory for the given locations.
+//
+// Rules:
+//   - If a row already exists (UNIQUE item_id + location_id), skip it — never
+//     overwrite current_stock, physical_count, min_on_hand, par_level, or any
+//     local_* override columns.
+//   - Default inserted values: current_stock=0, physical_count=0, min_on_hand=0,
+//     par_level=0, local_enabled=true, local_notes=null.
+//   - Returns a summary: { created, skipped, failed, errors }.
+//   - Does NOT touch inventory_items, hq_sale_items, or any HQ table.
+// ────────────────────────────────────────────────────────────────────────────
+
+export interface AssignCatalogResult {
+  created: number;
+  skipped: number;
+  failed:  number;
+  errors:  string[];
+}
+
+/**
+ * Assign one or more catalog items to one or more locations.
+ *
+ * @param itemIds      Array of outlet_catalog_items.item_id values to assign.
+ * @param locationIds  Array of locations.id values to assign them to.
+ * @returns            Summary of created / skipped / failed rows.
+ */
+export async function assignCatalogItemsToLocations(
+  itemIds:     string[],
+  locationIds: string[],
+): Promise<AssignCatalogResult> {
+  const result: AssignCatalogResult = { created: 0, skipped: 0, failed: 0, errors: [] };
+
+  if (itemIds.length === 0 || locationIds.length === 0) return result;
+
+  // 1. Fetch all existing rows for these item_ids × location_ids in one query.
+  //    This lets us check existence without N×M round trips.
+  const { data: existing, error: fetchErr } = await supabase
+    .from('location_inventory_items')
+    .select('item_id, location_id')
+    .in('item_id',     itemIds)
+    .in('location_id', locationIds);
+
+  if (fetchErr) {
+    console.error('[assignCatalogItemsToLocations] fetch error:', fetchErr);
+    result.failed  = itemIds.length * locationIds.length;
+    result.errors  = [`DB fetch error: ${fetchErr.message}`];
+    return result;
+  }
+
+  // Build a Set of "item_id|location_id" pairs that already exist
+  const existingSet = new Set<string>(
+    (existing ?? []).map(r => `${r.item_id}|${r.location_id}`)
+  );
+
+  // 2. Build the list of rows to insert (only missing pairs)
+  const toInsert: {
+    item_id:        string;
+    location_id:    string;
+    current_stock:  number;
+    physical_count: number;
+    min_on_hand:    number;
+    par_level:      number;
+    local_enabled:  boolean;
+    local_notes:    null;
+    updated_at:     string;
+  }[] = [];
+
+  const now = new Date().toISOString();
+
+  for (const itemId of itemIds) {
+    for (const locationId of locationIds) {
+      const key = `${itemId}|${locationId}`;
+      if (existingSet.has(key)) {
+        result.skipped++;
+      } else {
+        toInsert.push({
+          item_id:        itemId,
+          location_id:    locationId,
+          current_stock:  0,
+          physical_count: 0,
+          min_on_hand:    0,
+          par_level:      0,
+          local_enabled:  true,
+          local_notes:    null,
+          updated_at:     now,
+        });
+      }
+    }
+  }
+
+  if (toInsert.length === 0) return result; // all already existed
+
+  // 3. Insert in chunks of 50 to stay well within Supabase row limits
+  const CHUNK = 50;
+  for (let i = 0; i < toInsert.length; i += CHUNK) {
+    const chunk = toInsert.slice(i, i + CHUNK);
+    const { error: insertErr } = await supabase
+      .from('location_inventory_items')
+      .insert(chunk);
+
+    if (insertErr) {
+      console.error('[assignCatalogItemsToLocations] insert error:', insertErr);
+      result.failed += chunk.length;
+      result.errors.push(`Batch ${Math.floor(i / CHUNK) + 1}: ${insertErr.message}`);
+    } else {
+      result.created += chunk.length;
+    }
+  }
+
+  return result;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // 20. LOCATION PHYSICAL COUNT  (location_inventory_items + location_inventory_count_logs)
 // ────────────────────────────────────────────────────────────────────────────
 //

@@ -6,12 +6,13 @@ import {
   loadOutletCatalog, upsertOutletCatalogItem, deactivateOutletCatalogItem,
   activateOutletCatalogItem, loadSaleItems, bulkUpsertOutletCatalogItems,
   loadSuppliers, findOutletCatalogItemByNormalized,
-  type OutletCatalogItem, type SaleItem,
+  loadLocations, assignCatalogItemsToLocations,
+  type OutletCatalogItem, type SaleItem, type AssignCatalogResult,
 } from "@/lib/storage";
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
 import {
   BookOpen, Plus, Search, Edit2, ToggleLeft, ToggleRight, Upload,
-  Download, CheckCircle2, X, RefreshCw, AlertCircle, Package, Store,
+  Download, CheckCircle2, X, RefreshCw, AlertCircle, Package, Store, MapPin, Loader2,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 
@@ -38,13 +39,14 @@ function LocationCatalogContent() {
   const [catalog, setCatalog] = useState<OutletCatalogItem[]>([]);
   const [saleItems, setSaleItems] = useState<SaleItem[]>([]);
   const [suppliers, setSuppliers] = useState<any[]>([]);
+  const [locations, setLocations] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [srcFilter, setSrcFilter] = useState<"all" | "hq_supplied" | "local_vendor">("all");
   const [toast, setToast] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  // Drawer
+  // Drawer (edit/create)
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editing, setEditing] = useState<OutletCatalogItem | null>(null);
   const [form, setForm] = useState<OutletCatalogItem>(EMPTY_FORM);
@@ -54,17 +56,34 @@ function LocationCatalogContent() {
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState<{ succeeded: number; failed: number; errors: string[] } | null>(null);
 
+  // Assign to locations
+  const [assignDrawerOpen, setAssignDrawerOpen] = useState(false);
+  const [assignItem, setAssignItem] = useState<OutletCatalogItem | null>(null);
+  const [assignSelectedLocs, setAssignSelectedLocs] = useState<Set<string>>(new Set());
+  const [assigning, setAssigning] = useState(false);
+  const [assignResult, setAssignResult] = useState<AssignCatalogResult | null>(null);
+
+  // Bulk select
+  const [bulkSelected, setBulkSelected] = useState<Set<string>>(new Set());
+  const [bulkAssigning, setBulkAssigning] = useState(false);
+  const [bulkAssignResult, setBulkAssignResult] = useState<AssignCatalogResult | null>(null);
+
+  // Active non-HQ locations
+  const activeLocations = locations.filter(l => l.status === 'active' && l.type !== 'hq');
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [cat, si, supps] = await Promise.all([
+      const [cat, si, supps, locs] = await Promise.all([
         loadOutletCatalog(true),
         loadSaleItems(),
         loadSuppliers(),
+        loadLocations(),
       ]);
       setCatalog(Array.isArray(cat) ? cat : []);
       setSaleItems(Array.isArray(si) ? si : []);
       setSuppliers(Array.isArray(supps) ? supps : []);
+      setLocations(Array.isArray(locs) ? locs : []);
     } finally { setLoading(false); }
   }, []);
 
@@ -133,6 +152,41 @@ function LocationCatalogContent() {
       }
     }
     await load();
+  };
+
+  // ── Assign to all locations (single item from row button) ──────────────────
+  const openAssignDrawer = (item: OutletCatalogItem) => {
+    setAssignItem(item);
+    setAssignSelectedLocs(new Set(activeLocations.map((l: any) => l.id)));
+    setAssignResult(null);
+    setAssignDrawerOpen(true);
+  };
+
+  const handleAssignToSelected = async () => {
+    if (!assignItem || assignSelectedLocs.size === 0) return;
+    setAssigning(true);
+    setAssignResult(null);
+    const res = await assignCatalogItemsToLocations(
+      [assignItem.itemId],
+      Array.from(assignSelectedLocs),
+    );
+    setAssigning(false);
+    setAssignResult(res);
+    if (res.created > 0) setToast(`"${assignItem.name}" added to ${res.created} location(s).`);
+  };
+
+  // ── Bulk assign selected catalog items → all active locations ─────────────
+  const handleBulkAssignAll = async () => {
+    if (bulkSelected.size === 0 || activeLocations.length === 0) return;
+    setBulkAssigning(true);
+    setBulkAssignResult(null);
+    const res = await assignCatalogItemsToLocations(
+      Array.from(bulkSelected),
+      activeLocations.map((l: any) => l.id),
+    );
+    setBulkAssigning(false);
+    setBulkAssignResult(res);
+    if (res.created > 0) setToast(`${res.created} row(s) created across ${activeLocations.length} location(s).`);
   };
 
   // Seed HQ supplied item from hq_sale_items
@@ -388,6 +442,16 @@ function LocationCatalogContent() {
             <table className="w-full text-sm">
               <thead className="text-[10px] uppercase tracking-wider text-neutral-500 bg-neutral-50 border-b border-neutral-200">
                 <tr>
+                  <th className="px-3 py-3 text-left font-semibold">
+                    <input type="checkbox"
+                      checked={filtered.length > 0 && filtered.every(i => bulkSelected.has(i.itemId))}
+                      onChange={e => {
+                        if (e.target.checked) setBulkSelected(new Set(filtered.map(i => i.itemId)));
+                        else setBulkSelected(new Set());
+                      }}
+                      className="rounded border-neutral-300 text-brand-600"
+                    />
+                  </th>
                   <th className="px-4 py-3 text-left font-semibold">Item</th>
                   <th className="px-3 py-3 text-left font-semibold">Source</th>
                   <th className="px-3 py-3 text-left font-semibold">Category</th>
@@ -406,13 +470,24 @@ function LocationCatalogContent() {
                   </td></tr>
                 ) : filtered.map(item => (
                   <tr key={item.itemId} className={`hover:bg-neutral-50/30 transition-colors ${!item.isActive ? "opacity-60 bg-neutral-50/40" : ""}`}>
+                    <td className="px-3 py-2.5">
+                      <input type="checkbox"
+                        checked={bulkSelected.has(item.itemId)}
+                        onChange={e => {
+                          setBulkSelected(prev => {
+                            const n = new Set(prev);
+                            if (e.target.checked) n.add(item.itemId); else n.delete(item.itemId);
+                            return n;
+                          });
+                        }}
+                        className="rounded border-neutral-300 text-brand-600"
+                      />
+                    </td>
                     <td className="px-4 py-2.5">
                       <div className="flex items-center gap-2">
                         <span className="font-semibold text-neutral-900 text-xs">{item.name}</span>
                         {!item.isActive && (
-                          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-neutral-200 text-neutral-600 border border-neutral-300">
-                            Inactive
-                          </span>
+                          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-neutral-200 text-neutral-600 border border-neutral-300">Inactive</span>
                         )}
                       </div>
                       <div className="text-[9px] text-neutral-400 font-mono">{item.itemId}</div>
@@ -430,15 +505,14 @@ function LocationCatalogContent() {
                     </td>
                     <td className="px-4 py-2.5 text-right">
                       <div className="flex items-center justify-end gap-1.5">
+                        <button onClick={() => openAssignDrawer(item)} className="p-1.5 rounded text-neutral-400 hover:text-brand-700 hover:bg-brand-50" title="Add to Locations">
+                          <MapPin className="h-3.5 w-3.5" />
+                        </button>
                         <button onClick={() => openEdit(item)} className="p-1.5 rounded text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100" title="Edit">
                           <Edit2 className="h-3.5 w-3.5" />
                         </button>
-                        <button onClick={() => handleToggleActive(item)} className="p-1.5 rounded text-neutral-400 hover:bg-neutral-100 animate-none" title={item.isActive ? "Deactivate" : "Activate"}>
-                          {item.isActive ? (
-                            <ToggleRight className="h-4 w-4 text-green-500" />
-                          ) : (
-                            <ToggleLeft className="h-4 w-4 text-neutral-400" />
-                          )}
+                        <button onClick={() => handleToggleActive(item)} className="p-1.5 rounded text-neutral-400 hover:bg-neutral-100" title={item.isActive ? "Deactivate" : "Activate"}>
+                          {item.isActive ? <ToggleRight className="h-4 w-4 text-green-500" /> : <ToggleLeft className="h-4 w-4 text-neutral-400" />}
                         </button>
                       </div>
                     </td>
@@ -450,7 +524,121 @@ function LocationCatalogContent() {
         </div>
       )}
 
-      {/* Drawer */}
+      {/* Bulk action toolbar */}
+      {bulkSelected.size > 0 && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 bg-neutral-900 text-white rounded-xl px-5 py-3 shadow-2xl text-sm">
+          <span className="font-semibold">{bulkSelected.size} item{bulkSelected.size !== 1 ? 's' : ''} selected</span>
+          <button
+            onClick={handleBulkAssignAll}
+            disabled={bulkAssigning || activeLocations.length === 0}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-brand-600 hover:bg-brand-700 rounded-lg disabled:opacity-50"
+          >
+            {bulkAssigning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <MapPin className="h-3.5 w-3.5" />}
+            Add Selected to All Locations
+          </button>
+          {bulkAssignResult && (
+            <span className="text-xs text-neutral-300">
+              ✓ {bulkAssignResult.created} created · {bulkAssignResult.skipped} skipped
+              {bulkAssignResult.failed > 0 && <span className="text-red-400"> · {bulkAssignResult.failed} failed</span>}
+            </span>
+          )}
+          <button onClick={() => { setBulkSelected(new Set()); setBulkAssignResult(null); }} className="ml-1 text-neutral-400 hover:text-white">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Assign to Locations Drawer */}
+      {assignDrawerOpen && assignItem && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex justify-end">
+          <div className="bg-white w-full sm:max-w-md h-full overflow-y-auto shadow-2xl flex flex-col">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-neutral-100">
+              <div>
+                <h3 className="text-base font-bold text-neutral-900">Location Availability</h3>
+                <p className="text-xs text-neutral-400 mt-0.5 font-mono truncate">{assignItem.name}</p>
+              </div>
+              <button onClick={() => { setAssignDrawerOpen(false); setAssignResult(null); }}>
+                <X className="h-5 w-5 text-neutral-400" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
+              <p className="text-xs text-neutral-500">
+                Select locations to add <strong>{assignItem.name}</strong> to their Outlet Inventory.
+                Existing rows are never overwritten.
+              </p>
+
+              {/* Select / Deselect all */}
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-neutral-600 uppercase tracking-wider">Active Locations ({activeLocations.length})</span>
+                <div className="flex gap-2">
+                  <button onClick={() => setAssignSelectedLocs(new Set(activeLocations.map((l: any) => l.id)))}
+                    className="text-[10px] font-semibold text-brand-600 hover:underline">All</button>
+                  <button onClick={() => setAssignSelectedLocs(new Set())}
+                    className="text-[10px] font-semibold text-neutral-500 hover:underline">None</button>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                {activeLocations.map((loc: any) => (
+                  <label key={loc.id} className="flex items-center gap-3 p-2.5 rounded-lg border border-neutral-200 hover:bg-neutral-50 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={assignSelectedLocs.has(loc.id)}
+                      onChange={e => {
+                        setAssignSelectedLocs(prev => {
+                          const n = new Set(prev);
+                          if (e.target.checked) n.add(loc.id); else n.delete(loc.id);
+                          return n;
+                        });
+                      }}
+                      className="rounded border-neutral-300 text-brand-600"
+                    />
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-neutral-800 truncate">{loc.name}</p>
+                      <p className="text-[10px] text-neutral-400 font-mono">{loc.id}</p>
+                    </div>
+                  </label>
+                ))}
+                {activeLocations.length === 0 && (
+                  <p className="text-xs text-neutral-400 text-center py-4">No active non-HQ locations found.</p>
+                )}
+              </div>
+
+              {/* Result */}
+              {assignResult && (
+                <div className={`rounded-lg px-4 py-3 text-xs border ${
+                  assignResult.failed > 0 ? 'bg-amber-50 border-amber-200 text-amber-800' : 'bg-green-50 border-green-200 text-green-800'
+                }`}>
+                  <p className="font-semibold mb-1">Result</p>
+                  <p>✓ Created: <strong>{assignResult.created}</strong></p>
+                  <p>↷ Skipped (already existed): <strong>{assignResult.skipped}</strong></p>
+                  {assignResult.failed > 0 && <p className="text-red-600">✗ Failed: <strong>{assignResult.failed}</strong></p>}
+                  {assignResult.errors.map((e, i) => <p key={i} className="text-red-600 mt-0.5 break-all">• {e}</p>)}
+                </div>
+              )}
+            </div>
+
+            <div className="px-6 py-4 border-t border-neutral-100 space-y-2">
+              <button
+                onClick={handleAssignToSelected}
+                disabled={assigning || assignSelectedLocs.size === 0}
+                className="w-full py-2.5 text-xs font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {assigning ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Assigning…</> : <><MapPin className="h-3.5 w-3.5" /> Add to {assignSelectedLocs.size} Location{assignSelectedLocs.size !== 1 ? 's' : ''}</>}
+              </button>
+              <button
+                onClick={() => { setAssignDrawerOpen(false); setAssignResult(null); }}
+                className="w-full py-2.5 text-xs font-semibold border border-neutral-200 rounded-lg hover:bg-neutral-50"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit / Create Drawer */}
       {drawerOpen && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex justify-end">
           <div className="bg-white w-full sm:max-w-md h-full overflow-y-auto shadow-2xl flex flex-col">
