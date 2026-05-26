@@ -94,7 +94,7 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
       <div className="flex items-center justify-between h-14 sm:h-16 border-b border-neutral-200 px-5">
         <div className="flex items-center gap-2 font-bold text-xl text-neutral-900">
           <ChefHat className="h-6 w-6 text-brand-600 shrink-0" />
-          <span>MarketSync</span>
+          <span>STOCK DHARMA</span>
         </div>
         {/* Close button — mobile only */}
         <button
