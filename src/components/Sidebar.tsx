@@ -31,6 +31,7 @@ import {
   MapPin,
   Database,
   BookOpen,
+  ReceiptText,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -56,6 +57,7 @@ const navigation: NavItem[] = [
   { name: "Finished Goods",   href: "/hq-sale-items",  icon: PackageCheck,   hqOnly: true },
   { name: "FG Count",         href: "/fg-count",       icon: ClipboardCheck, hqOnly: true },
   { name: "Production",       href: "/finished-goods", icon: Factory,        hqOnly: true },
+  { name: "Invoices",         href: "/invoices",       icon: ReceiptText,    hqOnly: true },
   { name: "Recipes",          href: "/recipes",        icon: ChefHat,        hqOnly: true },
   { name: "Reports",          href: "/reports",        icon: BarChart4,      hqOnly: true },
   { name: "Users",            href: "/users",          icon: Users,          hqOnly: true },
