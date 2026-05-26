@@ -43,7 +43,9 @@ import {
   updateRequisitionItemFulfilled,
   getHQAvailabilityLabel,
   sendHqRequisitionNotification,
+  loadOutletCatalog,
   type SaleItem,
+  type OutletCatalogItem,
 } from "@/lib/storage";
 import {
   getCurrentUserProfile,
@@ -55,9 +57,12 @@ import {
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
 interface LineItemDraft {
-  // One of itemId (raw mode) or finishedGoodId (FG mode) will be set
-  itemId:            string | null;
-  finishedGoodId:    string | null;
+  // Exactly one of the three FKs will be set:
+  itemId:            string | null;  // inventory_items.id (HQ raw mode)
+  finishedGoodId:    string | null;  // hq_sale_items.id  (HQ FG mode)
+  catalogItemId:     string | null;  // outlet_catalog_items.item_id (local vendor)
+  sourceType:        'hq_supplied' | 'local_vendor';
+  supplierSnapshot:  string | null;  // snapshot at selection time
   itemName:          string;         // snapshot: captured at selection time
   unit:              string;         // snapshot: captured at selection time
   packQty:           number;         // how many base units per pack; 1 for single-unit items
@@ -184,12 +189,25 @@ function LocationManagerView({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [submitNotice, setSubmitNotice] = useState<{ type: "success" | "warning"; message: string } | null>(null);
   const [draftNotice, setDraftNotice] = useState<string | null>(null);
+  // Local vendor catalog items (from outlet_catalog_items)
+  const [localCatalogItems, setLocalCatalogItems] = useState<OutletCatalogItem[]>([]);
 
   const fetchReqs = useCallback(async () => {
     setIsLoading(true);
     try {
-      const rows = await loadRequisitions();
+      const [rows, localCat] = await Promise.all([
+        loadRequisitions(),
+        loadOutletCatalog(false), // active items only
+      ]);
       setRequisitions(Array.isArray(rows) ? rows : []);
+      setLocalCatalogItems(
+        (Array.isArray(localCat) ? localCat : [])
+          .filter((c: OutletCatalogItem) =>
+            c.isActive &&
+            c.orderingEnabled &&
+            c.sourceType === 'local_vendor'
+          )
+      );
     } finally {
       setIsLoading(false);
     }
@@ -220,8 +238,10 @@ function LocationManagerView({
   });
 
   const catalogItems = useMemo(() => {
+    // ── HQ items (FG mode or raw mode) ─────────────────────────────────────
+    let hqItems: any[] = [];
     if (fgMode) {
-      return saleItems
+      hqItems = saleItems
         .filter(s => s.isActive && s.isRequisitionable)
         .map(s => {
           const packQty = s.packQty && s.packQty > 0 ? s.packQty : 1;
@@ -236,28 +256,48 @@ function LocationManagerView({
             supplier: s.sourceCommissary || "Commissary HQ",
             storage: s.sourceCommissary || "Commissary HQ",
             status,
+            sourceType: 'hq_supplied' as const,
             added: lineItems.some(li => li.finishedGoodId === s.id),
           };
         });
+    } else {
+      hqItems = inventoryItems.map(i => {
+        const stock = Number(i.inStock ?? i.instock ?? i.quantity ?? 0);
+        const par = Number(i.parLevel ?? i.minStock ?? i.reorderPoint ?? 0);
+        return {
+          id: i.id,
+          name: i.name,
+          category: i.category || i.itemType || "Inventory",
+          unit: i.unit || i.baseUnit || "unit",
+          hqStock: stock,
+          cost: Number(i.cost ?? i.unitCost ?? 0),
+          supplier: i.supplierName || i.supplier || "Commissary HQ",
+          storage: i.storage || i.storageLocation || i.location || "HQ Storage",
+          status: stock <= 0 ? "out_of_stock" : par > 0 && stock <= par ? "low_stock" : "available",
+          sourceType: 'hq_supplied' as const,
+          added: lineItems.some(li => li.itemId === i.id),
+        };
+      });
     }
 
-    return inventoryItems.map(i => {
-      const stock = Number(i.inStock ?? i.instock ?? i.quantity ?? 0);
-      const par = Number(i.parLevel ?? i.minStock ?? i.reorderPoint ?? 0);
-      return {
-        id: i.id,
-        name: i.name,
-        category: i.category || i.itemType || "Inventory",
-        unit: i.unit || i.baseUnit || "unit",
-        hqStock: stock,
-        cost: Number(i.cost ?? i.unitCost ?? 0),
-        supplier: i.supplierName || i.supplier || "Commissary HQ",
-        storage: i.storage || i.storageLocation || i.location || "HQ Storage",
-        status: stock <= 0 ? "out_of_stock" : par > 0 && stock <= par ? "low_stock" : "available",
-        added: lineItems.some(li => li.itemId === i.id),
-      };
-    });
-  }, [fgMode, inventoryItems, lineItems, saleItems]);
+    // ── Local vendor items (outlet_catalog_items) ────────────────────────
+    const localItems = localCatalogItems.map(c => ({
+      id: c.itemId,
+      name: c.name,
+      category: c.category || c.type || "Local Vendor",
+      unit: c.uom || "unit",
+      hqStock: null, // local vendor items have no HQ stock
+      cost: c.price,
+      supplier: c.supplier || "Unassigned Supplier",
+      storage: c.supplier || "Local Vendor",
+      status: "available" as const,
+      sourceType: 'local_vendor' as const,
+      packQty: c.packQty,
+      added: lineItems.some(li => li.catalogItemId === c.itemId),
+    }));
+
+    return [...hqItems, ...localItems];
+  }, [fgMode, inventoryItems, lineItems, saleItems, localCatalogItems]);
 
   const categoryOptions = useMemo(() => Array.from(new Set(catalogItems.map(i => i.category))).sort(), [catalogItems]);
   const supplierOptions = useMemo(() => Array.from(new Set(catalogItems.map(i => i.supplier))).sort(), [catalogItems]);
@@ -281,6 +321,31 @@ function LocationManagerView({
     if (!itemId) return;
     const quantity = Math.max(1, Number(catalogQtyById[itemId] ?? 1));
 
+    // ── Local vendor path ──────────────────────────────────────────────────
+    const localItem = localCatalogItems.find(c => c.itemId === itemId);
+    if (localItem) {
+      if (lineItems.some(li => li.catalogItemId === localItem.itemId)) return; // already added
+      const packQty = localItem.packQty > 0 ? localItem.packQty : 1;
+      setLineItems(prev => [
+        ...prev,
+        {
+          itemId:            null,
+          finishedGoodId:    null,
+          catalogItemId:     localItem.itemId,
+          sourceType:        'local_vendor',
+          supplierSnapshot:  localItem.supplier ?? null,
+          itemName:          localItem.name,
+          unit:              localItem.uom || 'unit',
+          packQty,
+          unitPrice:         localItem.price,
+          quantityRequested: quantity,
+          sourceCommissary:  localItem.supplier || 'Local Vendor',
+        },
+      ]);
+      return;
+    }
+
+    // ── HQ FG path ───────────────────────────────────────────────────
     if (fgMode) {
       const saleItem = saleItems.find(s => s.id === itemId);
       if (!saleItem) return;
@@ -292,15 +357,19 @@ function LocationManagerView({
         {
           itemId:            null,
           finishedGoodId:    saleItem.id,
-          itemName:          saleItem.name,               // snapshot
-          unit:              saleItem.baseUnit,            // snapshot
-          packQty,                                         // snapshot: units-per-pack
-          unitPrice:         packPrice,                    // pack price captured at selection time
-          quantityRequested: quantity,                     // qty = number of packs
-          sourceCommissary:  saleItem.sourceCommissary,   // commissary snapshot
+          catalogItemId:     null,
+          sourceType:        'hq_supplied',
+          supplierSnapshot:  saleItem.sourceCommissary || 'Commissary HQ',
+          itemName:          saleItem.name,
+          unit:              saleItem.baseUnit,
+          packQty,
+          unitPrice:         packPrice,
+          quantityRequested: quantity,
+          sourceCommissary:  saleItem.sourceCommissary,
         },
       ]);
     } else {
+      // ── HQ raw inventory path ───────────────────────────────────────
       if (lineItems.some(li => li.itemId === itemId)) return;
       const inv = inventoryItems.find(i => i.id === itemId);
       if (!inv) return;
@@ -309,23 +378,26 @@ function LocationManagerView({
         {
           itemId:            inv.id,
           finishedGoodId:    null,
+          catalogItemId:     null,
+          sourceType:        'hq_supplied',
+          supplierSnapshot:  inv.supplierName || inv.supplier || 'Commissary HQ',
           itemName:          inv.name,
           unit:              inv.unit || inv.baseUnit || "",
-          packQty:           1,                           // raw items always 1 unit
+          packQty:           1,
           unitPrice:         Number(inv.cost ?? 0),
           quantityRequested: quantity,
-          sourceCommissary:  "Commissary HQ",   // raw items always route to HQ
+          sourceCommissary:  "Commissary HQ",
         },
       ]);
     }
   };
 
   const removeLineItem = (id: string) =>
-    setLineItems(prev => prev.filter(li => (li.finishedGoodId ?? li.itemId) !== id));
+    setLineItems(prev => prev.filter(li => (li.catalogItemId ?? li.finishedGoodId ?? li.itemId) !== id));
 
   const updateQty = (id: string, qty: number) =>
     setLineItems(prev =>
-      prev.map(li => (li.finishedGoodId ?? li.itemId) === id ? { ...li, quantityRequested: Math.max(0, qty) } : li)
+      prev.map(li => (li.catalogItemId ?? li.finishedGoodId ?? li.itemId) === id ? { ...li, quantityRequested: Math.max(0, qty) } : li)
     );
 
   const showSubmitNotice = (type: "success" | "warning", message: string) => {
@@ -359,12 +431,15 @@ function LocationManagerView({
           date:        new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
         },
         lineItems.map(li => ({
-          // FG-mode: set finished_good_id; raw-mode: set item_id
-          item_id:                     li.finishedGoodId ? null     : li.itemId,
+          item_id:                     li.catalogItemId ? null : (li.finishedGoodId ? null : li.itemId),
           finished_good_id:            li.finishedGoodId ?? null,
+          catalog_item_id:             li.catalogItemId ?? null,
+          source_type:                 li.sourceType,
+          supplier_snapshot:           li.supplierSnapshot ?? null,
+          pack_qty_snapshot:           li.packQty ?? 1,
           item_name_snapshot:          li.itemName,
           unit_snapshot:               li.unit,
-          source_commissary_snapshot:  li.sourceCommissary ?? "Commissary HQ",
+          source_commissary_snapshot:  li.sourceType === 'local_vendor' ? null : (li.sourceCommissary ?? "Commissary HQ"),
           quantity_requested:          li.quantityRequested,
           unit_price:                  li.unitPrice,
           line_total:                  parseFloat((li.quantityRequested * li.unitPrice).toFixed(2)),
@@ -508,7 +583,7 @@ function LocationManagerView({
                 <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
                   <div>
                     <h2 className="text-lg font-semibold text-slate-950">Catalog</h2>
-                    <p className="mt-1 text-sm text-slate-500">Choose items from HQ inventory and add them to this requisition.</p>
+                    <p className="mt-1 text-sm text-slate-500">Order from HQ Finished Goods or Local Vendor suppliers.</p>
                   </div>
                   <div className="flex flex-col gap-2 sm:flex-row">
                     <div className="relative min-w-0 sm:w-72">
@@ -546,9 +621,10 @@ function LocationManagerView({
                   <TableHeader className="bg-slate-50 text-xs uppercase tracking-[0.14em] text-slate-500">
                     <TableRow>
                       <TableHead className="px-5 py-3">Item Name</TableHead>
+                      <TableHead className="py-3">Source</TableHead>
                       <TableHead className="py-3">Category</TableHead>
                       <TableHead className="py-3">Unit</TableHead>
-                      <TableHead className="py-3">HQ Stock</TableHead>
+                      <TableHead className="py-3">Supplier</TableHead>
                       <TableHead className="py-3">Cost</TableHead>
                       <TableHead className="py-3">Quantity</TableHead>
                       <TableHead className="py-3 text-right">Action</TableHead>
@@ -557,18 +633,25 @@ function LocationManagerView({
                   <TableBody>
                     {visibleCatalogItems.map(item => {
                       const qty = catalogQtyById[item.id] ?? 1;
+                      const isLocal = (item as any).sourceType === 'local_vendor';
                       return (
                         <TableRow key={item.id} className="border-slate-100 hover:bg-emerald-50/30">
                           <TableCell className="px-5 py-4">
                             <div className="font-semibold text-slate-950">{item.name}</div>
                             <div className="mt-1 flex flex-wrap gap-1.5">
-                              {renderStockBadge(item.status)}
+                              {!isLocal && renderStockBadge(item.status)}
                               {item.added && <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-600">Added</span>}
                             </div>
                           </TableCell>
+                          <TableCell className="py-4">
+                            {isLocal
+                              ? <span className="inline-flex rounded-full border border-teal-200 bg-teal-50 px-2 py-0.5 text-xs font-semibold text-teal-700">Local Vendor</span>
+                              : <span className="inline-flex rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-xs font-semibold text-violet-700">HQ Supplied</span>
+                            }
+                          </TableCell>
                           <TableCell className="py-4 text-sm text-slate-600">{item.category}</TableCell>
                           <TableCell className="py-4 text-sm text-slate-600">{item.unit}</TableCell>
-                          <TableCell className="py-4 text-sm font-semibold text-slate-800">{item.hqStock}</TableCell>
+                          <TableCell className="py-4 text-sm text-slate-600">{item.supplier || "—"}</TableCell>
                           <TableCell className="py-4 text-sm font-semibold text-slate-800">{item.cost > 0 ? `$${item.cost.toFixed(2)}` : "-"}</TableCell>
                           <TableCell className="py-4">
                             <input
@@ -599,17 +682,25 @@ function LocationManagerView({
               <div className="grid gap-3 p-4 md:hidden">
                 {visibleCatalogItems.map(item => {
                   const qty = catalogQtyById[item.id] ?? 1;
+                  const isLocal = (item as any).sourceType === 'local_vendor';
                   return (
                     <div key={item.id} className="rounded-xl border border-slate-200 bg-white p-4">
                       <div className="flex items-start justify-between gap-3">
                         <div>
                           <h3 className="font-semibold text-slate-950">{item.name}</h3>
                           <p className="mt-1 text-sm text-slate-500">{item.category} · {item.unit}</p>
+                          {item.supplier && <p className="mt-0.5 text-xs text-slate-400">{item.supplier}</p>}
                         </div>
-                        {renderStockBadge(item.status)}
+                        {isLocal
+                          ? <span className="inline-flex rounded-full border border-teal-200 bg-teal-50 px-2 py-0.5 text-xs font-semibold text-teal-700 shrink-0">Local Vendor</span>
+                          : renderStockBadge(item.status)
+                        }
                       </div>
                       <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
-                        <div><span className="text-slate-500">HQ Stock</span><p className="font-semibold text-slate-900">{item.hqStock}</p></div>
+                        {isLocal
+                          ? <div><span className="text-slate-500">Supplier</span><p className="font-semibold text-slate-900">{item.supplier || "—"}</p></div>
+                          : <div><span className="text-slate-500">HQ Stock</span><p className="font-semibold text-slate-900">{item.hqStock}</p></div>
+                        }
                         <div><span className="text-slate-500">Cost</span><p className="font-semibold text-slate-900">{item.cost > 0 ? `$${item.cost.toFixed(2)}` : "-"}</p></div>
                       </div>
                       <div className="mt-4 flex gap-2">
@@ -724,13 +815,23 @@ function LocationManagerView({
                 ) : (
                   <div className="space-y-3">
                     {lineItems.map(li => {
-                      const id = li.finishedGoodId ?? li.itemId ?? "";
+                      const id = li.catalogItemId ?? li.finishedGoodId ?? li.itemId ?? "";
+                      const isLocal = li.sourceType === 'local_vendor';
                       return (
-                        <div key={id} className="rounded-xl border border-slate-200 bg-white p-3">
+                        <div key={id} className={`rounded-xl border p-3 ${isLocal ? 'border-teal-200 bg-teal-50/30' : 'border-slate-200 bg-white'}`}>
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
-                              <h3 className="truncate text-sm font-semibold text-slate-950">{li.itemName}</h3>
-                              <p className="mt-1 text-xs text-slate-500">{li.unit} · ${li.unitPrice.toFixed(2)} each</p>
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <h3 className="truncate text-sm font-semibold text-slate-950">{li.itemName}</h3>
+                                {isLocal
+                                  ? <span className="inline-flex rounded-full border border-teal-200 bg-teal-100 px-1.5 py-0.5 text-[10px] font-bold text-teal-700">LOCAL</span>
+                                  : <span className="inline-flex rounded-full border border-violet-200 bg-violet-100 px-1.5 py-0.5 text-[10px] font-bold text-violet-700">HQ</span>
+                                }
+                              </div>
+                              <p className="mt-1 text-xs text-slate-500">
+                                {li.unit} · ${li.unitPrice.toFixed(2)} each
+                                {li.supplierSnapshot && <span className="ml-1 text-slate-400">· {li.supplierSnapshot}</span>}
+                              </p>
                             </div>
                             <button type="button" onClick={() => removeLineItem(id)} className="rounded-lg p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600" aria-label="Remove item">
                               <X className="h-4 w-4" />

@@ -2514,13 +2514,19 @@ export async function saveNewRequisition(
     date: string;
   },
   lineItems: {
-    item_id?:            string | null;
-    finished_good_id?:   string | null;
-    item_name_snapshot?: string | null;
-    unit_snapshot?:      string | null;
-    quantity_requested:  number;
-    unit_price:          number;
-    line_total:          number;
+    item_id?:             string | null;
+    finished_good_id?:    string | null;
+    /** FK → outlet_catalog_items.item_id (local vendor orders) */
+    catalog_item_id?:     string | null;
+    /** 'hq_supplied' | 'local_vendor' */
+    source_type?:         string | null;
+    supplier_snapshot?:   string | null;
+    pack_qty_snapshot?:   number | null;
+    item_name_snapshot?:  string | null;
+    unit_snapshot?:       string | null;
+    quantity_requested:   number;
+    unit_price:           number;
+    line_total:           number;
   }[]
 ): Promise<{ success: boolean; error?: any }> {
 
@@ -2531,12 +2537,18 @@ export async function saveNewRequisition(
     return { success: false, error: { message: "Cannot save a requisition with no line items." } };
   }
 
-  const nullFkRows = lineItems.filter(li => !li.item_id && !li.finished_good_id);
+  // A valid line must have at least one FK:
+  //   item_id        → inventory_items (HQ raw mode)
+  //   finished_good_id → hq_sale_items (HQ FG mode)
+  //   catalog_item_id  → outlet_catalog_items (local vendor mode)
+  const nullFkRows = lineItems.filter(li =>
+    !li.item_id && !li.finished_good_id && !li.catalog_item_id
+  );
   if (nullFkRows.length > 0) {
-    console.error("[saveNewRequisition] pre-flight: rows missing both FKs:", nullFkRows);
+    console.error("[saveNewRequisition] pre-flight: rows missing all FKs:", nullFkRows);
     return {
       success: false,
-      error: { message: `${nullFkRows.length} line item(s) have no item_id or finished_good_id. Check the item picker.` },
+      error: { message: `${nullFkRows.length} line item(s) have no item_id, finished_good_id, or catalog_item_id. Check the item picker.` },
     };
   }
 
@@ -2588,6 +2600,10 @@ export async function saveNewRequisition(
       requisition_id:              confirmedId,
       item_id:                     li.item_id            ?? null,
       finished_good_id:            li.finished_good_id   ?? null,
+      catalog_item_id:             li.catalog_item_id    ?? null,
+      source_type:                 li.source_type        ?? 'hq_supplied',
+      supplier_snapshot:           li.supplier_snapshot  ?? null,
+      pack_qty_snapshot:           li.pack_qty_snapshot  ?? 1,
       item_name_snapshot:          li.item_name_snapshot ?? null,
       unit_snapshot:               li.unit_snapshot      ?? null,
       source_commissary_snapshot:  (li as any).source_commissary_snapshot ?? null,
@@ -2597,7 +2613,7 @@ export async function saveNewRequisition(
       quantity_approved:           null,
       quantity_fulfilled:          null,
     };
-    console.log(`[saveNewRequisition] row[${idx}] item_id=${row.item_id} fg_id=${row.finished_good_id} commissary=${row.source_commissary_snapshot} qty=${row.quantity_requested} name="${row.item_name_snapshot}"`);
+    console.log(`[saveNewRequisition] row[${idx}] item_id=${row.item_id} fg_id=${row.finished_good_id} catalog_id=${row.catalog_item_id} source=${row.source_type} qty=${row.quantity_requested} name="${row.item_name_snapshot}"`);
     return row;
   });
 
@@ -2618,12 +2634,19 @@ export async function saveNewRequisition(
   if (itemsError?.code === "42703") {
     console.warn("[saveNewRequisition] 42703 — new columns absent. Checking mode...");
     const fgRows = rows.filter(r => !r.item_id && r.finished_good_id);
+    const lvRows = rows.filter(r => r.catalog_item_id);
+    if (lvRows.length > 0) {
+      console.error("[saveNewRequisition] local vendor rows need migration:", lvRows);
+      await rollbackHeader();
+      return { success: false, error: { message: "Database migration required: run migration_local_vendor_orders.sql in Supabase SQL Editor to enable local vendor ordering." } };
+    }
     if (fgRows.length > 0) {
       console.error("[saveNewRequisition] FG rows need migration:", fgRows);
       await rollbackHeader();
       return { success: false, error: { message: "Database migration required: run migration.sql in Supabase SQL Editor to enable Finished Goods requisitions." } };
     }
-    const legacyRows = rows.map(({ finished_good_id, item_name_snapshot, unit_snapshot, ...rest }) => rest);
+    // Pure raw-mode fallback: strip all new columns
+    const legacyRows = rows.map(({ finished_good_id, item_name_snapshot, unit_snapshot, catalog_item_id, source_type, supplier_snapshot, pack_qty_snapshot, ...rest }) => rest);
     console.log("[saveNewRequisition] legacy retry:", JSON.stringify(legacyRows, null, 2));
     const retry = await supabase.from("requisition_items").insert(legacyRows);
     itemsError = retry.error ?? null;
