@@ -543,42 +543,46 @@ function UsersPageContent() {
     
     // Load billing details
     if (p.locationId) {
-      const bp = await getLocationBillingProfile(p.locationId);
-      if (bp) {
-        setEditLegalName(bp.legalName ?? "");
-        setEditIncAddress(bp.incorporationAddress ?? "");
-        setEditBillAddress(bp.billingAddress ?? "");
-        setEditBillCity(bp.billingCity ?? "");
-        setEditBillProvince(bp.billingProvince ?? "");
-        setEditBillPostalCode(bp.billingPostalCode ?? "");
-        setEditHstNumber(bp.hstNumber ?? "");
-        setEditBusinessNumber(bp.businessNumber ?? "");
-        setEditBillEmail(bp.billingEmail ?? "");
-        setEditInvoiceContactName(bp.invoiceContactName ?? "");
-        setEditStoreAddress(bp.storeAddress ?? "");
-        setEditStoreCity(bp.storeCity ?? "");
-        setEditStoreProvince(bp.storeProvince ?? "");
-        setEditStorePostalCode(bp.storePostalCode ?? "");
-        setEditStorePhone(bp.storePhone ?? "");
-        setEditStoreManagerName(bp.storeManagerName ?? "");
-      } else {
-        // Reset billing fields
-        setEditLegalName("");
-        setEditIncAddress("");
-        setEditBillAddress("");
-        setEditBillCity("");
-        setEditBillProvince("");
-        setEditBillPostalCode("");
-        setEditHstNumber("");
-        setEditBusinessNumber("");
-        setEditBillEmail("");
-        setEditInvoiceContactName("");
-        setEditStoreAddress("");
-        setEditStoreCity("");
-        setEditStoreProvince("");
-        setEditStorePostalCode("");
-        setEditStorePhone("");
-        setEditStoreManagerName("");
+      try {
+        const bp = await getLocationBillingProfile(p.locationId);
+        if (bp) {
+          setEditLegalName(bp.legalName ?? "");
+          setEditIncAddress(bp.incorporationAddress ?? "");
+          setEditBillAddress(bp.billingAddress ?? "");
+          setEditBillCity(bp.billingCity ?? "");
+          setEditBillProvince(bp.billingProvince ?? "");
+          setEditBillPostalCode(bp.billingPostalCode ?? "");
+          setEditHstNumber(bp.hstNumber ?? "");
+          setEditBusinessNumber(bp.businessNumber ?? "");
+          setEditBillEmail(bp.billingEmail ?? "");
+          setEditInvoiceContactName(bp.invoiceContactName ?? "");
+          setEditStoreAddress(bp.storeAddress ?? "");
+          setEditStoreCity(bp.storeCity ?? "");
+          setEditStoreProvince(bp.storeProvince ?? "");
+          setEditStorePostalCode(bp.storePostalCode ?? "");
+          setEditStorePhone(bp.storePhone ?? "");
+          setEditStoreManagerName(bp.storeManagerName ?? "");
+        } else {
+          // Reset billing fields
+          setEditLegalName("");
+          setEditIncAddress("");
+          setEditBillAddress("");
+          setEditBillCity("");
+          setEditBillProvince("");
+          setEditBillPostalCode("");
+          setEditHstNumber("");
+          setEditBusinessNumber("");
+          setEditBillEmail("");
+          setEditInvoiceContactName("");
+          setEditStoreAddress("");
+          setEditStoreCity("");
+          setEditStoreProvince("");
+          setEditStorePostalCode("");
+          setEditStorePhone("");
+          setEditStoreManagerName("");
+        }
+      } catch (err) {
+        console.error("Failed to load billing profile:", err);
       }
     } else {
       // Reset billing fields
@@ -692,6 +696,8 @@ function UsersPageContent() {
           setProvStorePhone("");
           setProvStoreManagerName("");
         }
+      }).catch((err) => {
+        console.error("Failed to load provisioning billing profile:", err);
       });
     } else {
       setProvLegalName("");
@@ -751,6 +757,8 @@ function UsersPageContent() {
           setEditStorePhone("");
           setEditStoreManagerName("");
         }
+      }).catch((err) => {
+        console.error("Failed to load edit billing profile:", err);
       });
     } else {
       setEditLegalName("");

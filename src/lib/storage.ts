@@ -2421,7 +2421,7 @@ const mapProfileToFrontend = (db: any): UserProfileRow => ({
   fullName:   db.full_name ?? null,
   email:      db.email ?? null,        // joined from auth.users via view if available
   phone:      db.phone ?? null,
-  role:       db.role,
+  role:       db.role ?? "staff",
   locationId: db.location_id ?? null,
   isActive:   db.is_active ?? true,
   createdAt:  db.created_at ?? null,
