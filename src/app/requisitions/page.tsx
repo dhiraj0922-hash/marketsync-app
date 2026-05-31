@@ -893,17 +893,17 @@ function LocationManagerView({
 
       <Drawer
         isOpen={!!selectedReq}
+        variant="dialog"
         onClose={() => { setSelectedReq(null); setReqLineItems([]); }}
         title={`Requisition ${selectedReq?.id}`}
         description={`Created ${selectedReq?.date} · Status: ${selectedReq?.status}`}
       >
-        <div className="space-y-4">
-          {selectedReq?.notes && (
-            <div className="bg-brand-50 border border-brand-100 rounded-lg p-4">
-              <h4 className="text-xs font-semibold text-brand-800 uppercase tracking-wider mb-1">Notes</h4>
-              <p className="text-sm text-neutral-700">{selectedReq.notes}</p>
-            </div>
-          )}
+        <div className="space-y-3">
+          {/* Notes — compact inline */}
+          <div className="flex items-start gap-1.5 text-sm">
+            <span className="shrink-0 font-semibold text-neutral-500 text-xs uppercase tracking-wider pt-0.5">Notes:</span>
+            <span className="text-neutral-700">{selectedReq?.notes || <span className="text-neutral-400 italic">No notes provided.</span>}</span>
+          </div>
 
           {/* Rejected banner */}
           {(selectedReq?.status === "rejected" || selectedReq?.status === "Rejected") && (
@@ -937,13 +937,13 @@ function LocationManagerView({
                 <Table>
                   <TableHeader className="bg-neutral-50 text-[11px] uppercase text-neutral-500 tracking-wider">
                     <TableRow>
-                      <TableHead className="py-2 px-4">Item</TableHead>
-                      <TableHead className="py-2 text-right">Requested</TableHead>
-                      <TableHead className="py-2 text-right">Fulfilled</TableHead>
-                      <TableHead className="py-2 text-right">Backorder</TableHead>
-                      <TableHead className="py-2 text-right">Unit Price</TableHead>
-                      <TableHead className="py-2 text-right">Fulfilled $</TableHead>
-                      <TableHead className="py-2">Status</TableHead>
+                      <TableHead className="py-1.5 px-3">Item</TableHead>
+                      <TableHead className="py-1.5 text-right">Requested</TableHead>
+                      <TableHead className="py-1.5 text-right">Fulfilled</TableHead>
+                      <TableHead className="py-1.5 text-right">Backorder</TableHead>
+                      <TableHead className="py-1.5 text-right">Unit Price</TableHead>
+                      <TableHead className="py-1.5 text-right">Fulfilled $</TableHead>
+                      <TableHead className="py-1.5">Status</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -956,25 +956,25 @@ function LocationManagerView({
                       const lineStatus = fulfilled >= requested ? "fulfilled" : fulfilled > 0 ? "partial" : "backordered";
                       return (
                         <TableRow key={li.id} className="hover:bg-neutral-50/50">
-                          <TableCell className="py-3 px-4 text-sm font-medium text-neutral-800">{li.itemName}</TableCell>
-                          <TableCell className="py-3 text-right text-sm text-neutral-700">{requested}</TableCell>
-                          <TableCell className="py-3 text-right">
+                          <TableCell className="py-2 px-3 text-sm font-medium text-neutral-800">{li.itemName}</TableCell>
+                          <TableCell className="py-2 text-right text-sm text-neutral-700">{requested}</TableCell>
+                          <TableCell className="py-2 text-right">
                             {li.quantityFulfilled != null
                               ? <span className="text-sm font-semibold text-success-700">{fulfilled}</span>
                               : <span className="text-neutral-400 text-xs">—</span>}
                           </TableCell>
-                          <TableCell className="py-3 text-right">
+                          <TableCell className="py-2 text-right">
                             {backorder > 0
                               ? <span className="text-sm font-bold text-danger-600">{backorder}</span>
                               : <span className="text-xs text-success-600 font-bold">—</span>}
                           </TableCell>
-                          <TableCell className="py-3 text-right text-sm text-neutral-700">
+                          <TableCell className="py-2 text-right text-sm text-neutral-700">
                             {unitPrice > 0 ? `$${unitPrice.toFixed(2)}` : <span className="text-neutral-400">—</span>}
                           </TableCell>
-                          <TableCell className="py-3 text-right">
+                          <TableCell className="py-2 text-right">
                             <span className="text-sm font-semibold text-neutral-800">${lineTotal.toFixed(2)}</span>
                           </TableCell>
-                          <TableCell className="py-3">
+                          <TableCell className="py-2">
                             {li.quantityFulfilled != null
                               ? <StatusBadge status={lineStatus} />
                               : <span className="text-neutral-400 text-xs">Pending</span>}
@@ -1734,6 +1734,7 @@ function HQAdminView({
 
           {/* Review Drawer */}
           <Drawer isOpen={!!selectedReq} onClose={() => { setSelectedReq(null); setHqReqItems([]); }}
+            variant="dialog"
             title={`Requisition ${selectedReq?.id}`}
             description={`Submitted by ${selectedReq?.requestedBy || selectedReq?.requestedby || "—"} from ${selectedReq?.location} on ${selectedReq?.date}`}
             footer={
@@ -1868,22 +1869,23 @@ function HQAdminView({
                 </div>
               </div>
             }>
-            <div className="space-y-6">
-              <div className="bg-brand-50 border border-brand-100 rounded-lg p-4">
-                <h4 className="text-xs font-semibold text-brand-800 uppercase tracking-wider mb-1">Notes / Reason</h4>
-                <p className="text-sm text-neutral-700">{selectedReq?.notes || "No notes provided."}</p>
+            <div className="space-y-3">
+              {/* Notes — compact inline, no large box when empty */}
+              <div className="flex items-start gap-1.5 text-sm">
+                <span className="shrink-0 font-semibold text-neutral-500 text-xs uppercase tracking-wider pt-0.5">Notes:</span>
+                <span className="text-neutral-700">{selectedReq?.notes || <span className="text-neutral-400 italic">No notes provided.</span>}</span>
               </div>
-              <div className="bg-white border border-neutral-200 rounded-lg overflow-hidden mt-6">
+              <div className="bg-white border border-neutral-200 rounded-lg overflow-hidden overflow-x-auto">
                 <Table>
                   <TableHeader className="bg-neutral-50/50 text-[11px] uppercase text-neutral-500 tracking-wider">
                     <TableRow>
-                      <TableHead className="py-2 px-4">Item</TableHead>
-                      <TableHead className="py-2 text-right">Requested</TableHead>
-                      <TableHead className="py-2 text-right">HQ Stock</TableHead>
-                      <TableHead className="py-2 text-center">Fulfill Qty</TableHead>
-                      <TableHead className="py-2 text-right">Backorder</TableHead>
-                      <TableHead className="py-2 text-right">Unit Price</TableHead>
-                      <TableHead className="py-2 text-right">Fulfilled $</TableHead>
+                      <TableHead className="py-1.5 px-3">Item</TableHead>
+                      <TableHead className="py-1.5 text-right">Requested</TableHead>
+                      <TableHead className="py-1.5 text-right">HQ Stock</TableHead>
+                      <TableHead className="py-1.5 text-center">Fulfill Qty</TableHead>
+                      <TableHead className="py-1.5 text-right">Backorder</TableHead>
+                      <TableHead className="py-1.5 text-right">Unit Price</TableHead>
+                      <TableHead className="py-1.5 text-right">Fulfilled $</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -1912,7 +1914,7 @@ function HQAdminView({
                       return Object.entries(groups).map(([commissary, groupItems]) => (
                         <React.Fragment key={commissary}>
                           <TableRow className="bg-neutral-50">
-                            <TableCell colSpan={7} className="py-1.5 px-4">
+                            <TableCell colSpan={7} className="py-1 px-3">
                               <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold border ${COMMISSARY_COLORS[commissary] ?? "bg-neutral-50 text-neutral-600 border-neutral-200"}`}>
                                 {commissary}
                               </span>
@@ -1930,17 +1932,17 @@ function HQAdminView({
                             return (
                               <TableRow key={item.id} className="hover:bg-neutral-50/50">
                                 {/* Item + line status */}
-                                <TableCell className="py-3 px-4">
+                                <TableCell className="py-2 px-3">
                                   <div className="font-medium text-sm text-neutral-900">{item.itemName}</div>
                                   <div className="mt-0.5"><StatusBadge status={lineStatus} /></div>
                                 </TableCell>
                                 {/* Requested qty */}
-                                <TableCell className="py-3 text-right">
+                                <TableCell className="py-2 text-right">
                                   <span className="text-sm font-medium text-neutral-800">{requested}</span>
                                   {item.unit && <span className="text-xs text-neutral-400 ml-1">{item.unit}</span>}
                                 </TableCell>
                                 {/* HQ available stock */}
-                                <TableCell className="py-3 text-right">
+                                <TableCell className="py-2 text-right">
                                   {hqStock != null ? (
                                     <span className={`text-sm font-semibold ${
                                       hqStock <= 0          ? "text-danger-600"  :
@@ -1952,7 +1954,7 @@ function HQAdminView({
                                   )}
                                 </TableCell>
                                 {/* Fulfill qty — controlled, disabled on non-approved */}
-                                <TableCell className="py-3 text-center">
+                                <TableCell className="py-2 text-center">
                                   <input
                                     type="number"
                                     min={0}
@@ -2004,19 +2006,19 @@ function HQAdminView({
                                   />
                                 </TableCell>
                                 {/* Backorder */}
-                                <TableCell className="py-3 text-right">
+                                <TableCell className="py-2 text-right">
                                   {backorder > 0
                                     ? <span className="text-sm font-bold text-danger-600">{backorder}</span>
                                     : <span className="text-xs font-bold text-success-600">—</span>}
                                 </TableCell>
                                 {/* Unit price */}
-                                <TableCell className="py-3 text-right">
+                                <TableCell className="py-2 text-right">
                                   {unitPrice > 0
                                     ? <span className="text-sm font-medium text-neutral-700">${unitPrice.toFixed(2)}</span>
                                     : <span className="text-neutral-400 text-xs">—</span>}
                                 </TableCell>
                                 {/* Fulfilled line total */}
-                                <TableCell className="py-3 text-right">
+                                <TableCell className="py-2 text-right">
                                   <span className="text-sm font-semibold text-success-700">${lineTotal.toFixed(2)}</span>
                                 </TableCell>
                               </TableRow>
