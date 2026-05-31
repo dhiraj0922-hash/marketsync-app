@@ -5038,3 +5038,169 @@ export async function markInvoicePaid(invoiceId: string): Promise<{ success: boo
   }
   return { success: true };
 }
+
+// ── Daily Location Sales & Gratuity Tracking ─────────────────────────────────
+
+export interface LocationDailySales {
+  id?: string;
+  locationId: string;
+  salesDate: string; // YYYY-MM-DD
+  posSales: number;
+  uberSales: number;
+  onlineSales: number;
+  cateringSales: number;
+  skipSales: number;
+  doordashSales: number;
+  notes?: string | null;
+  createdBy?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface LocationSalesGratuitySettings {
+  id: string;
+  posPercent: number;
+  uberPercent: number;
+  onlinePercent: number;
+  cateringPercent: number;
+  skipPercent: number;
+  doordashPercent: number;
+  updatedBy?: string | null;
+  updatedAt?: string | null;
+}
+
+const mapDailySalesToFrontend = (db: any): LocationDailySales => ({
+  id:            db.id,
+  locationId:    db.location_id,
+  salesDate:     db.sales_date,
+  posSales:      Number(db.pos_sales ?? 0),
+  uberSales:     Number(db.uber_sales ?? 0),
+  onlineSales:   Number(db.online_sales ?? 0),
+  cateringSales: Number(db.catering_sales ?? 0),
+  skipSales:     Number(db.skip_sales ?? 0),
+  doordashSales: Number(db.doordash_sales ?? 0),
+  notes:         db.notes ?? null,
+  createdBy:     db.created_by ?? null,
+  createdAt:     db.created_at ?? null,
+  updatedAt:     db.updated_at ?? null,
+});
+
+const mapDailySalesToDB = (l: LocationDailySales) => ({
+  id:             l.id || undefined,
+  location_id:    l.locationId,
+  sales_date:     l.salesDate,
+  pos_sales:      Number(l.posSales ?? 0),
+  uber_sales:     Number(l.uberSales ?? 0),
+  online_sales:   Number(l.onlineSales ?? 0),
+  catering_sales: Number(l.cateringSales ?? 0),
+  skip_sales:     Number(l.skipSales ?? 0),
+  doordash_sales: Number(l.doordashSales ?? 0),
+  notes:          l.notes || null,
+  created_by:     l.createdBy || undefined,
+  updated_at:     new Date().toISOString(),
+});
+
+const mapGratuitySettingsToFrontend = (db: any): LocationSalesGratuitySettings => ({
+  id:              db.id,
+  posPercent:      Number(db.pos_percent ?? 0),
+  uberPercent:     Number(db.uber_percent ?? 0),
+  onlinePercent:   Number(db.online_percent ?? 0),
+  cateringPercent: Number(db.catering_percent ?? 0),
+  skipPercent:     Number(db.skip_percent ?? 0),
+  doordashPercent: Number(db.doordash_percent ?? 0),
+  updatedBy:       db.updated_by ?? null,
+  updatedAt:       db.updated_at ?? null,
+});
+
+const mapGratuitySettingsToDB = (g: Partial<LocationSalesGratuitySettings>) => ({
+  id:               g.id || '00000000-0000-0000-0000-000000000000',
+  pos_percent:      Number(g.posPercent ?? 0),
+  uber_percent:     Number(g.uberPercent ?? 0),
+  online_percent:   Number(g.onlinePercent ?? 0),
+  catering_percent: Number(g.cateringPercent ?? 0),
+  skip_percent:     Number(g.skipPercent ?? 0),
+  doordash_percent: Number(g.doordashPercent ?? 0),
+  updated_by:       g.updatedBy || undefined,
+  updated_at:       new Date().toISOString(),
+});
+
+export async function loadDailySales(
+  locationId?: string | null,
+  startDate?: string | null,
+  endDate?: string | null
+): Promise<LocationDailySales[]> {
+  let query = supabase.from('location_daily_sales').select('*');
+
+  if (locationId) {
+    query = query.eq('location_id', locationId);
+  }
+  if (startDate) {
+    query = query.gte('sales_date', startDate);
+  }
+  if (endDate) {
+    query = query.lte('sales_date', endDate);
+  }
+
+  const { data, error } = await query.order('sales_date', { ascending: false });
+  if (error) {
+    console.error('[loadDailySales] error:', error);
+    return [];
+  }
+  return Array.isArray(data) ? data.map(mapDailySalesToFrontend) : [];
+}
+
+export async function upsertDailySales(
+  sales: LocationDailySales
+): Promise<{ success: boolean; error?: string }> {
+  if (!sales.locationId || !sales.salesDate) {
+    return { success: false, error: 'Location ID and Sales Date are required.' };
+  }
+
+  const dbRow = mapDailySalesToDB(sales);
+  const { error } = await supabase
+    .from('location_daily_sales')
+    .upsert(dbRow, { onConflict: 'location_id,sales_date' });
+
+  if (error) {
+    console.error('[upsertDailySales] error:', error);
+    return { success: false, error: error.message };
+  }
+  return { success: true };
+}
+
+export async function loadGratuitySettings(): Promise<LocationSalesGratuitySettings> {
+  const { data, error } = await supabase
+    .from('location_sales_gratuity_settings')
+    .select('*')
+    .eq('id', '00000000-0000-0000-0000-000000000000')
+    .maybeSingle();
+
+  if (error || !data) {
+    return {
+      id: '00000000-0000-0000-0000-000000000000',
+      posPercent: 0,
+      uberPercent: 0,
+      onlinePercent: 0,
+      cateringPercent: 0,
+      skipPercent: 0,
+      doordashPercent: 0,
+    };
+  }
+  return mapGratuitySettingsToFrontend(data);
+}
+
+export async function saveGratuitySettings(
+  settings: Partial<LocationSalesGratuitySettings>
+): Promise<{ success: boolean; error?: string }> {
+  const dbRow = mapGratuitySettingsToDB(settings);
+  const { error } = await supabase
+    .from('location_sales_gratuity_settings')
+    .upsert(dbRow, { onConflict: 'id' });
+
+  if (error) {
+    console.error('[saveGratuitySettings] error:', error);
+    return { success: false, error: error.message };
+  }
+  return { success: true };
+}
+

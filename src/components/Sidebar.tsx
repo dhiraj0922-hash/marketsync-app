@@ -59,6 +59,7 @@ const navigation: NavItem[] = [
   { name: "Production",       href: "/finished-goods", icon: Factory,        hqOnly: true },
   { name: "Invoices",         href: "/invoices",       icon: ReceiptText,    hqOnly: true },
   { name: "Recipes",          href: "/recipes",        icon: ChefHat,        hqOnly: true },
+  { name: "Sales Entry",      href: "/location-sales", icon: ReceiptText },
   { name: "Reports",          href: "/reports",        icon: BarChart4 },
   { name: "Users",            href: "/users",          icon: Users,          hqOnly: true },
   { name: "Settings",         href: "/settings",       icon: Settings,       hqOnly: true },
