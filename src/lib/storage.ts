@@ -2444,7 +2444,19 @@ const mapProfileToFrontend = (db: any): UserProfileRow => ({
  * Falls back to plain user_profiles if the view doesn't exist.
  */
 export async function loadUserProfiles(): Promise<UserProfileRow[]> {
-  // Try view with email first
+  try {
+    const res = await fetch('/api/users/profile');
+    if (res.ok) {
+      const json = await res.json();
+      if (json.success && Array.isArray(json.profiles)) {
+        return json.profiles.map(mapProfileToFrontend);
+      }
+    }
+  } catch (err) {
+    console.error('[loadUserProfiles] API fetch failed, falling back to direct Supabase select:', err);
+  }
+
+  // Fallback: Try view with email first
   const { data: viewData, error: viewErr } = await supabase
     .from('user_profiles_with_email')
     .select('*')
@@ -2454,7 +2466,7 @@ export async function loadUserProfiles(): Promise<UserProfileRow[]> {
     return viewData.map(mapProfileToFrontend);
   }
 
-  // Fallback: plain table (no email column)
+  // Fallback 2: plain table (no email column)
   const { data, error } = await supabase
     .from('user_profiles')
     .select('*')

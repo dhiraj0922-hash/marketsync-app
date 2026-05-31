@@ -2328,14 +2328,19 @@ export default function Inventory() {
               <span className="text-sm font-semibold text-blue-100">{selectedItemIds.length} operational node{selectedItemIds.length !== 1 ? 's' : ''} targeted</span>
               <div className="flex gap-4 items-center">
                 <button onClick={() => setSelectedItemIds([])} className="text-xs font-semibold text-blue-200 transition-colors hover:text-white">Clear Targets</button>
-                <button
-                  onClick={openCopyInventoryModal}
-                  disabled={!isHqAdmin(user)}
-                  title={isHqAdmin(user) ? "Copy selected inventory setup to other locations" : "Only HQ admins can copy inventory setup to other locations"}
-                  className="flex items-center gap-1.5 rounded bg-blue-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
-                >
-                  <Copy className="h-3 w-3" /> Copy Selected to Locations
-                </button>
+                {isHqAdmin(user) && isLondonTemplateLocationActive ? (
+                  <button
+                    onClick={openCopyInventoryModal}
+                    title="Push selected London template inventory setup to other locations"
+                    className="flex items-center gap-1.5 rounded bg-blue-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm transition-colors hover:bg-blue-500"
+                  >
+                    <Copy className="h-3 w-3" /> Copy London Setup to Locations
+                  </button>
+                ) : isHqAdmin(user) ? (
+                  <span className="rounded border border-blue-500/20 bg-black/20 px-3 py-1.5 text-xs font-semibold text-blue-200/80">
+                    Switch to London / LOC-1091 template location to copy setup.
+                  </span>
+                ) : null}
                 <button
                   onClick={() => setIsDeleteModalOpen(true)}
                   className="flex items-center gap-1.5 rounded bg-red-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm transition-colors hover:bg-red-500"
@@ -4341,7 +4346,7 @@ export default function Inventory() {
               <div>
                 <h3 className="flex items-center gap-2 text-base font-bold text-zinc-100">
                   <Copy className="h-4 w-4 text-blue-300" />
-                  Copy Selected Inventory Items to Locations
+                  Copy London Template Items to Locations
                 </h3>
                 <p className="mt-1 text-xs text-zinc-500">
                   Source template: <span className="font-semibold text-zinc-200">{londonTemplateLocation?.name ?? "London"} / {LONDON_TEMPLATE_LOCATION_ID}</span>
