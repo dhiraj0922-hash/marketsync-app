@@ -1,9 +1,9 @@
 "use client";
-
 import { useState, useEffect, useCallback } from "react";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
-import { HQOnlyGuard } from "@/components/HQOnlyGuard";
-import { loadLocations } from "@/lib/storage";
+import { useAuth } from "@/components/AuthProvider";
+import { isHqAdmin, isLocationManager, resolveLocationId } from "@/lib/roles";
+import { loadLocations, loadOutletCatalog, loadOutletInventoryV2, loadOrders } from "@/lib/storage";
 import OutletPerformanceView from "./OutletPerformanceView";
 import {
   getCogsReport,
@@ -21,7 +21,7 @@ import {
 import {
   TrendingDown, TrendingUp, ArrowLeftRight, AlertTriangle,
   BarChart3, Loader2, RefreshCw, ChevronDown, Filter, DollarSign,
-  HardHat, Clock,
+  HardHat, Clock, Store, ClipboardList,
 } from "lucide-react";
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -72,19 +72,55 @@ const BUCKET_COLORS: Record<string, string> = {
 // ─── Page shell ───────────────────────────────────────────────────────────────
 
 export default function ReportsPage() {
-  return (
-    <HQOnlyGuard>
-      <ReportsContent />
-    </HQOnlyGuard>
-  );
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-neutral-50 flex items-center justify-center">
+        <div className="animate-pulse flex flex-col items-center">
+          <div className="h-8 w-8 rounded-full border-4 border-brand-500 border-t-transparent animate-spin mb-4" />
+          <div className="text-neutral-500 text-sm font-medium">Validating access…</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user || (!isHqAdmin(user) && !isLocationManager(user))) {
+    return (
+      <div className="min-h-screen bg-neutral-50 flex items-center justify-center p-6">
+        <div className="max-w-md w-full text-center space-y-5">
+          <div className="text-red-500 font-bold text-lg">Access Denied</div>
+          <p className="text-sm text-neutral-500 leading-relaxed">
+            You do not have permission to view reports. Please contact your HQ administrator.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (isLocationManager(user) && !user.locationId) {
+    return (
+      <div className="min-h-screen bg-neutral-50 flex items-center justify-center p-6">
+        <div className="max-w-md w-full text-center space-y-5">
+          <div className="text-warning-600 font-bold text-lg">No Location Assigned</div>
+          <p className="text-sm text-neutral-500 leading-relaxed">
+            No location assigned. Please contact HQ.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return <ReportsContent user={user} />;
 }
 
-type Tab = "cogs" | "movement" | "profit" | "labour" | "performance";
+type Tab = "cogs" | "movement" | "profit" | "labour" | "performance" | "stock_health" | "variance" | "local_spend";
 
-function ReportsContent() {
-  const [tab, setTab]               = useState<Tab>("cogs");
+function ReportsContent({ user }: { user: any }) {
+  const isHQ = isHqAdmin(user);
+  const [tab, setTab]               = useState<Tab>(isHQ ? "cogs" : "movement");
   const [locations, setLocations]   = useState<any[]>([]);
-  const [locationId, setLocationId] = useState("");
+  const [locationId, setLocationId] = useState(isHQ ? "" : (user.locationId ?? ""));
   const [dateFrom, setDateFrom]     = useState(defaultFrom);
   const [dateTo, setDateTo]         = useState(today);
   const [movBucket, setMovBucket]   = useState<ReportBucket | "">("");
@@ -93,6 +129,9 @@ function ReportsContent() {
   const [movReport,     setMovReport]     = useState<MovementReport | null>(null);
   const [profitReport,  setProfitReport]  = useState<ProfitReport  | null>(null);
   const [labourReport,  setLabourReport]  = useState<MovementReport | null>(null);
+  const [stockCatalog,  setStockCatalog]  = useState<any[]>([]);
+  const [stockOutlet,   setStockOutlet]   = useState<any[]>([]);
+  const [poOrders,      setPoOrders]      = useState<any[]>([]);
   const [loading,       setLoading]       = useState(false);
   const [error,         setError]         = useState<string | null>(null);
 
@@ -106,13 +145,18 @@ function ReportsContent() {
     setError(null);
     const f = { locationId: locationId || null, dateFrom, dateTo };
 
+    // Security note:
+    // TODO: get_cogs_report, get_inventory_movement_report, and get_fulfillment_profit_report
+    // should be hardened in the database to compare requested location_id against
+    // user_profiles.location_id for the authenticated session if role != 'hq_admin'.
+
     if (tab === "cogs") {
       const { data, error: e } = await getCogsReport(f);
       if (e) setError(e); else setCogsReport(data);
-    } else if (tab === "movement") {
+    } else if (tab === "movement" || tab === "variance") {
       const { data, error: e } = await getInventoryMovementReport({
         ...f,
-        bucket: (movBucket as ReportBucket) || null,
+        bucket: tab === "movement" ? ((movBucket as ReportBucket) || null) : null,
       });
       if (e) setError(e); else setMovReport(data);
     } else if (tab === "labour") {
@@ -142,12 +186,30 @@ function ReportsContent() {
           byBucket,
         });
       }
+    } else if (tab === "stock_health") {
+      try {
+        const [cat, outlet] = await Promise.all([
+          loadOutletCatalog(),
+          loadOutletInventoryV2(locationId || user.locationId)
+        ]);
+        setStockCatalog(Array.isArray(cat) ? cat : []);
+        setStockOutlet(Array.isArray(outlet) ? outlet : []);
+      } catch (err: any) {
+        setError(err.message || "Failed to load stock health data.");
+      }
+    } else if (tab === "local_spend") {
+      try {
+        const loadedOrders = await loadOrders(locationId || user.locationId);
+        setPoOrders(Array.isArray(loadedOrders) ? loadedOrders : []);
+      } catch (err: any) {
+        setError(err.message || "Failed to load PO spend data.");
+      }
     } else {
       const { data, error: e } = await getFulfillmentProfitReport(f);
       if (e) setError(e); else setProfitReport(data);
     }
     setLoading(false);
-  }, [tab, locationId, dateFrom, dateTo, movBucket]);
+  }, [tab, locationId, dateFrom, dateTo, movBucket, user.locationId]);
 
   // Auto-run on tab switch when no data yet
   useEffect(() => { runReport(); }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -161,19 +223,27 @@ function ReportsContent() {
     (tab === "cogs"     && cogsReport    && cogsReport.rows.length    === 0) ||
     (tab === "movement" && movReport     && movReport.rows.length     === 0) ||
     (tab === "profit"   && profitReport  && profitReport.rows.length  === 0) ||
-    (tab === "labour"   && labourReport  && labourReport.rows.length  === 0);
+    (tab === "labour"   && labourReport  && labourReport.rows.length  === 0) ||
+    (tab === "variance" && movReport     && movReport.rows.filter(r => r.movement_type === "count_variance_gain" || r.movement_type === "count_variance_loss").length === 0) ||
+    (tab === "stock_health" && stockOutlet.filter(r => r.localEnabled).length === 0) ||
+    (tab === "local_spend" && poOrders.length === 0);
 
   return (
     <div className="space-y-6">
       {/* ── Header */}
       <div>
         <h2 className="text-2xl font-bold tracking-tight text-neutral-900">Reports</h2>
-        <p className="text-neutral-500 text-sm mt-0.5">COGS · Movement Ledger</p>
+        <p className="text-neutral-500 text-sm mt-0.5">
+          {isHQ ? "COGS · Movement Ledger" : "Movement Ledger · Stock Health · Variance"}
+        </p>
       </div>
 
       {/* ── Tabs */}
-      <div className="flex gap-1 bg-neutral-100 p-1 rounded-xl w-fit">
-        {(["cogs", "movement", "profit", "labour", "performance"] as Tab[]).map(t => (
+      <div className="flex flex-wrap gap-1 bg-neutral-100 p-1 rounded-xl w-fit">
+        {(isHQ 
+          ? (["cogs", "movement", "profit", "labour", "performance"] as Tab[])
+          : (["movement", "stock_health", "variance", "local_spend"] as Tab[])
+        ).map(t => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -189,7 +259,13 @@ function ReportsContent() {
               ? "Profit" 
               : t === "labour" 
               ? "Labour" 
-              : "Outlet Performance"}
+              : t === "performance"
+              ? "Outlet Performance"
+              : t === "stock_health"
+              ? "Stock Health & Value"
+              : t === "variance"
+              ? "Count Variance"
+              : "Local Vendor Spend"}
           </button>
         ))}
       </div>
@@ -203,17 +279,24 @@ function ReportsContent() {
               <label className="text-xs font-semibold text-neutral-500 uppercase tracking-wider flex items-center gap-1">
                 <Filter className="h-3 w-3" /> Location
               </label>
-              <div className="relative">
-                <select
-                  value={locationId}
-                  onChange={e => setLocationId(e.target.value)}
-                  className="w-full appearance-none pl-3 pr-8 py-2 border border-neutral-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-1 focus:ring-brand-400"
-                >
-                  <option value="">All Locations</option>
-                  {locations.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
-                </select>
-                <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-neutral-400 pointer-events-none" />
-              </div>
+              {isHQ ? (
+                <div className="relative">
+                  <select
+                    value={locationId}
+                    onChange={e => setLocationId(e.target.value)}
+                    className="w-full appearance-none pl-3 pr-8 py-2 border border-neutral-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-1 focus:ring-brand-400"
+                  >
+                    <option value="">All Locations</option>
+                    {locations.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+                  </select>
+                  <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-neutral-400 pointer-events-none" />
+                </div>
+              ) : (
+                <div className="px-3 py-2 border border-neutral-200 bg-neutral-50 rounded-lg text-sm font-semibold text-neutral-700 flex items-center gap-1.5">
+                  <Store className="h-4 w-4 text-brand-600" />
+                  {locName(user.locationId)}
+                </div>
+              )}
             </div>
 
             {/* Date From */}
@@ -317,6 +400,21 @@ function ReportsContent() {
           locationId={locationId}
           locations={locations}
         />
+      )}
+
+      {/* ── Stock Health & Value tab */}
+      {!loading && tab === "stock_health" && stockCatalog.length > 0 && (
+        <StockHealthView catalog={stockCatalog} outlet={stockOutlet} />
+      )}
+
+      {/* ── Count Variance tab */}
+      {!loading && tab === "variance" && movReport && (
+        <CountVarianceView report={movReport} locName={locName} />
+      )}
+
+      {/* ── Local Spend / PO Spend tab */}
+      {!loading && tab === "local_spend" && (
+        <LocalSpendView orders={poOrders} dateFrom={dateFrom} dateTo={dateTo} />
       )}
 
       {/* ── Empty state */}
@@ -834,6 +932,320 @@ function SummaryCard({
       <div className="flex items-center gap-2 mb-2">{icon}<span className="text-xs font-semibold text-neutral-500 uppercase tracking-wider">{label}</span></div>
       <p className="text-2xl font-bold text-neutral-900 tabular-nums">{value}</p>
       <p className="text-xs text-neutral-500 mt-0.5">{sub}</p>
+    </div>
+  );
+}
+
+// ─── Stock Health & Value View ────────────────────────────────────────────────
+
+function StockHealthView({ catalog, outlet }: { catalog: any[]; outlet: any[] }) {
+  const merged: any[] = [];
+  
+  for (const oRow of outlet) {
+    if (!oRow.localEnabled) continue;
+    const catItem = catalog.find(c => c.itemId === oRow.itemId);
+    if (!catItem) continue;
+
+    const localCost = oRow.localPrice ? parseFloat(oRow.localPrice) : null;
+    const catalogCost = catItem.price ? parseFloat(catItem.price) : 0;
+    const unitCost = (localCost !== null && !isNaN(localCost)) ? localCost : catalogCost;
+    const stockQty = oRow.currentStock || 0;
+    const stockValue = stockQty * unitCost;
+
+    let status: "Low Stock" | "Overstock" | "Healthy" = "Healthy";
+    if (oRow.minOnHand > 0 && stockQty < oRow.minOnHand) {
+      status = "Low Stock";
+    } else if (oRow.parLevel > 0 && stockQty > oRow.parLevel) {
+      status = "Overstock";
+    }
+
+    merged.push({
+      itemId: oRow.itemId,
+      name: catItem.name,
+      supplier: oRow.localSupplier || catItem.supplier || "—",
+      uom: catItem.uom || "—",
+      currentStock: stockQty,
+      unitCost,
+      stockValue,
+      minOnHand: oRow.minOnHand,
+      parLevel: oRow.parLevel,
+      status
+    });
+  }
+
+  const totalStockValue = merged.reduce((sum, item) => sum + item.stockValue, 0);
+  const lowStockCount = merged.filter(item => item.status === "Low Stock").length;
+  const overstockCount = merged.filter(item => item.status === "Overstock").length;
+  const missingCostCount = merged.filter(item => item.unitCost === 0).length;
+
+  return (
+    <div className="space-y-4">
+      {/* KPI Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+        <SummaryCard
+          icon={<DollarSign className="h-5 w-5 text-brand-600" />}
+          label="Total Stock Value"
+          value={$(totalStockValue)}
+          sub={`${merged.length} active inventory items`}
+          accent="brand"
+        />
+        <SummaryCard
+          icon={<AlertTriangle className="h-5 w-5 text-red-500" />}
+          label="Low Stock Items"
+          value={String(lowStockCount)}
+          sub="below min threshold"
+          accent={lowStockCount > 0 ? "red" : "neutral"}
+        />
+        <SummaryCard
+          icon={<TrendingUp className="h-5 w-5 text-green-600" />}
+          label="Overstock Items"
+          value={String(overstockCount)}
+          sub="above par threshold"
+          accent="green"
+        />
+        <SummaryCard
+          icon={<AlertTriangle className="h-5 w-5 text-amber-500" />}
+          label="Missing Unit Cost"
+          value={String(missingCostCount)}
+          sub="cost configured as $0"
+          accent={missingCostCount > 0 ? "neutral" : "neutral"}
+        />
+      </div>
+
+      {/* Detail Table */}
+      <Card className="shadow-sm">
+        <CardHeader className="pb-3">
+          <p className="text-sm font-semibold text-neutral-700">Stock Health & Asset Value Detail</p>
+        </CardHeader>
+        <CardContent className="p-0 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-neutral-50 border-b border-neutral-100">
+              <tr>
+                {["Item", "Supplier", "UOM", "Current Stock", "Unit Cost", "Stock Value", "Min", "Par", "Status"].map(h => (
+                  <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-neutral-500 uppercase tracking-wider whitespace-nowrap">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-neutral-50">
+              {merged.map(r => (
+                <tr key={r.itemId} className="hover:bg-neutral-50/50">
+                  <td className="px-4 py-2.5 font-medium text-neutral-900">{r.name}</td>
+                  <td className="px-4 py-2.5 text-neutral-500">{r.supplier}</td>
+                  <td className="px-4 py-2.5 text-neutral-600">{r.uom}</td>
+                  <td className="px-4 py-2.5 tabular-nums font-semibold text-neutral-800">{qty(r.currentStock)}</td>
+                  <td className="px-4 py-2.5 tabular-nums text-neutral-500">{$(r.unitCost)}</td>
+                  <td className="px-4 py-2.5 tabular-nums font-bold text-brand-700">{$(r.stockValue)}</td>
+                  <td className="px-4 py-2.5 tabular-nums text-neutral-500">{r.minOnHand || "—"}</td>
+                  <td className="px-4 py-2.5 tabular-nums text-neutral-500">{r.parLevel || "—"}</td>
+                  <td className="px-4 py-2.5">
+                    {r.status === "Low Stock" ? (
+                      <span className="inline-flex px-2 py-0.5 rounded text-[10px] font-semibold border bg-red-50 text-red-700 border-red-200">
+                        Low Stock
+                      </span>
+                    ) : r.status === "Overstock" ? (
+                      <span className="inline-flex px-2 py-0.5 rounded text-[10px] font-semibold border bg-green-50 text-green-700 border-green-200">
+                        Overstock
+                      </span>
+                    ) : (
+                      <span className="inline-flex px-2 py-0.5 rounded text-[10px] font-semibold border bg-neutral-100 text-neutral-600 border-neutral-200">
+                        Healthy
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot className="bg-neutral-50 border-t border-neutral-200">
+              <tr>
+                <td colSpan={5} className="px-4 py-2.5 text-xs font-bold text-neutral-600 uppercase tracking-wider">Total Valuation</td>
+                <td className="px-4 py-2.5 font-bold text-brand-700 tabular-nums">{$(totalStockValue)}</td>
+                <td colSpan={3} />
+              </tr>
+            </tfoot>
+          </table>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// ─── Count Variance View ─────────────────────────────────────────────────────
+
+function CountVarianceView({ report, locName }: { report: MovementReport; locName: (id: string | null) => string }) {
+  const varianceRows = report.rows.filter(
+    r => r.movement_type === "count_variance_gain" || r.movement_type === "count_variance_loss"
+  );
+
+  const totalGains = varianceRows
+    .filter(r => r.movement_type === "count_variance_gain")
+    .reduce((sum, r) => sum + r.signed_cost, 0);
+
+  const totalLosses = varianceRows
+    .filter(r => r.movement_type === "count_variance_loss")
+    .reduce((sum, r) => sum + Math.abs(r.signed_cost), 0);
+
+  return (
+    <div className="space-y-4">
+      {/* Variance KPI cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <SummaryCard
+          icon={<TrendingUp className="h-5 w-5 text-green-600" />}
+          label="Total Variance Gains"
+          value={$(totalGains)}
+          sub="positive count adjustments"
+          accent="green"
+        />
+        <SummaryCard
+          icon={<TrendingDown className="h-5 w-5 text-red-500" />}
+          label="Total Variance Losses"
+          value={$(totalLosses)}
+          sub="negative count adjustments"
+          accent="red"
+        />
+        <SummaryCard
+          icon={<ArrowLeftRight className="h-5 w-5 text-brand-500" />}
+          label="Net Variance Impact"
+          value={$(totalGains - totalLosses)}
+          sub="gain vs loss total impact"
+          accent={(totalGains - totalLosses) >= 0 ? "green" : "red"}
+        />
+      </div>
+
+      <Card className="shadow-sm">
+        <CardHeader className="pb-3">
+          <p className="text-sm font-semibold text-neutral-700">Count Variance Log</p>
+        </CardHeader>
+        <CardContent className="p-0 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-neutral-50 border-b border-neutral-100">
+              <tr>
+                {["Date", "Location", "Item", "Type", "Qty", "Value Impact", "Context", "Reference ID"].map(h => (
+                  <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-neutral-500 uppercase tracking-wider whitespace-nowrap">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-neutral-50">
+              {varianceRows.map(r => {
+                const isGain = r.movement_type === "count_variance_gain";
+                return (
+                  <tr key={r.id} className="hover:bg-neutral-50/50">
+                    <td className="px-4 py-2.5 font-mono text-xs text-neutral-700 whitespace-nowrap">{r.movement_date}</td>
+                    <td className="px-4 py-2.5 text-neutral-600 whitespace-nowrap">{locName(r.location_id)}</td>
+                    <td className="px-4 py-2.5 font-medium text-neutral-900">{r.item_name ?? r.item_id ?? "—"}</td>
+                    <td className="px-4 py-2.5">
+                      {isGain ? (
+                        <span className="inline-flex px-2 py-0.5 rounded text-[10px] font-semibold border bg-green-50 text-green-700 border-green-200">Gain</span>
+                      ) : (
+                        <span className="inline-flex px-2 py-0.5 rounded text-[10px] font-semibold border bg-rose-50 text-rose-700 border-rose-200">Loss</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-2.5 tabular-nums text-neutral-700 font-semibold">{qty(r.quantity)}</td>
+                    <td className={`px-4 py-2.5 tabular-nums font-bold ${isGain ? "text-green-700" : "text-red-700"}`}>
+                      {isGain ? "+" : "-"}{$(Math.abs(r.signed_cost))}
+                    </td>
+                    <td className="px-4 py-2.5 text-xs text-neutral-600 max-w-[260px] truncate">
+                      {(() => {
+                        const label = getMovementContextLabel(r);
+                        return label || "—";
+                      })()}
+                    </td>
+                    <td className="px-4 py-2.5 text-xs font-mono text-neutral-400 whitespace-nowrap">{r.reference_id ?? "—"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// ─── Local Spend / PO Spend View ─────────────────────────────────────────────
+
+function LocalSpendView({ orders, dateFrom, dateTo }: { orders: any[]; dateFrom: string; dateTo: string }) {
+  const filtered = orders.filter(po => {
+    if (dateFrom && po.date < dateFrom) return false;
+    if (dateTo && po.date > dateTo) return false;
+    return true;
+  });
+
+  const totalSpend = filtered
+    .filter(po => po.status === "Delivered")
+    .reduce((sum, po) => sum + (po.total || 0), 0);
+
+  const pendingCount = filtered.filter(po => po.status === "Draft" || po.status === "Sent").length;
+  const deliveredCount = filtered.filter(po => po.status === "Delivered").length;
+
+  return (
+    <div className="space-y-4">
+      {/* Spend overview cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <SummaryCard
+          icon={<DollarSign className="h-5 w-5 text-brand-600" />}
+          label="Total Delivered Spend"
+          value={$(totalSpend)}
+          sub="sum of all POs marked Delivered"
+          accent="brand"
+        />
+        <SummaryCard
+          icon={<ClipboardList className="h-5 w-5 text-amber-500" />}
+          label="Pending PO Orders"
+          value={String(pendingCount)}
+          sub="draft or sent to supplier"
+          accent="neutral"
+        />
+        <SummaryCard
+          icon={<ClipboardList className="h-5 w-5 text-green-600" />}
+          label="Delivered PO Orders"
+          value={String(deliveredCount)}
+          sub="fully completed purchases"
+          accent="green"
+        />
+      </div>
+
+      <Card className="shadow-sm">
+        <CardHeader className="pb-3">
+          <p className="text-sm font-semibold text-neutral-700">Local Purchase Orders Spend Log</p>
+        </CardHeader>
+        <CardContent className="p-0 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-neutral-50 border-b border-neutral-100">
+              <tr>
+                {["Order Date", "PO Number", "Supplier", "Status", "Item Count", "Total Cost"].map(h => (
+                  <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-neutral-500 uppercase tracking-wider whitespace-nowrap">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-neutral-50">
+              {filtered.map(po => (
+                <tr key={po.id} className="hover:bg-neutral-50/50">
+                  <td className="px-4 py-2.5 font-mono text-xs text-neutral-700 whitespace-nowrap">{po.date || po.deliveryDate || "—"}</td>
+                  <td className="px-4 py-2.5 font-mono font-semibold text-brand-700 whitespace-nowrap">{po.poNumber}</td>
+                  <td className="px-4 py-2.5 text-neutral-900 font-medium">{po.supplierName}</td>
+                  <td className="px-4 py-2.5">
+                    {po.status === "Delivered" ? (
+                      <span className="inline-flex px-2 py-0.5 rounded text-[10px] font-semibold border bg-green-50 text-green-700 border-green-200">Delivered</span>
+                    ) : po.status === "Sent" ? (
+                      <span className="inline-flex px-2 py-0.5 rounded text-[10px] font-semibold border bg-blue-50 text-blue-700 border-blue-200">Sent</span>
+                    ) : (
+                      <span className="inline-flex px-2 py-0.5 rounded text-[10px] font-semibold border bg-neutral-100 text-neutral-600 border-neutral-200">Draft</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-2.5 tabular-nums text-neutral-700">{po.items || (po.lineItems ? po.lineItems.length : 0)}</td>
+                  <td className="px-4 py-2.5 tabular-nums font-bold text-neutral-900">{$(po.total || 0)}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot className="bg-neutral-50 border-t border-neutral-200">
+              <tr>
+                <td colSpan={5} className="px-4 py-2.5 text-xs font-bold text-neutral-600 uppercase tracking-wider">Total Delivered Purchases</td>
+                <td className="px-4 py-2.5 font-bold text-neutral-900 tabular-nums">{$(totalSpend)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </CardContent>
+      </Card>
     </div>
   );
 }

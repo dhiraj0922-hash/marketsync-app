@@ -35,6 +35,30 @@ const LOCATION_VIEW_MODES: [ViewMode, string][] = [
   ["suggested", "Suggested"],
 ];
 
+const isValidCopyTargetLocation = (loc: any, sourceLocationId: string) => {
+  const id = String(loc?.id ?? "").trim();
+  const name = String(loc?.name ?? "").trim();
+  const status = String(loc?.status ?? "").trim().toLowerCase();
+  const isInactive = ["inactive", "disabled", "archived", "closed"].includes(status);
+
+  return Boolean(
+    id &&
+    name &&
+    id !== sourceLocationId &&
+    id !== "LOC-HQ" &&
+    id !== "LOC-NULL" &&
+    name.toLowerCase() !== "null" &&
+    !isInactive
+  );
+};
+
+const isInvalidLocationRecord = (loc: any) => {
+  const id = String(loc?.id ?? "").trim();
+  const name = String(loc?.name ?? "").trim();
+  const status = String(loc?.status ?? "").trim().toLowerCase();
+  return !id || !name || id === "LOC-NULL" || name.toLowerCase() === "null" || ["inactive", "disabled", "archived", "closed"].includes(status);
+};
+
 interface MergedRow {
   itemId: string; name: string; category: string; uom: string;
   type: string; sourceType: "hq_supplied" | "local_vendor";
@@ -217,10 +241,16 @@ export default function OutletInventoryPage() {
     return loc ? `${loc.name ?? loc.id} / ${loc.id}` : activeLoc;
   }, [activeLoc, locations]);
 
-  const copyTargetLocations = useMemo(
-    () => locations.filter((l: any) => l.id && l.id !== "LOC-HQ" && l.id !== activeLoc),
-    [locations, activeLoc]
-  );
+  const copyTargetLocations = useMemo(() => {
+    const validLocations = locations.filter((loc: any) => isValidCopyTargetLocation(loc, activeLoc));
+    const skippedLocations = locations.filter(isInvalidLocationRecord);
+
+    if (process.env.NODE_ENV === "development" && skippedLocations.length > 0) {
+      console.warn("[OutletInventory] Skipping invalid copy target locations", skippedLocations);
+    }
+
+    return validLocations;
+  }, [locations, activeLoc]);
 
   const selectedCopyRows = useMemo(
     () => rows.filter((r) => selectedItemIds.has(r.itemId) && r.outletRowId),
@@ -391,7 +421,8 @@ export default function OutletInventoryPage() {
   };
 
   const handleCopyToLocations = async () => {
-    const targetIds = Array.from(copyTargets);
+    const validTargetIds = new Set(copyTargetLocations.map((loc: any) => loc.id));
+    const targetIds = Array.from(copyTargets).filter((id) => validTargetIds.has(id));
     if (!activeLoc) {
       setToast("Select a source location before copying inventory setup.");
       return;

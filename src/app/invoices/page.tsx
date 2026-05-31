@@ -24,6 +24,8 @@ import {
   type Invoice,
   type InvoiceItem,
   type MonthlyInvoiceSummary,
+  getLocationBillingProfile,
+  type LocationBillingProfile,
 } from "@/lib/storage";
 
 function monthLabel(value: string) {
@@ -92,7 +94,13 @@ function openPdfPreviewWindow(invoiceNumber: string) {
   return previewWindow;
 }
 
-async function saveInvoicePdf(invoice: Invoice, items: InvoiceItem[], locationName: string, previewWindow?: Window | null) {
+async function saveInvoicePdf(
+  invoice: Invoice,
+  items: InvoiceItem[],
+  locationName: string,
+  billingProfile: LocationBillingProfile | null,
+  previewWindow?: Window | null
+) {
   const { jsPDF } = await import("jspdf");
   const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "letter" });
   const pageBottom = 720;
@@ -140,26 +148,131 @@ async function saveInvoicePdf(invoice: Invoice, items: InvoiceItem[], locationNa
 
   const requisitions = Array.from(new Set(items.map((item) => item.requisitionId).filter(Boolean))) as string[];
 
-  setBodyStyle(18, "bold");
+  // Header banner
+  setBodyStyle(20, "bold");
+  doc.setTextColor(37, 99, 235); // Sleek brand blue color
   doc.text("STOCK DHARMA", left, y);
   y += 22;
-  write("Monthly Location Invoice", left, 11, "normal", 22);
+  setBodyStyle(10, "normal");
+  doc.setTextColor(100, 116, 139);
+  doc.text("Monthly Location Invoice", left, y);
+  y += 18;
   drawRule();
 
-  write(`Invoice number: ${invoice.invoiceNumber}`, left, 11, "bold");
-  write(`Location: ${locationName}`);
-  write(`Invoice month: ${monthLabel(invoice.invoiceMonth)}`);
-  write(`Status: ${invoice.status}`);
-  write(`Generated date: ${new Date(invoice.generatedAt).toLocaleDateString()}`, left, 10, "normal", 22);
+  // Invoice Details Grid
+  const colWidth = 240;
+  
+  // Left Column - Invoice Meta
+  let detailsY = y;
+  setBodyStyle(10, "bold");
+  doc.text("INVOICE SUMMARY", left, detailsY);
+  detailsY += 16;
+  setBodyStyle(9, "normal");
+  doc.text(`Invoice Number: ${invoice.invoiceNumber}`, left, detailsY);
+  detailsY += 14;
+  doc.text(`Invoice Month: ${monthLabel(invoice.invoiceMonth)}`, left, detailsY);
+  detailsY += 14;
+  doc.text(`Status: ${invoice.status.toUpperCase()}`, left, detailsY);
+  detailsY += 14;
+  doc.text(`Issued Date: ${new Date(invoice.generatedAt).toLocaleDateString()}`, left, detailsY);
+  detailsY += 14;
 
-  write("Requisitions included", left, 11, "bold");
-  if (requisitions.length === 0) {
-    write("No requisition references found.", left, 10, "normal", 22);
-  } else {
-    const requisitionLines = doc.splitTextToSize(requisitions.join(", "), 520) as string[];
-    requisitionLines.forEach((line) => write(line, left, 10));
-    y += 6;
+  // Split requisitions to fit 230 width
+  if (requisitions.length > 0) {
+    detailsY += 6;
+    setBodyStyle(9, "bold");
+    doc.text("Requisitions included:", left, detailsY);
+    detailsY += 12;
+    setBodyStyle(8, "normal");
+    const reqLines = doc.splitTextToSize(requisitions.join(", "), 220) as string[];
+    reqLines.forEach((line) => {
+      doc.text(line, left, detailsY);
+      detailsY += 10;
+    });
   }
+
+  // Right Column - Location details (Physical Store vs Legal Corp)
+  let rightY = y;
+  
+  // Resolve physical store info (or fallback to basic location name)
+  const storeName = locationName;
+  const storeAddr = billingProfile?.storeAddress 
+    ? `${billingProfile.storeAddress}, ${billingProfile.storeCity || ""}, ${billingProfile.storeProvince || ""} ${billingProfile.storePostalCode || ""}`.trim()
+    : "Physical address not configured";
+  const storePhone = billingProfile?.storePhone ? `Phone: ${billingProfile.storePhone}` : "Phone: —";
+  const storeManager = billingProfile?.storeManagerName ? `Mgr: ${billingProfile.storeManagerName}` : "";
+
+  setBodyStyle(10, "bold");
+  doc.text("STORE LOCATION", left + colWidth, rightY);
+  rightY += 16;
+  setBodyStyle(9, "normal");
+  doc.text(storeName, left + colWidth, rightY);
+  rightY += 14;
+  
+  // Wrap store address to fit right column
+  const storeAddrLines = doc.splitTextToSize(storeAddr, 260) as string[];
+  storeAddrLines.forEach((line) => {
+    doc.text(line, left + colWidth, rightY);
+    rightY += 13;
+  });
+  doc.text(storePhone, left + colWidth, rightY);
+  rightY += 13;
+  if (storeManager) {
+    doc.text(storeManager, left + colWidth, rightY);
+    rightY += 13;
+  }
+
+  rightY += 10;
+
+  // Legal billing profile details ("BILL TO")
+  setBodyStyle(10, "bold");
+  doc.text("BILL TO (LEGAL CORPORATION)", left + colWidth, rightY);
+  rightY += 16;
+  setBodyStyle(9, "normal");
+
+  const corpName = billingProfile?.legalName ?? `Franchise Location: ${locationName}`;
+  const corpIncAddress = billingProfile?.incorporationAddress ?? "";
+  const corpBillAddress = billingProfile?.billingAddress 
+    ? `${billingProfile.billingAddress}, ${billingProfile.billingCity || ""}, ${billingProfile.billingProvince || ""} ${billingProfile.billingPostalCode || ""}`.trim()
+    : (billingProfile?.storeAddress 
+        ? `${billingProfile.storeAddress}, ${billingProfile.storeCity || ""}, ${billingProfile.storeProvince || ""} ${billingProfile.storePostalCode || ""}`.trim()
+        : "Address not configured");
+  
+  const hstStr = billingProfile?.hstNumber ? `HST Number: ${billingProfile.hstNumber}` : "HST Number: Not Configured";
+  const bnStr = billingProfile?.businessNumber ? `Business Number: ${billingProfile.businessNumber}` : "";
+  const billEmailStr = billingProfile?.billingEmail ? `Billing Email: ${billingProfile.billingEmail}` : "";
+
+  doc.text(corpName, left + colWidth, rightY);
+  rightY += 14;
+  
+  if (corpIncAddress) {
+    const incLines = doc.splitTextToSize(`Corp: ${corpIncAddress}`, 260) as string[];
+    incLines.forEach((line) => {
+      doc.text(line, left + colWidth, rightY);
+      rightY += 13;
+    });
+  }
+  
+  const billLines = doc.splitTextToSize(`Billing: ${corpBillAddress}`, 260) as string[];
+  billLines.forEach((line) => {
+    doc.text(line, left + colWidth, rightY);
+    rightY += 13;
+  });
+
+  doc.text(hstStr, left + colWidth, rightY);
+  rightY += 13;
+  if (bnStr) {
+    doc.text(bnStr, left + colWidth, rightY);
+    rightY += 13;
+  }
+  if (billEmailStr) {
+    doc.text(billEmailStr, left + colWidth, rightY);
+    rightY += 13;
+  }
+
+  // Advance y to the bottom of both columns
+  y = Math.max(detailsY, rightY) + 15;
+  drawRule();
 
   writeTableHeader();
   if (items.length === 0) {
@@ -338,12 +451,13 @@ function MonthlyInvoicesContent() {
     try {
       const items = currentItems && currentItems.length > 0 ? currentItems : await loadInvoiceItems(invoice.id);
       const locationName = locationNameById.get(invoice.locationId) ?? invoice.locationId;
+      const billingProfile = await getLocationBillingProfile(invoice.locationId);
       console.log("Invoice PDF debug", {
         invoice_number: invoice.invoiceNumber,
         loaded_items_count: items.length,
         subtotal: invoice.subtotal,
       });
-      await saveInvoicePdf(invoice, items, locationName, previewWindow);
+      await saveInvoicePdf(invoice, items, locationName, billingProfile, previewWindow);
     } catch (error) {
       console.error("Invoice PDF download failed", error);
       if (previewWindow && !previewWindow.closed) {

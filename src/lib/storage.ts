@@ -553,6 +553,267 @@ export async function allocateInventoryToLocations(
   return { success: true, insertedRows, errors: errors.length > 0 ? errors : undefined };
 }
 
+export interface CopyInventoryItemsToLocationsOptions {
+  sourceRowIds: string[];
+  targetLocationIds: string[];
+  copyParLevels: boolean;
+  copySupplierCostSettings: boolean;
+  copyPurchaseOptions: boolean;
+  copyStock: boolean;
+  updateExistingSetupFields: boolean;
+}
+
+export interface CopyInventoryItemsToLocationsResult {
+  created: number;
+  updated: number;
+  skipped: number;
+  purchaseOptionsCopied: number;
+  failed: number;
+  errors: string[];
+  insertedRows: any[];
+  updatedRows: any[];
+}
+
+const normalizeInventoryCopyKey = (value: any) =>
+  String(value ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+const getInventoryDuplicateKey = (row: any) => [
+  normalizeInventoryCopyKey(row.name),
+  normalizeInventoryCopyKey(row.baseunit ?? row.baseUnit ?? row.unit),
+  normalizeInventoryCopyKey(row.supplierid ?? row.supplierId ?? ''),
+].join('|');
+
+const getPurchaseOptionDuplicateKey = (row: any) => [
+  normalizeInventoryCopyKey(row.supplier_name ?? row.supplierName),
+  normalizeInventoryCopyKey(row.purchase_uom ?? row.purchaseUom),
+  normalizeInventoryCopyKey(row.pack_qty ?? row.packQty ?? ''),
+  normalizeInventoryCopyKey(row.unit_price ?? row.unitPrice ?? 0),
+].join('|');
+
+/**
+ * Copy independent location-level Inventory setup rows to other locations.
+ *
+ * This intentionally touches only:
+ *   - inventory_items
+ *   - purchase_options, when requested
+ *
+ * It does not touch Outlet Inventory, HQ sale items, requisitions, orders,
+ * recipes, production, reports, invoices, or movements.
+ */
+export async function copyInventoryItemsToLocations(
+  options: CopyInventoryItemsToLocationsOptions
+): Promise<CopyInventoryItemsToLocationsResult> {
+  const result: CopyInventoryItemsToLocationsResult = {
+    created: 0,
+    updated: 0,
+    skipped: 0,
+    purchaseOptionsCopied: 0,
+    failed: 0,
+    errors: [],
+    insertedRows: [],
+    updatedRows: [],
+  };
+
+  const sourceRowIds = Array.from(new Set(options.sourceRowIds.map(String).filter(Boolean)));
+  const targetLocationIds = Array.from(new Set(options.targetLocationIds.map(String).filter(Boolean)));
+  if (sourceRowIds.length === 0 || targetLocationIds.length === 0) return result;
+
+  const { data: sourceRows, error: sourceErr } = await supabase
+    .from('inventory_items')
+    .select('*')
+    .in('id', sourceRowIds);
+
+  if (sourceErr) {
+    result.failed = sourceRowIds.length * targetLocationIds.length;
+    result.errors.push(`Source fetch error: ${sourceErr.message}`);
+    return result;
+  }
+
+  const sourceById = new Map<string, any>((sourceRows ?? []).map((row: any) => [String(row.id), row]));
+  const copyableSources = sourceRowIds.map((id) => sourceById.get(id)).filter(Boolean);
+  for (const id of sourceRowIds) {
+    if (!sourceById.has(id)) {
+      result.failed += targetLocationIds.length;
+      result.errors.push(`${id}: source inventory row not found`);
+    }
+  }
+  if (copyableSources.length === 0) return result;
+
+  const sourceItemIds = Array.from(new Set(copyableSources.map((row: any) => String(row.item_id ?? row.id)).filter(Boolean)));
+
+  const { data: targetRows, error: targetErr } = await supabase
+    .from('inventory_items')
+    .select('*')
+    .in('location_id', targetLocationIds);
+
+  if (targetErr) {
+    result.failed += copyableSources.length * targetLocationIds.length;
+    result.errors.push(`Target fetch error: ${targetErr.message}`);
+    return result;
+  }
+
+  const existingByLocationAndItemId = new Map<string, any>();
+  const existingByLocationAndFallback = new Map<string, any>();
+  for (const row of targetRows ?? []) {
+    const locId = String(row.location_id ?? '');
+    const itemId = String(row.item_id ?? row.id ?? '');
+    if (itemId) existingByLocationAndItemId.set(`${locId}|${itemId}`, row);
+    existingByLocationAndFallback.set(`${locId}|${getInventoryDuplicateKey(row)}`, row);
+  }
+
+  const sourcePurchaseOptionsByItemId = new Map<string, any[]>();
+  if (options.copyPurchaseOptions) {
+    const { data: sourceOptions, error: sourceOptErr } = await supabase
+      .from('purchase_options')
+      .select('*')
+      .in('inventory_item_id', sourceRowIds);
+
+    if (sourceOptErr) {
+      result.errors.push(`Purchase options fetch error: ${sourceOptErr.message}`);
+    } else {
+      for (const row of sourceOptions ?? []) {
+        const key = String(row.inventory_item_id ?? '');
+        if (!sourcePurchaseOptionsByItemId.has(key)) sourcePurchaseOptionsByItemId.set(key, []);
+        sourcePurchaseOptionsByItemId.get(key)!.push(row);
+      }
+    }
+  }
+
+  const buildSetupPayload = (source: any) => ({
+    name: source.name || '',
+    category: source.category || '',
+    itemtype: source.itemtype || '',
+    baseunit: source.baseunit || source.unit || '',
+    unit: source.unit || '',
+    parlevel: options.copyParLevels ? Number(source.parlevel ?? 0) : 0,
+    cost: options.copySupplierCostSettings ? Number(source.cost ?? 0) : 0,
+    purchasecost: options.copySupplierCostSettings && source.purchasecost != null ? Number(source.purchasecost) : null,
+    supplierid: options.copySupplierCostSettings && source.supplierid != null ? Number(source.supplierid) : null,
+    purchaseunits: options.copySupplierCostSettings && Array.isArray(source.purchaseunits) ? source.purchaseunits : [],
+    purchase_uom: options.copySupplierCostSettings ? source.purchase_uom ?? null : null,
+    pack_qty: options.copySupplierCostSettings && source.pack_qty != null ? Number(source.pack_qty) : null,
+    inner_unit_type: options.copySupplierCostSettings ? source.inner_unit_type ?? null : null,
+    inner_unit_size: options.copySupplierCostSettings && source.inner_unit_size != null ? Number(source.inner_unit_size) : null,
+    inner_unit_uom: options.copySupplierCostSettings ? source.inner_unit_uom ?? null : null,
+    base_uom: options.copySupplierCostSettings ? source.base_uom ?? null : null,
+    allowed_recipe_uoms: options.copySupplierCostSettings && Array.isArray(source.allowed_recipe_uoms) ? source.allowed_recipe_uoms : null,
+    pricetrend: source.pricetrend || 'steady',
+    priceincrease: Boolean(source.priceincrease),
+  });
+
+  const copyPurchaseOptionsForTarget = async (source: any, targetRowId: string) => {
+    if (!options.copyPurchaseOptions) return;
+    const sourceOptions = sourcePurchaseOptionsByItemId.get(String(source.id)) ?? [];
+    if (sourceOptions.length === 0) return;
+
+    const { data: existingOptions, error: existingOptErr } = await supabase
+      .from('purchase_options')
+      .select('*')
+      .eq('inventory_item_id', targetRowId);
+
+    if (existingOptErr) {
+      result.errors.push(`${source.name}@${targetRowId}: purchase option check failed: ${existingOptErr.message}`);
+      return;
+    }
+
+    const existingOptionKeys = new Set((existingOptions ?? []).map(getPurchaseOptionDuplicateKey));
+    const toInsert = sourceOptions
+      .filter((opt: any) => !existingOptionKeys.has(getPurchaseOptionDuplicateKey(opt)))
+      .map((opt: any) => ({
+        inventory_item_id: targetRowId,
+        supplier_name: opt.supplier_name ?? '',
+        supplier_product_name: opt.supplier_product_name ?? null,
+        purchase_uom: opt.purchase_uom ?? '',
+        pack_qty: opt.pack_qty != null ? Number(opt.pack_qty) : null,
+        pack_uom: opt.pack_uom ?? null,
+        unit_price: opt.unit_price != null ? Number(opt.unit_price) : 0,
+        is_preferred: Boolean(opt.is_preferred),
+      }));
+
+    if (toInsert.length === 0) return;
+
+    const { error: insertOptErr } = await supabase
+      .from('purchase_options')
+      .insert(toInsert);
+
+    if (insertOptErr) {
+      result.errors.push(`${source.name}@${targetRowId}: purchase option copy failed: ${insertOptErr.message}`);
+    } else {
+      result.purchaseOptionsCopied += toInsert.length;
+    }
+  };
+
+  for (const source of copyableSources) {
+    const sourceItemId = String(source.item_id ?? source.id);
+    for (const targetLocationId of targetLocationIds) {
+      const existingByItemId = sourceItemIds.length > 0
+        ? existingByLocationAndItemId.get(`${targetLocationId}|${sourceItemId}`)
+        : null;
+      const existingByFallback = existingByLocationAndFallback.get(`${targetLocationId}|${getInventoryDuplicateKey(source)}`);
+      const existing = existingByItemId ?? existingByFallback ?? null;
+
+      if (existing && !options.updateExistingSetupFields) {
+        result.skipped++;
+        continue;
+      }
+
+      if (existing && options.updateExistingSetupFields) {
+        const updatePayload: Record<string, any> = {
+          ...buildSetupPayload(source),
+          ...(options.copyStock ? { instock: Number(source.instock ?? 0) } : {}),
+        };
+        delete updatePayload.name;
+
+        const { data: updated, error: updateErr } = await supabase
+          .from('inventory_items')
+          .update(updatePayload)
+          .eq('id', existing.id)
+          .select()
+          .maybeSingle();
+
+        if (updateErr) {
+          result.failed++;
+          result.errors.push(`${source.name}@${targetLocationId}: update failed: ${updateErr.message}`);
+          continue;
+        }
+
+        result.updated++;
+        if (updated) result.updatedRows.push(mapInventoryToFrontend(updated));
+        await copyPurchaseOptionsForTarget(source, String(existing.id));
+        continue;
+      }
+
+      const rowId = crypto.randomUUID();
+      const insertPayload = {
+        id: rowId,
+        item_id: sourceItemId,
+        location_id: targetLocationId,
+        ...buildSetupPayload(source),
+        instock: options.copyStock ? Number(source.instock ?? 0) : 0,
+        linked_recipe_id: null,
+      };
+
+      const { data: inserted, error: insertErr } = await supabase
+        .from('inventory_items')
+        .insert(insertPayload)
+        .select()
+        .maybeSingle();
+
+      if (insertErr) {
+        result.failed++;
+        result.errors.push(`${source.name}@${targetLocationId}: insert failed: ${insertErr.message}`);
+        continue;
+      }
+
+      result.created++;
+      if (inserted) result.insertedRows.push(mapInventoryToFrontend(inserted));
+      await copyPurchaseOptionsForTarget(source, rowId);
+    }
+  }
+
+  return result;
+}
+
 
 
 /**
@@ -2361,6 +2622,147 @@ export async function resetUserPassword(
   });
   const json2 = await res.json();
   if (!res.ok) return { success: false, error: json2.error };
+  return { success: true };
+}
+
+// ── location_billing_profiles (HQ Billing & Incorporation) ──────────────────
+
+export interface LocationBillingProfile {
+  id?: string;
+  locationId: string;
+  legalName?: string | null;
+  incorporationAddress?: string | null;
+  billingAddress?: string | null;
+  billingCity?: string | null;
+  billingProvince?: string | null;
+  billingPostalCode?: string | null;
+  hstNumber?: string | null;
+  businessNumber?: string | null;
+  billingEmail?: string | null;
+  invoiceContactName?: string | null;
+  storeAddress?: string | null;
+  storeCity?: string | null;
+  storeProvince?: string | null;
+  storePostalCode?: string | null;
+  storePhone?: string | null;
+  storeManagerName?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+const mapBillingProfileToFrontend = (db: any): LocationBillingProfile => ({
+  id: db.id,
+  locationId: db.location_id,
+  legalName: db.legal_name,
+  incorporationAddress: db.incorporation_address,
+  billingAddress: db.billing_address,
+  billingCity: db.billing_city,
+  billingProvince: db.billing_province,
+  billingPostalCode: db.billing_postal_code,
+  hstNumber: db.hst_number,
+  businessNumber: db.business_number,
+  billingEmail: db.billing_email,
+  invoiceContactName: db.invoice_contact_name,
+  storeAddress: db.store_address,
+  storeCity: db.store_city,
+  storeProvince: db.store_province,
+  storePostalCode: db.store_postal_code,
+  storePhone: db.store_phone,
+  storeManagerName: db.store_manager_name,
+  createdAt: db.created_at,
+  updatedAt: db.updated_at,
+});
+
+const mapBillingProfileToDB = (bp: any) => ({
+  location_id: bp.locationId,
+  legal_name: bp.legalName || null,
+  incorporation_address: bp.incorporationAddress || null,
+  billing_address: bp.billingAddress || null,
+  billing_city: bp.billingCity || null,
+  billing_province: bp.billingProvince || null,
+  billing_postal_code: bp.billingPostalCode || null,
+  hst_number: bp.hstNumber || null,
+  business_number: bp.businessNumber || null,
+  billing_email: bp.billingEmail || null,
+  invoice_contact_name: bp.invoiceContactName || null,
+  store_address: bp.storeAddress || null,
+  store_city: bp.storeCity || null,
+  store_province: bp.storeProvince || null,
+  store_postal_code: bp.storePostalCode || null,
+  store_phone: bp.storePhone || null,
+  store_manager_name: bp.storeManagerName || null,
+});
+
+export async function getLocationBillingProfile(locationId: string): Promise<LocationBillingProfile | null> {
+  if (!locationId) return null;
+  const { data, error } = await supabase
+    .from('location_billing_profiles')
+    .select('*')
+    .eq('location_id', locationId)
+    .maybeSingle();
+
+  if (error || !data) return null;
+  return mapBillingProfileToFrontend(data);
+}
+
+export async function upsertLocationBillingProfile(
+  locationId: string,
+  billingProfile: Partial<LocationBillingProfile>
+): Promise<{ success: boolean; error?: string }> {
+  if (!locationId) return { success: false, error: 'Location ID is required.' };
+  
+  const dbRow = mapBillingProfileToDB({ ...billingProfile, locationId });
+  const { error } = await supabase
+    .from('location_billing_profiles')
+    .upsert(dbRow, { onConflict: 'location_id' });
+
+  if (error) {
+    console.error('[upsertLocationBillingProfile] error:', error);
+    return { success: false, error: error.message };
+  }
+  return { success: true };
+}
+
+export async function getUserProfileWithLocationAndBilling(
+  userId: string
+): Promise<{ profile: UserProfileRow | null; billing: LocationBillingProfile | null }> {
+  const { data: profileData, error: profileErr } = await supabase
+    .from('user_profiles')
+    .select('*')
+    .eq('user_id', userId)
+    .maybeSingle();
+
+  if (profileErr || !profileData) {
+    return { profile: null, billing: null };
+  }
+
+  const profile = mapProfileToFrontend(profileData);
+  let billing: LocationBillingProfile | null = null;
+  if (profile.locationId) {
+    billing = await getLocationBillingProfile(profile.locationId);
+  }
+
+  return { profile, billing };
+}
+
+export async function updateUserProfileAndBilling(
+  profileId: string,
+  profileUpdates: Partial<Pick<UserProfileRow, 'fullName' | 'role' | 'locationId' | 'isActive' | 'phone'>>,
+  billingUpdates: Partial<LocationBillingProfile>
+): Promise<{ success: boolean; error?: string }> {
+  const profileRes = await updateUserProfile(profileId, profileUpdates);
+  if (!profileRes.success) {
+    return { success: false, error: profileRes.error };
+  }
+
+  const targetLocationId = profileUpdates.locationId;
+  if (targetLocationId) {
+    const billingRes = await upsertLocationBillingProfile(targetLocationId, billingUpdates);
+    if (!billingRes.success) {
+      return { success: false, error: billingRes.error };
+    }
+  }
+
   return { success: true };
 }
 

@@ -9,10 +9,28 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
-import { Search, Plus, Upload, MoreHorizontal, ShoppingCart, History, Save, Trash2, ArrowDown, ArrowUp, AlertTriangle, X, Download, Loader2, Link2, ChevronDown, ChevronRight, GitMerge, MapPin } from "lucide-react";
-import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId, logMovement, deleteInventoryItem, deleteSaleItemByNameOrId, insertPurchaseOptions, loadPurchaseOptions, savePurchaseOptions, deletePurchaseOption, updateInventoryRowItemId, allocateInventoryToLocations, loadLocations } from "@/lib/storage";
+import { Search, Plus, Upload, MoreHorizontal, ShoppingCart, History, Save, Trash2, ArrowDown, ArrowUp, AlertTriangle, X, Download, Loader2, Link2, ChevronDown, ChevronRight, GitMerge, MapPin, Copy } from "lucide-react";
+import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId, logMovement, deleteInventoryItem, deleteSaleItemByNameOrId, insertPurchaseOptions, loadPurchaseOptions, savePurchaseOptions, deletePurchaseOption, updateInventoryRowItemId, allocateInventoryToLocations, loadLocations, copyInventoryItemsToLocations, type CopyInventoryItemsToLocationsResult } from "@/lib/storage";
 import { normalizeInventoryName } from "@/lib/inventoryIdentity";
 import { SupplierCombobox } from "@/components/InventoryEditDrawer";
+
+const LONDON_TEMPLATE_LOCATION_ID = "LOC-1091";
+
+const isValidInventoryCopyTargetLocation = (loc: any) => {
+  const id = String(loc?.id ?? "").trim();
+  const name = String(loc?.name ?? "").trim();
+  const status = String(loc?.status ?? "").trim().toLowerCase();
+  const inactive = ["inactive", "disabled", "archived", "closed"].includes(status);
+  return Boolean(
+    id &&
+    name &&
+    id !== "LOC-HQ" &&
+    id !== "LOC-NULL" &&
+    id !== LONDON_TEMPLATE_LOCATION_ID &&
+    name.toLowerCase() !== "null" &&
+    !inactive
+  );
+};
 
 export default function Inventory() {
   const router = useRouter();
@@ -161,6 +179,17 @@ export default function Inventory() {
   const [copySupplier, setCopySupplier]             = useState(true);
   const [copyCost, setCopyCost]                     = useState(true);
   const [startingPar, setStartingPar]               = useState<number>(0);
+
+  // ── London template inventory copy (HQ only) ─────────────────────────────
+  const [copyInventoryOpen, setCopyInventoryOpen] = useState(false);
+  const [copyInventoryTargets, setCopyInventoryTargets] = useState<string[]>([]);
+  const [copyInventoryPar, setCopyInventoryPar] = useState(true);
+  const [copyInventorySetup, setCopyInventorySetup] = useState(true);
+  const [copyInventoryPurchaseOptions, setCopyInventoryPurchaseOptions] = useState(true);
+  const [copyInventoryStock, setCopyInventoryStock] = useState(false);
+  const [copyInventoryUpdateExisting, setCopyInventoryUpdateExisting] = useState(false);
+  const [copyInventoryLoading, setCopyInventoryLoading] = useState(false);
+  const [copyInventoryResult, setCopyInventoryResult] = useState<CopyInventoryItemsToLocationsResult | null>(null);
 
   useEffect(() => {
     async function fetchData() {
@@ -1845,6 +1874,26 @@ export default function Inventory() {
     return groups;
   }, [rowsByItemId]);
 
+  const selectedCopyInventoryItems = useMemo(
+    () => inventoryData.filter((item: any) => selectedItemIds.map(String).includes(String(item.id))),
+    [inventoryData, selectedItemIds]
+  );
+
+  const inventoryCopyTargetLocations = useMemo(
+    () => allLocations.filter(isValidInventoryCopyTargetLocation),
+    [allLocations]
+  );
+
+  const londonTemplateLocation = useMemo(
+    () => allLocations.find((loc: any) => loc.id === LONDON_TEMPLATE_LOCATION_ID),
+    [allLocations]
+  );
+
+  const hasNonLondonCopySelection = useMemo(
+    () => selectedCopyInventoryItems.some((item: any) => item.locationId !== LONDON_TEMPLATE_LOCATION_ID),
+    [selectedCopyInventoryItems]
+  );
+
   // ── Merge handler ─────────────────────────────────────────────────────────
   //
   // Reassigns item_id on a single row (the "duplicate") to the canonical item_id.
@@ -1915,6 +1964,71 @@ export default function Inventory() {
       setAllocationResult(`✗ Unexpected error: ${err?.message ?? "Unknown"}`);
     } finally {
       setAllocationLoading(false);
+    }
+  };
+
+  const openCopyInventoryModal = () => {
+    if (!isHqAdmin(user)) {
+      alert("Only HQ admins can copy Inventory setup to other locations.");
+      return;
+    }
+    if (selectedCopyInventoryItems.length === 0) {
+      alert("Select inventory items first.");
+      return;
+    }
+    if (inventoryCopyTargetLocations.length === 0) {
+      alert("No valid active target locations are available.");
+      return;
+    }
+
+    setCopyInventoryTargets(inventoryCopyTargetLocations.map((loc: any) => loc.id));
+    setCopyInventoryPar(true);
+    setCopyInventorySetup(true);
+    setCopyInventoryPurchaseOptions(true);
+    setCopyInventoryStock(false);
+    setCopyInventoryUpdateExisting(false);
+    setCopyInventoryResult(null);
+    setCopyInventoryOpen(true);
+  };
+
+  const handleCopyInventoryToLocations = async () => {
+    if (!isHqAdmin(user)) return;
+    const validTargetIds = new Set(inventoryCopyTargetLocations.map((loc: any) => loc.id));
+    const targetIds = copyInventoryTargets.filter((id) => validTargetIds.has(id));
+    if (selectedCopyInventoryItems.length === 0) {
+      alert("Select inventory items first.");
+      return;
+    }
+    if (targetIds.length === 0) {
+      alert("Select at least one target location.");
+      return;
+    }
+
+    setCopyInventoryLoading(true);
+    setCopyInventoryResult(null);
+    try {
+      const result = await copyInventoryItemsToLocations({
+        sourceRowIds: selectedCopyInventoryItems.map((item: any) => String(item.id)),
+        targetLocationIds: targetIds,
+        copyParLevels: copyInventoryPar,
+        copySupplierCostSettings: copyInventorySetup,
+        copyPurchaseOptions: copyInventoryPurchaseOptions,
+        copyStock: copyInventoryStock,
+        updateExistingSetupFields: copyInventoryUpdateExisting,
+      });
+
+      setCopyInventoryResult(result);
+      if (result.insertedRows.length > 0 || result.updatedRows.length > 0) {
+        setInventoryData((prev: any[]) => {
+          const updatedById = new Map(result.updatedRows.map((row: any) => [String(row.id), row]));
+          const patched = prev.map((row: any) => updatedById.get(String(row.id)) ?? row);
+          const existingIds = new Set(patched.map((row: any) => String(row.id)));
+          const newRows = result.insertedRows.filter((row: any) => !existingIds.has(String(row.id)));
+          return [...newRows, ...patched];
+        });
+      }
+    } finally {
+      setCopyInventoryLoading(false);
     }
   };
 
@@ -2200,6 +2314,14 @@ export default function Inventory() {
               <span className="text-sm font-semibold text-blue-100">{selectedItemIds.length} operational node{selectedItemIds.length !== 1 ? 's' : ''} targeted</span>
               <div className="flex gap-4 items-center">
                 <button onClick={() => setSelectedItemIds([])} className="text-xs font-semibold text-blue-200 transition-colors hover:text-white">Clear Targets</button>
+                {isHqAdmin(user) && (
+                  <button
+                    onClick={openCopyInventoryModal}
+                    className="flex items-center gap-1.5 rounded bg-blue-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm transition-colors hover:bg-blue-500"
+                  >
+                    <Copy className="h-3 w-3" /> Copy Selected to Locations
+                  </button>
+                )}
                 <button
                   onClick={() => setIsDeleteModalOpen(true)}
                   className="flex items-center gap-1.5 rounded bg-red-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm transition-colors hover:bg-red-500"
@@ -4187,6 +4309,131 @@ export default function Inventory() {
                   <><GitMerge className="h-4 w-4" /> Confirm Merge</>
                 )}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {copyInventoryOpen && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4"
+          onClick={() => { if (!copyInventoryLoading) setCopyInventoryOpen(false); }}
+        >
+          <div
+            className="flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#111111] shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4 border-b border-white/10 px-6 py-4">
+              <div>
+                <h3 className="flex items-center gap-2 text-base font-bold text-zinc-100">
+                  <Copy className="h-4 w-4 text-blue-300" />
+                  Copy Selected Inventory Items to Locations
+                </h3>
+                <p className="mt-1 text-xs text-zinc-500">
+                  Source template: <span className="font-semibold text-zinc-200">{londonTemplateLocation?.name ?? "London"} / {LONDON_TEMPLATE_LOCATION_ID}</span>
+                  {" · "}
+                  {selectedCopyInventoryItems.length} selected item{selectedCopyInventoryItems.length !== 1 ? "s" : ""}
+                </p>
+              </div>
+              <button
+                onClick={() => setCopyInventoryOpen(false)}
+                disabled={copyInventoryLoading}
+                className="rounded-lg p-1.5 text-zinc-500 transition-colors hover:bg-white/10 hover:text-zinc-100 disabled:opacity-50"
+                aria-label="Close copy inventory modal"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="flex-1 space-y-5 overflow-y-auto px-6 py-5">
+              {hasNonLondonCopySelection && (
+                <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs font-medium text-amber-100">
+                  This action is intended to copy from London / {LONDON_TEMPLATE_LOCATION_ID} template inventory. Some selected rows are from another location.
+                </div>
+              )}
+
+              <section className="space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <h4 className="text-sm font-bold text-zinc-100">Target Active Locations</h4>
+                  <div className="flex items-center gap-3">
+                    <button onClick={() => setCopyInventoryTargets(inventoryCopyTargetLocations.map((loc: any) => loc.id))} className="text-xs font-semibold text-blue-300 hover:text-blue-200">Select All</button>
+                    <button onClick={() => setCopyInventoryTargets([])} className="text-xs font-semibold text-zinc-500 hover:text-zinc-200">Clear All</button>
+                  </div>
+                </div>
+                <div className="grid max-h-64 gap-2 overflow-y-auto pr-1 sm:grid-cols-2">
+                  {inventoryCopyTargetLocations.map((loc: any) => (
+                    <label key={loc.id} className="flex cursor-pointer items-center gap-3 rounded-xl border border-white/10 bg-[#171717] px-3 py-2.5 transition-colors hover:bg-[#1d1d1d]">
+                      <input
+                        type="checkbox"
+                        checked={copyInventoryTargets.includes(loc.id)}
+                        onChange={(e) => {
+                          if (e.target.checked) setCopyInventoryTargets((prev) => [...prev, loc.id]);
+                          else setCopyInventoryTargets((prev) => prev.filter((id) => id !== loc.id));
+                        }}
+                        className="h-4 w-4 rounded border-white/20 bg-[#111111] text-blue-600 focus:ring-blue-500"
+                      />
+                      <span className="min-w-0">
+                        <span className="block truncate text-sm font-semibold text-zinc-100">{loc.name}</span>
+                        <span className="block truncate font-mono text-[10px] text-zinc-500">{loc.id}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </section>
+
+              <section className="space-y-3">
+                <h4 className="text-sm font-bold text-zinc-100">Copy Options</h4>
+                <div className="grid gap-2">
+                  {[
+                    { label: "Copy par levels", value: copyInventoryPar, set: setCopyInventoryPar, helper: "Copies source parlevel; otherwise target par starts at 0." },
+                    { label: "Copy supplier/cost/order settings", value: copyInventorySetup, set: setCopyInventorySetup, helper: "Copies supplierid, cost, purchase cost, purchase units, and packaging fields." },
+                    { label: "Copy purchase options", value: copyInventoryPurchaseOptions, set: setCopyInventoryPurchaseOptions, helper: "Copies supplier purchase rows to the new target inventory row IDs." },
+                    { label: "Copy stock", value: copyInventoryStock, set: setCopyInventoryStock, helper: "Default is off. When off, target instock starts at 0." },
+                    { label: "Update existing setup fields", value: copyInventoryUpdateExisting, set: setCopyInventoryUpdateExisting, helper: "Existing rows are skipped unless this is enabled. Stock is protected unless Copy stock is on." },
+                  ].map((option) => (
+                    <label key={option.label} className="flex cursor-pointer items-start gap-3 rounded-xl border border-white/10 bg-[#171717] px-3 py-2.5">
+                      <input
+                        type="checkbox"
+                        checked={option.value}
+                        onChange={(e) => option.set(e.target.checked)}
+                        className="mt-0.5 h-4 w-4 rounded border-white/20 bg-[#111111] text-blue-600 focus:ring-blue-500"
+                      />
+                      <span>
+                        <span className="block text-sm font-semibold text-zinc-100">{option.label}</span>
+                        <span className="block text-xs text-zinc-500">{option.helper}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </section>
+
+              {copyInventoryResult && (
+                <section className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3">
+                  <h4 className="text-sm font-bold text-emerald-100">Copy Result</h4>
+                  <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-5">
+                    <div className="rounded-lg bg-black/30 px-3 py-2"><span className="block text-zinc-500">Created</span><span className="font-bold text-zinc-100">{copyInventoryResult.created}</span></div>
+                    <div className="rounded-lg bg-black/30 px-3 py-2"><span className="block text-zinc-500">Updated</span><span className="font-bold text-zinc-100">{copyInventoryResult.updated}</span></div>
+                    <div className="rounded-lg bg-black/30 px-3 py-2"><span className="block text-zinc-500">Skipped</span><span className="font-bold text-zinc-100">{copyInventoryResult.skipped}</span></div>
+                    <div className="rounded-lg bg-black/30 px-3 py-2"><span className="block text-zinc-500">Options</span><span className="font-bold text-zinc-100">{copyInventoryResult.purchaseOptionsCopied}</span></div>
+                    <div className="rounded-lg bg-black/30 px-3 py-2"><span className="block text-zinc-500">Failed</span><span className="font-bold text-zinc-100">{copyInventoryResult.failed}</span></div>
+                  </div>
+                  {copyInventoryResult.errors.length > 0 && (
+                    <div className="mt-3 max-h-28 overflow-y-auto rounded-lg bg-black/30 px-3 py-2 text-xs text-red-200">
+                      {copyInventoryResult.errors.map((error, idx) => <div key={`${error}-${idx}`}>{error}</div>)}
+                    </div>
+                  )}
+                </section>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between gap-3 border-t border-white/10 bg-[#151515] px-6 py-4">
+              <p className="text-[10px] text-zinc-500">London and HQ are excluded as targets. New target rows use fresh row IDs.</p>
+              <div className="flex items-center gap-2">
+                <button onClick={() => setCopyInventoryOpen(false)} disabled={copyInventoryLoading} className="rounded-lg border border-white/10 px-4 py-2 text-sm font-semibold text-zinc-200 transition-colors hover:bg-white/10 disabled:opacity-50">Close</button>
+                <button onClick={handleCopyInventoryToLocations} disabled={copyInventoryLoading || copyInventoryTargets.length === 0} className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-blue-500 disabled:opacity-50">
+                  {copyInventoryLoading ? <><Loader2 className="h-4 w-4 animate-spin" /> Copying...</> : <><Copy className="h-4 w-4" /> Confirm Copy</>}
+                </button>
+              </div>
             </div>
           </div>
         </div>
