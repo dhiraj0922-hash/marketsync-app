@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
 import { loadLocations } from "@/lib/storage";
+import OutletPerformanceView from "./OutletPerformanceView";
 import {
   getCogsReport,
   getInventoryMovementReport,
@@ -78,7 +79,7 @@ export default function ReportsPage() {
   );
 }
 
-type Tab = "cogs" | "movement" | "profit" | "labour";
+type Tab = "cogs" | "movement" | "profit" | "labour" | "performance";
 
 function ReportsContent() {
   const [tab, setTab]               = useState<Tab>("cogs");
@@ -100,6 +101,7 @@ function ReportsContent() {
   }, []);
 
   const runReport = useCallback(async () => {
+    if (tab === "performance") return; // OutletPerformanceView fetches its own data
     setLoading(true);
     setError(null);
     const f = { locationId: locationId || null, dateFrom, dateTo };
@@ -171,7 +173,7 @@ function ReportsContent() {
 
       {/* ── Tabs */}
       <div className="flex gap-1 bg-neutral-100 p-1 rounded-xl w-fit">
-        {(["cogs", "movement", "profit", "labour"] as Tab[]).map(t => (
+        {(["cogs", "movement", "profit", "labour", "performance"] as Tab[]).map(t => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -179,7 +181,15 @@ function ReportsContent() {
               tab === t ? "bg-white text-brand-700 shadow-sm" : "text-neutral-500 hover:text-neutral-800"
             }`}
           >
-            {t === "cogs" ? "COGS" : t === "movement" ? "Movement Ledger" : t === "profit" ? "Profit" : "Labour"}
+            {t === "cogs" 
+              ? "COGS" 
+              : t === "movement" 
+              ? "Movement Ledger" 
+              : t === "profit" 
+              ? "Profit" 
+              : t === "labour" 
+              ? "Labour" 
+              : "Outlet Performance"}
           </button>
         ))}
       </div>
@@ -247,15 +257,17 @@ function ReportsContent() {
             )}
 
             {/* Run */}
-            <button
-              onClick={runReport}
-              disabled={loading}
-              className="flex items-center gap-2 px-4 py-2 bg-brand-600 text-white text-sm font-semibold rounded-lg hover:bg-brand-700 disabled:opacity-50 transition-colors shadow-sm"
-            >
-              {loading
-                ? <><Loader2 className="h-4 w-4 animate-spin" /> Loading…</>
-                : <><RefreshCw className="h-4 w-4" /> Run Report</>}
-            </button>
+            {tab !== "performance" && (
+              <button
+                onClick={runReport}
+                disabled={loading}
+                className="flex items-center gap-2 px-4 py-2 bg-brand-600 text-white text-sm font-semibold rounded-lg hover:bg-brand-700 disabled:opacity-50 transition-colors shadow-sm"
+              >
+                {loading
+                  ? <><Loader2 className="h-4 w-4 animate-spin" /> Loading…</>
+                  : <><RefreshCw className="h-4 w-4" /> Run Report</>}
+              </button>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -295,6 +307,16 @@ function ReportsContent() {
       {/* ── Labour tab */}
       {!loading && tab === "labour" && labourReport && labourReport.rows.length > 0 && (
         <LabourView report={labourReport} locName={locName} />
+      )}
+
+      {/* ── Outlet Performance tab */}
+      {tab === "performance" && (
+        <OutletPerformanceView
+          dateFrom={dateFrom}
+          dateTo={dateTo}
+          locationId={locationId}
+          locations={locations}
+        />
       )}
 
       {/* ── Empty state */}

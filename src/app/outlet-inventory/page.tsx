@@ -5,9 +5,11 @@ import { isHqAdmin } from "@/lib/roles";
 import {
   loadLocations, loadOutletCatalog, loadOutletInventoryV2,
   upsertOutletInventoryRowV2, bulkUpsertOutletInventoryV2,
+  copyOutletInventoryItemsToLocationsV2,
   saveNewRequisition, sendHqRequisitionNotification,
   applyPhysicalCount,
   type OutletCatalogItem, type OutletInventoryRowV2, type CountApplyEntry,
+  type CopyOutletInventoryResult,
 } from "@/lib/storage";
 import {
   exportToExcel, downloadOutletTemplate, parseExcelFile,
@@ -17,6 +19,7 @@ import {
   MapPin, Download, Upload, Save, Search, CheckCircle2,
   RefreshCw, X, Store, Package, Plus, FileSpreadsheet, ClipboardList,
   AlertCircle, ClipboardCheck, TrendingUp, TrendingDown, Minus,
+  Copy, Users,
 } from "lucide-react";
 
 type SourceFilter = "all" | "hq_supplied" | "local_vendor";
@@ -97,6 +100,16 @@ export default function OutletInventoryPage() {
   // Bulk enable state (catalog mode)
   const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(new Set());
   const [bulkEnabling,    setBulkEnabling]    = useState(false);
+
+  // Copy selected location inventory setup to other outlets
+  const [copyModalOpen, setCopyModalOpen] = useState(false);
+  const [copyTargets, setCopyTargets] = useState<Set<string>>(new Set());
+  const [copyMinPar, setCopyMinPar] = useState(true);
+  const [copySupplierSettings, setCopySupplierSettings] = useState(true);
+  const [copyStockCounts, setCopyStockCounts] = useState(false);
+  const [copyUpdateExisting, setCopyUpdateExisting] = useState(false);
+  const [copyRunning, setCopyRunning] = useState(false);
+  const [copyResult, setCopyResult] = useState<CopyOutletInventoryResult | null>(null);
 
   // import state (old excel.ts validation modal — kept for backward compat)
   const [importModalOpen, setImportModalOpen] = useState(false);
@@ -198,6 +211,26 @@ export default function OutletInventoryPage() {
       return true;
     });
   }, [rows, search, srcFilter, viewMode, suggestedQtyOnly, getRowSuggestedQty]);
+
+  const activeLocationLabel = useMemo(() => {
+    const loc = locations.find((l: any) => l.id === activeLoc);
+    return loc ? `${loc.name ?? loc.id} / ${loc.id}` : activeLoc;
+  }, [activeLoc, locations]);
+
+  const copyTargetLocations = useMemo(
+    () => locations.filter((l: any) => l.id && l.id !== "LOC-HQ" && l.id !== activeLoc),
+    [locations, activeLoc]
+  );
+
+  const selectedCopyRows = useMemo(
+    () => rows.filter((r) => selectedItemIds.has(r.itemId) && r.outletRowId),
+    [rows, selectedItemIds]
+  );
+
+  const visibleSelectableRows = useMemo(
+    () => filtered.filter((r) => viewMode === "catalog" ? !r.localEnabled : Boolean(r.outletRowId)),
+    [filtered, viewMode]
+  );
 
   const patch = (itemId: string, p: Partial<MergedRow>) =>
     setRows((prev) => prev.map((r) => r.itemId === itemId ? { ...r, ...p, dirty: true } : r));
@@ -332,6 +365,61 @@ export default function OutletInventoryPage() {
       await loadAll(activeLoc);
     } finally {
       setBulkEnabling(false);
+    }
+  };
+
+  const openCopyModal = () => {
+    if (!hq || !activeLoc) {
+      setToast("Select a source location before copying inventory setup.");
+      return;
+    }
+    if (selectedCopyRows.length === 0) {
+      setToast("Select existing outlet inventory rows to copy.");
+      return;
+    }
+    if (copyTargetLocations.length === 0) {
+      setToast("No target outlet locations are available.");
+      return;
+    }
+    setCopyTargets(new Set(copyTargetLocations.map((l: any) => l.id)));
+    setCopyMinPar(true);
+    setCopySupplierSettings(true);
+    setCopyStockCounts(false);
+    setCopyUpdateExisting(false);
+    setCopyResult(null);
+    setCopyModalOpen(true);
+  };
+
+  const handleCopyToLocations = async () => {
+    const targetIds = Array.from(copyTargets);
+    if (!activeLoc) {
+      setToast("Select a source location before copying inventory setup.");
+      return;
+    }
+    if (selectedCopyRows.length === 0) {
+      setToast("Select at least one existing source item.");
+      return;
+    }
+    if (targetIds.length === 0) {
+      setToast("Select at least one target location.");
+      return;
+    }
+
+    setCopyRunning(true);
+    try {
+      const result = await copyOutletInventoryItemsToLocationsV2({
+        sourceLocationId: activeLoc,
+        targetLocationIds: targetIds,
+        itemIds: selectedCopyRows.map((r) => r.itemId),
+        copyMinPar,
+        copySupplierSettings,
+        copyStockCounts,
+        updateExistingSetupFields: copyUpdateExisting,
+      });
+      setCopyResult(result);
+      setToast(`Copy complete: ${result.created} created, ${result.skipped} skipped, ${result.updated} updated, ${result.failed} failed.`);
+    } finally {
+      setCopyRunning(false);
     }
   };
 
@@ -759,6 +847,18 @@ export default function OutletInventoryPage() {
                   onChange={handleStockImport}
                 />
               </label>
+              {hq && (
+                <button
+                  onClick={openCopyModal}
+                  disabled={!activeLoc || selectedCopyRows.length === 0}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-slate-900 text-white rounded-lg hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed"
+                  title="Copy selected existing outlet inventory rows to other locations"
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                  <span className="hidden sm:inline">Copy Selected ({selectedCopyRows.length})</span>
+                  <span className="sm:hidden">{selectedCopyRows.length}</span>
+                </button>
+              )}
               {/* Apply Physical Count — only shown in Active Items view with pending counts */}
               {viewMode === "active" && countableRows.length > 0 && (
                 <button
@@ -876,6 +976,27 @@ export default function OutletInventoryPage() {
               </button>
             )}
           </div>
+        </div>
+      )}
+
+      {hq && viewMode !== "catalog" && viewMode !== "suggested" && selectedItemIds.size > 0 && (
+        <div className="flex items-center gap-2 flex-wrap bg-slate-50 border border-slate-200 rounded-lg px-4 py-2.5 text-xs text-slate-700">
+          <Users className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+          <span className="font-semibold">{selectedCopyRows.length} existing item{selectedCopyRows.length !== 1 ? "s" : ""} selected</span>
+          <button
+            onClick={openCopyModal}
+            disabled={selectedCopyRows.length === 0}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-slate-900 text-white rounded-lg hover:bg-slate-800 disabled:opacity-50"
+          >
+            <Copy className="h-3.5 w-3.5" />
+            Copy to Locations
+          </button>
+          <button
+            onClick={() => setSelectedItemIds(new Set())}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs text-slate-500 hover:text-slate-700 border border-slate-200 rounded-lg bg-white hover:bg-slate-50"
+          >
+            <X className="h-3 w-3" /> Clear
+          </button>
         </div>
       )}
 
@@ -1003,20 +1124,20 @@ export default function OutletInventoryPage() {
                   </tr>
                 ) : (
                   <tr>
-                    {/* Checkbox column — only in catalog mode */}
-                    {viewMode === "catalog" && (
+                    {/* Checkbox column — HQ bulk actions */}
+                    {hq && (
                       <th className="px-3 py-3 text-center bg-neutral-100 w-8">
                         <input
                           type="checkbox"
-                          aria-label="Select all visible catalog items"
+                          aria-label="Select all visible items"
                           className="accent-green-600 w-3.5 h-3.5"
-                          checked={filtered.filter((r) => !r.localEnabled).length > 0 && filtered.filter((r) => !r.localEnabled).every((r) => selectedItemIds.has(r.itemId))}
+                          checked={visibleSelectableRows.length > 0 && visibleSelectableRows.every((r) => selectedItemIds.has(r.itemId))}
                           onChange={(e) => {
-                            const notEnabled = filtered.filter((r) => !r.localEnabled).map((r) => r.itemId);
+                            const itemIds = visibleSelectableRows.map((r) => r.itemId);
                             if (e.target.checked) {
-                              setSelectedItemIds((prev) => new Set([...prev, ...notEnabled]));
+                              setSelectedItemIds((prev) => new Set([...prev, ...itemIds]));
                             } else {
-                              setSelectedItemIds((prev) => { const next = new Set(prev); notEnabled.forEach((id) => next.delete(id)); return next; });
+                              setSelectedItemIds((prev) => { const next = new Set(prev); itemIds.forEach((id) => next.delete(id)); return next; });
                             }
                           }}
                         />
@@ -1043,7 +1164,7 @@ export default function OutletInventoryPage() {
               <tbody className="divide-y divide-neutral-100">
                 {filtered.length === 0 ? (
                   <tr>
-                    <td colSpan={viewMode === "suggested" ? 11 : viewMode === "catalog" ? 16 : 15} className="py-10 text-center text-neutral-400 text-sm">
+                    <td colSpan={viewMode === "suggested" ? 11 : hq ? 16 : 15} className="py-10 text-center text-neutral-400 text-sm">
                       {viewMode === "active" ? "No active items — switch to Add From Catalog to enable items for this location." :
                        viewMode === "disabled" ? "No disabled items for this location." :
                        viewMode === "suggested" ? (suggestedQtyOnly ? "No items need ordering (Suggested Qty > 0)." : "No active items to compute suggestions.") :
@@ -1083,14 +1204,15 @@ export default function OutletInventoryPage() {
 
                   return (
                     <tr key={row.itemId} className={`${row.dirty ? "bg-amber-50/40" : "hover:bg-neutral-50/30"} ${viewMode === "catalog" && !row.localEnabled ? "" : !row.localEnabled ? "opacity-50" : ""}`}>
-                      {/* Checkbox cell — catalog mode only, only for not-yet-enabled items */}
-                      {viewMode === "catalog" && (
+                      {/* Checkbox cell — catalog mode selects inactive catalog rows; other modes select existing outlet rows for copy */}
+                      {hq && (
                         <td className="px-3 py-2 text-center">
-                          {!row.localEnabled ? (
+                          {viewMode !== "catalog" || !row.localEnabled ? (
                             <input
                               type="checkbox"
                               aria-label={`Select ${row.name}`}
                               className="accent-green-600 w-3.5 h-3.5"
+                              disabled={viewMode !== "catalog" && !row.outletRowId}
                               checked={selectedItemIds.has(row.itemId)}
                               onChange={(e) => {
                                 setSelectedItemIds((prev) => {
@@ -1189,6 +1311,162 @@ export default function OutletInventoryPage() {
             </div>
           </div>
         </>
+      )}
+
+      {/* Copy Location Inventory Modal */}
+      {copyModalOpen && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-2xl max-h-[92vh] overflow-y-auto rounded-2xl bg-white shadow-2xl border border-neutral-200">
+            <div className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-neutral-200 bg-white px-5 py-4">
+              <div>
+                <h3 className="text-base font-bold text-neutral-900 flex items-center gap-2">
+                  <Copy className="h-4 w-4 text-slate-700" />
+                  Copy Selected Items to Locations
+                </h3>
+                <p className="text-xs text-neutral-500 mt-1">
+                  Source: <span className="font-semibold text-neutral-800">{activeLocationLabel}</span>
+                  {" · "}
+                  {selectedCopyRows.length} selected item{selectedCopyRows.length !== 1 ? "s" : ""}
+                </p>
+              </div>
+              <button
+                onClick={() => setCopyModalOpen(false)}
+                className="rounded-lg p-1.5 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700"
+                aria-label="Close copy modal"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="space-y-5 px-5 py-4">
+              <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
+                Existing target rows are skipped by default. Stock and physical counts are protected unless you explicitly copy them for newly-created rows.
+              </div>
+
+              <section className="space-y-2">
+                <div className="flex items-center justify-between gap-3">
+                  <h4 className="text-sm font-bold text-neutral-900">Target Locations</h4>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setCopyTargets(new Set(copyTargetLocations.map((l: any) => l.id)))}
+                      className="text-xs font-semibold text-brand-700 hover:text-brand-900"
+                    >
+                      Select All
+                    </button>
+                    <button
+                      onClick={() => setCopyTargets(new Set())}
+                      className="text-xs font-semibold text-neutral-500 hover:text-neutral-800"
+                    >
+                      Clear All
+                    </button>
+                  </div>
+                </div>
+                <div className="grid sm:grid-cols-2 gap-2">
+                  {copyTargetLocations.map((loc: any) => (
+                    <label key={loc.id} className="flex items-center gap-3 rounded-lg border border-neutral-200 px-3 py-2.5 text-sm hover:bg-neutral-50">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 accent-brand-600"
+                        checked={copyTargets.has(loc.id)}
+                        onChange={(e) => {
+                          setCopyTargets((prev) => {
+                            const next = new Set(prev);
+                            if (e.target.checked) next.add(loc.id);
+                            else next.delete(loc.id);
+                            return next;
+                          });
+                        }}
+                      />
+                      <span className="min-w-0">
+                        <span className="block truncate font-semibold text-neutral-900">{loc.name ?? loc.id}</span>
+                        <span className="block text-xs text-neutral-500">{loc.id}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </section>
+
+              <section className="space-y-2">
+                <h4 className="text-sm font-bold text-neutral-900">Copy Options</h4>
+                <div className="grid gap-2">
+                  {[
+                    {
+                      checked: copyMinPar,
+                      onChange: setCopyMinPar,
+                      title: "Copy min/par levels",
+                      body: "New rows receive source min_on_hand and par_level. Existing rows are skipped unless update is enabled.",
+                    },
+                    {
+                      checked: copySupplierSettings,
+                      onChange: setCopySupplierSettings,
+                      title: "Copy local supplier, price, and order settings",
+                      body: "Copies local supplier, local purchase option, local price, product code, and enabled state.",
+                    },
+                    {
+                      checked: copyStockCounts,
+                      onChange: setCopyStockCounts,
+                      title: "Copy stock/count values for newly-created rows",
+                      body: "Default is off. When off, new target rows start with current_stock 0 and physical_count 0.",
+                    },
+                    {
+                      checked: copyUpdateExisting,
+                      onChange: setCopyUpdateExisting,
+                      title: "Update existing setup fields",
+                      body: "Optional. Updates min/par and local supplier settings on existing rows, but never overwrites stock, counts, or notes.",
+                    },
+                  ].map((option) => (
+                    <label key={option.title} className="flex items-start gap-3 rounded-lg border border-neutral-200 px-3 py-2.5">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5 h-4 w-4 accent-brand-600"
+                        checked={option.checked}
+                        onChange={(e) => option.onChange(e.target.checked)}
+                      />
+                      <span>
+                        <span className="block text-sm font-semibold text-neutral-900">{option.title}</span>
+                        <span className="block text-xs text-neutral-500">{option.body}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </section>
+
+              {copyResult && (
+                <section className="rounded-xl border border-green-200 bg-green-50 px-4 py-3">
+                  <h4 className="text-sm font-bold text-green-900">Copy Result</h4>
+                  <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                    <div className="rounded-lg bg-white px-3 py-2"><span className="block text-neutral-500">Created</span><span className="font-bold text-neutral-900">{copyResult.created}</span></div>
+                    <div className="rounded-lg bg-white px-3 py-2"><span className="block text-neutral-500">Skipped</span><span className="font-bold text-neutral-900">{copyResult.skipped}</span></div>
+                    <div className="rounded-lg bg-white px-3 py-2"><span className="block text-neutral-500">Updated</span><span className="font-bold text-neutral-900">{copyResult.updated}</span></div>
+                    <div className="rounded-lg bg-white px-3 py-2"><span className="block text-neutral-500">Failed</span><span className="font-bold text-neutral-900">{copyResult.failed}</span></div>
+                  </div>
+                  {copyResult.errors.length > 0 && (
+                    <div className="mt-3 max-h-28 overflow-y-auto rounded-lg bg-white px-3 py-2 text-xs text-red-700">
+                      {copyResult.errors.map((error, idx) => <div key={`${error}-${idx}`}>{error}</div>)}
+                    </div>
+                  )}
+                </section>
+              )}
+            </div>
+
+            <div className="sticky bottom-0 flex items-center justify-end gap-2 border-t border-neutral-200 bg-white px-5 py-4">
+              <button
+                onClick={() => setCopyModalOpen(false)}
+                className="px-4 py-2 text-sm font-semibold border border-neutral-200 rounded-lg hover:bg-neutral-50"
+              >
+                Close
+              </button>
+              <button
+                onClick={handleCopyToLocations}
+                disabled={copyRunning || copyTargets.size === 0 || selectedCopyRows.length === 0}
+                className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold bg-slate-900 text-white rounded-lg hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {copyRunning ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Copy className="h-4 w-4" />}
+                {copyRunning ? "Copying..." : "Confirm Copy"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* HQ Requisition Confirmation Review Modal */}

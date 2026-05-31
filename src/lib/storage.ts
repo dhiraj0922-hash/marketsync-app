@@ -4083,6 +4083,24 @@ export interface AssignCatalogResult {
   errors:  string[];
 }
 
+export interface CopyOutletInventoryOptions {
+  sourceLocationId: string;
+  targetLocationIds: string[];
+  itemIds: string[];
+  copyMinPar: boolean;
+  copySupplierSettings: boolean;
+  copyStockCounts: boolean;
+  updateExistingSetupFields: boolean;
+}
+
+export interface CopyOutletInventoryResult {
+  created: number;
+  skipped: number;
+  updated: number;
+  failed: number;
+  errors: string[];
+}
+
 /**
  * Assign one or more catalog items to one or more locations.
  *
@@ -4170,6 +4188,142 @@ export async function assignCatalogItemsToLocations(
       result.errors.push(`Batch ${Math.floor(i / CHUNK) + 1}: ${insertErr.message}`);
     } else {
       result.created += chunk.length;
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Copy existing outlet inventory setup rows from one source location to targets.
+ *
+ * This only touches location_inventory_items. Existing target rows are skipped
+ * by default to protect stock/count values and local overrides.
+ */
+export async function copyOutletInventoryItemsToLocationsV2(
+  options: CopyOutletInventoryOptions
+): Promise<CopyOutletInventoryResult> {
+  const result: CopyOutletInventoryResult = {
+    created: 0,
+    skipped: 0,
+    updated: 0,
+    failed: 0,
+    errors: [],
+  };
+
+  const sourceLocationId = options.sourceLocationId;
+  const targetLocationIds = Array.from(new Set(options.targetLocationIds.filter((id) => id && id !== sourceLocationId)));
+  const itemIds = Array.from(new Set(options.itemIds.filter(Boolean)));
+
+  if (!sourceLocationId || targetLocationIds.length === 0 || itemIds.length === 0) return result;
+
+  const { data: sourceRows, error: sourceErr } = await supabase
+    .from('location_inventory_items')
+    .select('*')
+    .eq('location_id', sourceLocationId)
+    .in('item_id', itemIds);
+
+  if (sourceErr) {
+    console.error('[copyOutletInventoryItemsToLocationsV2] source fetch error:', sourceErr);
+    result.failed = itemIds.length * targetLocationIds.length;
+    result.errors.push(`Source fetch error: ${sourceErr.message}`);
+    return result;
+  }
+
+  const sourceByItem = new Map<string, any>((sourceRows ?? []).map((row: any) => [row.item_id, row]));
+  for (const itemId of itemIds) {
+    if (!sourceByItem.has(itemId)) {
+      result.failed += targetLocationIds.length;
+      result.errors.push(`${itemId}: source row does not exist at ${sourceLocationId}`);
+    }
+  }
+
+  const copyableItemIds = itemIds.filter((itemId) => sourceByItem.has(itemId));
+  if (copyableItemIds.length === 0) return result;
+
+  const { data: existing, error: existingErr } = await supabase
+    .from('location_inventory_items')
+    .select('item_id, location_id')
+    .in('item_id', copyableItemIds)
+    .in('location_id', targetLocationIds);
+
+  if (existingErr) {
+    console.error('[copyOutletInventoryItemsToLocationsV2] existing fetch error:', existingErr);
+    result.failed += copyableItemIds.length * targetLocationIds.length;
+    result.errors.push(`Existing rows fetch error: ${existingErr.message}`);
+    return result;
+  }
+
+  const existingSet = new Set<string>((existing ?? []).map((row: any) => `${row.item_id}|${row.location_id}`));
+  const now = new Date().toISOString();
+
+  const buildSetupPayload = (source: any) => ({
+    min_on_hand: options.copyMinPar ? Number(source.min_on_hand ?? 0) : 0,
+    par_level: options.copyMinPar ? Number(source.par_level ?? 0) : 0,
+    local_enabled: source.local_enabled !== false,
+    local_supplier: options.copySupplierSettings ? source.local_supplier ?? null : null,
+    local_purchase_option: options.copySupplierSettings ? source.local_purchase_option ?? null : null,
+    local_price: options.copySupplierSettings ? source.local_price ?? null : null,
+    local_product_code: options.copySupplierSettings ? source.local_product_code ?? null : null,
+    updated_at: now,
+  });
+
+  const toInsert: any[] = [];
+  const toUpdate: { itemId: string; locationId: string; payload: any }[] = [];
+
+  for (const itemId of copyableItemIds) {
+    const source = sourceByItem.get(itemId);
+    for (const locationId of targetLocationIds) {
+      const key = `${itemId}|${locationId}`;
+      if (existingSet.has(key)) {
+        if (options.updateExistingSetupFields) {
+          toUpdate.push({ itemId, locationId, payload: buildSetupPayload(source) });
+        } else {
+          result.skipped++;
+        }
+        continue;
+      }
+
+      toInsert.push({
+        item_id: itemId,
+        location_id: locationId,
+        current_stock: options.copyStockCounts ? Number(source.current_stock ?? 0) : 0,
+        physical_count: options.copyStockCounts ? Number(source.physical_count ?? 0) : 0,
+        local_notes: null,
+        ...buildSetupPayload(source),
+      });
+    }
+  }
+
+  const CHUNK = 50;
+  for (let i = 0; i < toInsert.length; i += CHUNK) {
+    const chunk = toInsert.slice(i, i + CHUNK);
+    const { error } = await supabase
+      .from('location_inventory_items')
+      .insert(chunk);
+
+    if (error) {
+      console.error('[copyOutletInventoryItemsToLocationsV2] insert error:', error);
+      result.failed += chunk.length;
+      result.errors.push(`Insert batch ${Math.floor(i / CHUNK) + 1}: ${error.message}`);
+    } else {
+      result.created += chunk.length;
+    }
+  }
+
+  for (const update of toUpdate) {
+    const { error } = await supabase
+      .from('location_inventory_items')
+      .update(update.payload)
+      .eq('item_id', update.itemId)
+      .eq('location_id', update.locationId);
+
+    if (error) {
+      console.error('[copyOutletInventoryItemsToLocationsV2] update error:', error);
+      result.failed++;
+      result.errors.push(`${update.itemId}@${update.locationId}: ${error.message}`);
+    } else {
+      result.updated++;
     }
   }
 
