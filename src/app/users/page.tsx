@@ -1426,11 +1426,11 @@ function UsersPageContent() {
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-1 bg-neutral-50 p-3 rounded-lg border border-neutral-100">
                     <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">Full Name</p>
-                    <p className="text-sm font-semibold text-neutral-800">{viewProfile.fullName ?? "—"}</p>
+                    <p className="text-sm font-semibold text-neutral-800">{viewProfile.fullName ?? viewProfile.name ?? "—"}</p>
                   </div>
                   <div className="space-y-1 bg-neutral-50 p-3 rounded-lg border border-neutral-100">
                     <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">Email Address</p>
-                    <p className="text-sm font-semibold text-neutral-800">{viewProfile.email ?? "—"}</p>
+                    <p className="text-sm font-semibold text-neutral-800">{viewProfile.email ?? viewProfile.userEmail ?? "—"}</p>
                   </div>
                 </div>
 
