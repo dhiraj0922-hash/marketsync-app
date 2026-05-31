@@ -779,7 +779,7 @@ function UsersPageContent() {
 
   const handleDisable = async (profile: any, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!confirm(`Disable ${profile.fullName ?? profile.email}? They will no longer be able to log in.`)) return;
+    if (!confirm(`Disable ${profile.fullName ?? (profile.email || (profile as any).userEmail)}? They will no longer be able to log in.`)) return;
     const res = await updateUserProfile(profile.id, { isActive: false });
     if (!res.success) { alert("Failed to disable user."); return; }
     setProfiles(prev => prev.map(p => p.id === profile.id ? { ...p, isActive: false } : p));
@@ -820,7 +820,7 @@ function UsersPageContent() {
   // ── Set Password modal ────────────────────────────────────────────────────
   const openPwdModal = (profile: any, e: React.MouseEvent) => {
     e.stopPropagation();
-    setPwdModal({ id: profile.id, name: profile.fullName ?? profile.email, email: profile.email ?? "" });
+    setPwdModal({ id: profile.id, name: profile.fullName ?? (profile.email || (profile as any).userEmail), email: (profile.email || (profile as any).userEmail) ?? "" });
     setPwdValue(""); setPwdShow(false); setPwdError(null); setPwdSuccess(false); setPwdCopied(false);
   };
   const closePwdModal = () => { setPwdModal(null); setPwdValue(""); setPwdError(null); setPwdSuccess(false); };
@@ -901,13 +901,13 @@ function UsersPageContent() {
                   <TableCell className="pl-6">
                     <div className="flex items-center gap-3">
                       <div className="h-9 w-9 rounded-full bg-brand-100 text-brand-800 border border-brand-200 flex items-center justify-center font-bold text-xs shrink-0">
-                        {(profile.fullName ?? profile.email ?? "?").split(" ").map((n: string) => n[0]).join("").substring(0, 2).toUpperCase()}
+                        {(profile.fullName || profile.email || (profile as any).userEmail || "?").split(" ").map((n: string) => n[0]).join("").substring(0, 2).toUpperCase()}
                       </div>
                       <div>
                         <p className="font-semibold text-neutral-900 text-sm">{profile.fullName ?? "—"}</p>
                         <p className="text-xs text-neutral-500 flex items-center gap-1 mt-0.5">
                           <Mail className="h-3 w-3" />
-                          {profile.email ?? "no email"}
+                          {profile.email || (profile as any).userEmail || "no email"}
                         </p>
                       </div>
                     </div>
@@ -1426,11 +1426,11 @@ function UsersPageContent() {
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-1 bg-neutral-50 p-3 rounded-lg border border-neutral-100">
                     <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">Full Name</p>
-                    <p className="text-sm font-semibold text-neutral-800">{viewProfile.fullName ?? viewProfile.name ?? "—"}</p>
+                    <p className="text-sm font-semibold text-neutral-800">{viewProfile.fullName || viewProfile.name || (viewProfile as any).full_name || "—"}</p>
                   </div>
                   <div className="space-y-1 bg-neutral-50 p-3 rounded-lg border border-neutral-100">
                     <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">Email Address</p>
-                    <p className="text-sm font-semibold text-neutral-800">{viewProfile.email ?? viewProfile.userEmail ?? "—"}</p>
+                    <p className="text-sm font-semibold text-neutral-800">{viewProfile.email || viewProfile.userEmail || (viewProfile as any).user_email || (viewProfile as any).auth_email || (viewProfile as any).login_email || "—"}</p>
                   </div>
                 </div>
 

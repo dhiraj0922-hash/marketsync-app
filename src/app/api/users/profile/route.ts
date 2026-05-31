@@ -24,26 +24,68 @@ export async function GET(req: NextRequest) {
     auth: { autoRefreshToken: false, persistSession: false },
   });
 
-  // Try the view first
-  const { data, error } = await adminClient
-    .from("user_profiles_with_email")
+  // 1. Load all profiles from plain user_profiles table
+  const { data: profiles, error: profileErr } = await adminClient
+    .from("user_profiles")
     .select("*")
     .order("created_at", { ascending: false });
 
-  if (error) {
-    console.error("[GET /api/users/profile] view query failed, trying plain table:", error.message);
-    const { data: fallbackData, error: fallbackError } = await adminClient
-      .from("user_profiles")
-      .select("*")
-      .order("created_at", { ascending: false });
-
-    if (fallbackError) {
-      return NextResponse.json({ error: fallbackError.message }, { status: 500 });
-    }
-    return NextResponse.json({ success: true, profiles: fallbackData });
+  if (profileErr) {
+    console.error("[GET /api/users/profile] profile fetch error:", profileErr.message);
+    return NextResponse.json({ error: profileErr.message }, { status: 500 });
   }
 
-  return NextResponse.json({ success: true, profiles: data });
+  // 2. Load all Auth users (paginated)
+  let authUsers: any[] = [];
+  try {
+    let page = 1;
+    let done = false;
+    while (!done) {
+      const { data: pageData, error: pageErr } = await adminClient.auth.admin.listUsers({
+        page,
+        perPage: 1000,
+      });
+      if (pageErr) {
+        console.error("[GET /api/users/profile] listUsers error:", pageErr.message);
+        break; // Fallback to whatever we have
+      }
+      if (pageData?.users && pageData.users.length > 0) {
+        authUsers = authUsers.concat(pageData.users);
+        if (pageData.users.length < 1000) {
+          done = true;
+        } else {
+          page++;
+        }
+      } else {
+        done = true;
+      }
+    }
+  } catch (err) {
+    console.error("[GET /api/users/profile] listUsers exception:", err);
+  }
+
+  // Create lookup map
+  const authMap = new Map(authUsers.map((u) => [String(u.id).toLowerCase(), u.email]));
+
+  // 3. Merge email into each profile
+  const mergedProfiles = (profiles || []).map((p) => {
+    const key = String(p.user_id || '').toLowerCase();
+    const email = authMap.get(key) || null;
+    return {
+      id:          p.id,
+      user_id:     p.user_id,
+      full_name:   p.full_name,
+      email:       email,
+      phone:       p.phone,
+      role:        p.role,
+      location_id: p.location_id,
+      is_active:   p.is_active,
+      created_at:  p.created_at,
+      updated_at:  p.updated_at,
+    };
+  });
+
+  return NextResponse.json({ success: true, profiles: mergedProfiles });
 }
 
 export async function PATCH(req: NextRequest) {

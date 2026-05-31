@@ -1973,10 +1973,6 @@ export default function Inventory() {
   };
 
   const openCopyInventoryModal = () => {
-    if (!isHqAdmin(user)) {
-      alert("Only HQ admins can copy Inventory setup to other locations.");
-      return;
-    }
     if (!isLondonTemplateLocationActive) {
       alert("Switch to London / LOC-1091 template location to copy setup.");
       return;
@@ -2001,7 +1997,6 @@ export default function Inventory() {
   };
 
   const handleCopyInventoryToLocations = async () => {
-    if (!isHqAdmin(user)) return;
     if (!isLondonTemplateLocationActive) {
       alert("Switch to London / LOC-1091 template location to copy setup.");
       return;
@@ -2328,7 +2323,7 @@ export default function Inventory() {
               <span className="text-sm font-semibold text-blue-100">{selectedItemIds.length} operational node{selectedItemIds.length !== 1 ? 's' : ''} targeted</span>
               <div className="flex gap-4 items-center">
                 <button onClick={() => setSelectedItemIds([])} className="text-xs font-semibold text-blue-200 transition-colors hover:text-white">Clear Targets</button>
-                {isHqAdmin(user) && isLondonTemplateLocationActive ? (
+                {isLondonTemplateLocationActive ? (
                   <button
                     onClick={openCopyInventoryModal}
                     title="Push selected London template inventory setup to other locations"
