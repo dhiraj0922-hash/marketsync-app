@@ -554,6 +554,7 @@ export async function allocateInventoryToLocations(
 }
 
 export interface CopyInventoryItemsToLocationsOptions {
+  sourceLocationId: string;
   sourceRowIds: string[];
   targetLocationIds: string[];
   copyParLevels: boolean;
@@ -590,6 +591,8 @@ const getPurchaseOptionDuplicateKey = (row: any) => [
   normalizeInventoryCopyKey(row.unit_price ?? row.unitPrice ?? 0),
 ].join('|');
 
+const LONDON_TEMPLATE_LOCATION_ID = 'LOC-1091';
+
 /**
  * Copy independent location-level Inventory setup rows to other locations.
  *
@@ -615,13 +618,21 @@ export async function copyInventoryItemsToLocations(
   };
 
   const sourceRowIds = Array.from(new Set(options.sourceRowIds.map(String).filter(Boolean)));
-  const targetLocationIds = Array.from(new Set(options.targetLocationIds.map(String).filter(Boolean)));
+  const sourceLocationId = String(options.sourceLocationId ?? '').trim();
+  const targetLocationIds = Array.from(new Set(options.targetLocationIds.map(String).filter(Boolean)))
+    .filter((locationId) => locationId !== LONDON_TEMPLATE_LOCATION_ID && locationId !== 'LOC-HQ');
   if (sourceRowIds.length === 0 || targetLocationIds.length === 0) return result;
+  if (sourceLocationId !== LONDON_TEMPLATE_LOCATION_ID) {
+    result.failed = sourceRowIds.length * targetLocationIds.length;
+    result.errors.push(`This copy workflow only supports London / ${LONDON_TEMPLATE_LOCATION_ID} as the source location.`);
+    return result;
+  }
 
   const { data: sourceRows, error: sourceErr } = await supabase
     .from('inventory_items')
     .select('*')
-    .in('id', sourceRowIds);
+    .in('id', sourceRowIds)
+    .eq('location_id', LONDON_TEMPLATE_LOCATION_ID);
 
   if (sourceErr) {
     result.failed = sourceRowIds.length * targetLocationIds.length;

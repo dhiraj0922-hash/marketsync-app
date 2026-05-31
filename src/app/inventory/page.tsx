@@ -1894,6 +1894,11 @@ export default function Inventory() {
     [selectedCopyInventoryItems]
   );
 
+  const activeInventoryLocationId = isHqAdmin(user)
+    ? activeLocation?.id ?? null
+    : resolveLocationId(user);
+  const isLondonTemplateLocationActive = activeInventoryLocationId === LONDON_TEMPLATE_LOCATION_ID;
+
   // ── Merge handler ─────────────────────────────────────────────────────────
   //
   // Reassigns item_id on a single row (the "duplicate") to the canonical item_id.
@@ -1972,6 +1977,10 @@ export default function Inventory() {
       alert("Only HQ admins can copy Inventory setup to other locations.");
       return;
     }
+    if (!isLondonTemplateLocationActive) {
+      alert("Switch to London / LOC-1091 template location to copy setup.");
+      return;
+    }
     if (selectedCopyInventoryItems.length === 0) {
       alert("Select inventory items first.");
       return;
@@ -1993,6 +2002,10 @@ export default function Inventory() {
 
   const handleCopyInventoryToLocations = async () => {
     if (!isHqAdmin(user)) return;
+    if (!isLondonTemplateLocationActive) {
+      alert("Switch to London / LOC-1091 template location to copy setup.");
+      return;
+    }
     const validTargetIds = new Set(inventoryCopyTargetLocations.map((loc: any) => loc.id));
     const targetIds = copyInventoryTargets.filter((id) => validTargetIds.has(id));
     if (selectedCopyInventoryItems.length === 0) {
@@ -2008,6 +2021,7 @@ export default function Inventory() {
     setCopyInventoryResult(null);
     try {
       const result = await copyInventoryItemsToLocations({
+        sourceLocationId: LONDON_TEMPLATE_LOCATION_ID,
         sourceRowIds: selectedCopyInventoryItems.map((item: any) => String(item.id)),
         targetLocationIds: targetIds,
         copyParLevels: copyInventoryPar,
@@ -2314,14 +2328,14 @@ export default function Inventory() {
               <span className="text-sm font-semibold text-blue-100">{selectedItemIds.length} operational node{selectedItemIds.length !== 1 ? 's' : ''} targeted</span>
               <div className="flex gap-4 items-center">
                 <button onClick={() => setSelectedItemIds([])} className="text-xs font-semibold text-blue-200 transition-colors hover:text-white">Clear Targets</button>
-                {isHqAdmin(user) && (
-                  <button
-                    onClick={openCopyInventoryModal}
-                    className="flex items-center gap-1.5 rounded bg-blue-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm transition-colors hover:bg-blue-500"
-                  >
-                    <Copy className="h-3 w-3" /> Copy Selected to Locations
-                  </button>
-                )}
+                <button
+                  onClick={openCopyInventoryModal}
+                  disabled={!isHqAdmin(user)}
+                  title={isHqAdmin(user) ? "Copy selected inventory setup to other locations" : "Only HQ admins can copy inventory setup to other locations"}
+                  className="flex items-center gap-1.5 rounded bg-blue-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
+                >
+                  <Copy className="h-3 w-3" /> Copy Selected to Locations
+                </button>
                 <button
                   onClick={() => setIsDeleteModalOpen(true)}
                   className="flex items-center gap-1.5 rounded bg-red-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm transition-colors hover:bg-red-500"

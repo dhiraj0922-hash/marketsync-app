@@ -395,17 +395,14 @@ function UsersPageContent() {
     load();
   }, []);
 
-  if (isLoading) return (
-    <div className="p-12 flex justify-center text-neutral-400 animate-pulse">
-      Loading users…
-    </div>
-  );
+
 
   // ── Helpers ───────────────────────────────────────────────────────────────
   const resolveLocationName = (locId: string | null) => {
-    if (!locId) return "—";
-    const match = locations.find(l => l.id === locId || l.name === locId);
-    return match ? match.name : locId;
+    if (!locId) return "Unassigned";
+    if (!Array.isArray(locations)) return locId;
+    const match = locations.find(l => l && (l.id === locId || l.name === locId));
+    return match?.name ?? locId;
   };
 
   const generateTempPassword = () => {
@@ -848,6 +845,14 @@ function UsersPageContent() {
   };
 
   // ─────────────────────────────────────────────────────────────────────────
+  if (isLoading) {
+    return (
+      <div className="p-12 flex justify-center text-neutral-400 animate-pulse">
+        Loading users…
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6 relative h-full">
       {/* Header */}
@@ -1367,7 +1372,7 @@ function UsersPageContent() {
         isOpen={isViewOpen}
         onClose={() => setIsViewOpen(false)}
         title="User Profile Details"
-        description={viewProfile ? `${viewProfile.fullName ?? viewProfile.email}` : ""}
+        description={viewProfile ? `${viewProfile.fullName ?? viewProfile.email ?? "—"}` : ""}
         footer={
           <div className="flex justify-end w-full">
             <button onClick={() => setIsViewOpen(false)} className="px-5 py-2 text-sm font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 shadow-sm">
@@ -1438,7 +1443,7 @@ function UsersPageContent() {
                     <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">Assigned Role</p>
                     <p className="text-sm font-semibold text-neutral-800">
                       <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold border ${roleBadgeClass(viewProfile.role)}`}>
-                        {DB_ROLE_MAP[viewProfile.role] ?? viewProfile.role}
+                        {DB_ROLE_MAP[viewProfile.role] ?? viewProfile.role ?? "Staff"}
                       </span>
                     </p>
                   </div>
@@ -1498,30 +1503,30 @@ function UsersPageContent() {
                     </div>
                     <div className="space-y-1 bg-neutral-50 p-3 rounded-lg border border-neutral-100">
                       <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">Store Physical Address</p>
-                      <p className="text-sm font-semibold text-neutral-800">{viewBilling.storeAddress ?? "—"}</p>
+                      <p className="text-sm font-semibold text-neutral-800">{viewBilling?.storeAddress ?? "—"}</p>
                     </div>
                     <div className="grid grid-cols-3 gap-3">
                       <div className="space-y-1 bg-neutral-50 p-3 rounded-lg border border-neutral-100">
                         <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">City</p>
-                        <p className="text-sm font-semibold text-neutral-800">{viewBilling.storeCity ?? "—"}</p>
+                        <p className="text-sm font-semibold text-neutral-800">{viewBilling?.storeCity ?? "—"}</p>
                       </div>
                       <div className="space-y-1 bg-neutral-50 p-3 rounded-lg border border-neutral-100">
                         <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">Province</p>
-                        <p className="text-sm font-semibold text-neutral-800">{viewBilling.storeProvince ?? "—"}</p>
+                        <p className="text-sm font-semibold text-neutral-800">{viewBilling?.storeProvince ?? "—"}</p>
                       </div>
                       <div className="space-y-1 bg-neutral-50 p-3 rounded-lg border border-neutral-100">
                         <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">Postal Code</p>
-                        <p className="text-sm font-semibold text-neutral-800">{viewBilling.storePostalCode ?? "—"}</p>
+                        <p className="text-sm font-semibold text-neutral-800">{viewBilling?.storePostalCode ?? "—"}</p>
                       </div>
                     </div>
                     <div className="grid grid-cols-2 gap-3">
                       <div className="space-y-1 bg-neutral-50 p-3 rounded-lg border border-neutral-100">
                         <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">Store Phone</p>
-                        <p className="text-sm font-semibold text-neutral-800">{viewBilling.storePhone ?? "—"}</p>
+                        <p className="text-sm font-semibold text-neutral-800">{viewBilling?.storePhone ?? "—"}</p>
                       </div>
                       <div className="space-y-1 bg-neutral-50 p-3 rounded-lg border border-neutral-100">
                         <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">Store Manager</p>
-                        <p className="text-sm font-semibold text-neutral-800">{viewBilling.storeManagerName ?? "—"}</p>
+                        <p className="text-sm font-semibold text-neutral-800">{viewBilling?.storeManagerName ?? "—"}</p>
                       </div>
                     </div>
                   </div>
@@ -1549,50 +1554,50 @@ function UsersPageContent() {
                   <div className="space-y-3 max-h-[55vh] overflow-y-auto pr-2">
                     <div className="space-y-1 bg-neutral-50 p-3 rounded-lg border border-neutral-100">
                       <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">Legal Corporation Name</p>
-                      <p className="text-sm font-semibold text-neutral-800">{viewBilling.legalName ?? "—"}</p>
+                      <p className="text-sm font-semibold text-neutral-800">{viewBilling?.legalName ?? "—"}</p>
                     </div>
                     <div className="grid grid-cols-2 gap-3">
                       <div className="space-y-1 bg-neutral-50 p-3 rounded-lg border border-neutral-100">
                         <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">Incorporation Address</p>
-                        <p className="text-sm font-semibold text-neutral-800">{viewBilling.incorporationAddress ?? "—"}</p>
+                        <p className="text-sm font-semibold text-neutral-800">{viewBilling?.incorporationAddress ?? "—"}</p>
                       </div>
                       <div className="space-y-1 bg-neutral-50 p-3 rounded-lg border border-neutral-100">
                         <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">Billing Address</p>
-                        <p className="text-sm font-semibold text-neutral-800">{viewBilling.billingAddress ?? "—"}</p>
+                        <p className="text-sm font-semibold text-neutral-800">{viewBilling?.billingAddress ?? "—"}</p>
                       </div>
                     </div>
                     <div className="grid grid-cols-3 gap-3">
                       <div className="space-y-1 bg-neutral-50 p-3 rounded-lg border border-neutral-100">
                         <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">Billing City</p>
-                        <p className="text-sm font-semibold text-neutral-800">{viewBilling.billingCity ?? "—"}</p>
+                        <p className="text-sm font-semibold text-neutral-800">{viewBilling?.billingCity ?? "—"}</p>
                       </div>
                       <div className="space-y-1 bg-neutral-50 p-3 rounded-lg border border-neutral-100">
                         <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">Billing Province</p>
-                        <p className="text-sm font-semibold text-neutral-800">{viewBilling.billingProvince ?? "—"}</p>
+                        <p className="text-sm font-semibold text-neutral-800">{viewBilling?.billingProvince ?? "—"}</p>
                       </div>
                       <div className="space-y-1 bg-neutral-50 p-3 rounded-lg border border-neutral-100">
                         <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">Billing Postal Code</p>
-                        <p className="text-sm font-semibold text-neutral-800">{viewBilling.billingPostalCode ?? "—"}</p>
+                        <p className="text-sm font-semibold text-neutral-800">{viewBilling?.billingPostalCode ?? "—"}</p>
                       </div>
                     </div>
                     <div className="grid grid-cols-2 gap-3">
                       <div className="space-y-1 bg-neutral-50 p-3 rounded-lg border border-neutral-100">
                         <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">HST Registration #</p>
-                        <p className="text-sm font-semibold text-neutral-800 font-mono">{viewBilling.hstNumber ?? "—"}</p>
+                        <p className="text-sm font-semibold text-neutral-800 font-mono">{viewBilling?.hstNumber ?? "—"}</p>
                       </div>
                       <div className="space-y-1 bg-neutral-50 p-3 rounded-lg border border-neutral-100">
                         <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">Business Number (BN)</p>
-                        <p className="text-sm font-semibold text-neutral-800 font-mono">{viewBilling.businessNumber ?? "—"}</p>
+                        <p className="text-sm font-semibold text-neutral-800 font-mono">{viewBilling?.businessNumber ?? "—"}</p>
                       </div>
                     </div>
                     <div className="grid grid-cols-2 gap-3">
                       <div className="space-y-1 bg-neutral-50 p-3 rounded-lg border border-neutral-100">
                         <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">Billing Contact Email</p>
-                        <p className="text-sm font-semibold text-neutral-800">{viewBilling.billingEmail ?? "—"}</p>
+                        <p className="text-sm font-semibold text-neutral-800">{viewBilling?.billingEmail ?? "—"}</p>
                       </div>
                       <div className="space-y-1 bg-neutral-50 p-3 rounded-lg border border-neutral-100">
                         <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">Invoice Contact Person</p>
-                        <p className="text-sm font-semibold text-neutral-800">{viewBilling.invoiceContactName ?? "—"}</p>
+                        <p className="text-sm font-semibold text-neutral-800">{viewBilling?.invoiceContactName ?? "—"}</p>
                       </div>
                     </div>
                   </div>
