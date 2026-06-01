@@ -4366,6 +4366,10 @@ export default function Inventory() {
                 </div>
               )}
 
+              <div className="rounded-xl border border-blue-500/20 bg-blue-500/10 px-4 py-3 text-xs font-medium text-blue-100">
+                You are about to copy {selectedCopyInventoryItems.length} item{selectedCopyInventoryItems.length !== 1 ? "s" : ""} to {copyInventoryTargets.length} location{copyInventoryTargets.length !== 1 ? "s" : ""}.
+              </div>
+
               <section className="space-y-3">
                 <div className="flex items-center justify-between gap-3">
                   <h4 className="text-sm font-bold text-zinc-100">Target Active Locations</h4>

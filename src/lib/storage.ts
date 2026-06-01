@@ -606,7 +606,7 @@ const LONDON_TEMPLATE_LOCATION_ID = 'LOC-1091';
 export async function copyInventoryItemsToLocations(
   options: CopyInventoryItemsToLocationsOptions
 ): Promise<CopyInventoryItemsToLocationsResult> {
-  const result: CopyInventoryItemsToLocationsResult = {
+  const emptyResult: CopyInventoryItemsToLocationsResult = {
     created: 0,
     updated: 0,
     skipped: 0,
@@ -621,208 +621,57 @@ export async function copyInventoryItemsToLocations(
   const sourceLocationId = String(options.sourceLocationId ?? '').trim();
   const targetLocationIds = Array.from(new Set(options.targetLocationIds.map(String).filter(Boolean)))
     .filter((locationId) => locationId !== LONDON_TEMPLATE_LOCATION_ID && locationId !== 'LOC-HQ');
-  if (sourceRowIds.length === 0 || targetLocationIds.length === 0) return result;
+  if (sourceRowIds.length === 0 || targetLocationIds.length === 0) return emptyResult;
   if (sourceLocationId !== LONDON_TEMPLATE_LOCATION_ID) {
-    result.failed = sourceRowIds.length * targetLocationIds.length;
-    result.errors.push(`This copy workflow only supports London / ${LONDON_TEMPLATE_LOCATION_ID} as the source location.`);
-    return result;
+    return {
+      ...emptyResult,
+      failed: sourceRowIds.length * targetLocationIds.length,
+      errors: [`This copy workflow only supports London / ${LONDON_TEMPLATE_LOCATION_ID} as the source location.`],
+    };
   }
 
-  const { data: sourceRows, error: sourceErr } = await supabase
-    .from('inventory_items')
-    .select('*')
-    .in('id', sourceRowIds)
-    .eq('location_id', LONDON_TEMPLATE_LOCATION_ID);
-
-  if (sourceErr) {
-    result.failed = sourceRowIds.length * targetLocationIds.length;
-    result.errors.push(`Source fetch error: ${sourceErr.message}`);
-    return result;
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session?.access_token) {
+    return {
+      ...emptyResult,
+      failed: sourceRowIds.length * targetLocationIds.length,
+      errors: ['No active auth session. Please sign out and sign back in.'],
+    };
   }
 
-  const sourceById = new Map<string, any>((sourceRows ?? []).map((row: any) => [String(row.id), row]));
-  const copyableSources = sourceRowIds.map((id) => sourceById.get(id)).filter(Boolean);
-  for (const id of sourceRowIds) {
-    if (!sourceById.has(id)) {
-      result.failed += targetLocationIds.length;
-      result.errors.push(`${id}: source inventory row not found`);
-    }
-  }
-  if (copyableSources.length === 0) return result;
-
-  const sourceItemIds = Array.from(new Set(copyableSources.map((row: any) => String(row.item_id ?? row.id)).filter(Boolean)));
-
-  const { data: targetRows, error: targetErr } = await supabase
-    .from('inventory_items')
-    .select('*')
-    .in('location_id', targetLocationIds);
-
-  if (targetErr) {
-    result.failed += copyableSources.length * targetLocationIds.length;
-    result.errors.push(`Target fetch error: ${targetErr.message}`);
-    return result;
-  }
-
-  const existingByLocationAndItemId = new Map<string, any>();
-  const existingByLocationAndFallback = new Map<string, any>();
-  for (const row of targetRows ?? []) {
-    const locId = String(row.location_id ?? '');
-    const itemId = String(row.item_id ?? row.id ?? '');
-    if (itemId) existingByLocationAndItemId.set(`${locId}|${itemId}`, row);
-    existingByLocationAndFallback.set(`${locId}|${getInventoryDuplicateKey(row)}`, row);
-  }
-
-  const sourcePurchaseOptionsByItemId = new Map<string, any[]>();
-  if (options.copyPurchaseOptions) {
-    const { data: sourceOptions, error: sourceOptErr } = await supabase
-      .from('purchase_options')
-      .select('*')
-      .in('inventory_item_id', sourceRowIds);
-
-    if (sourceOptErr) {
-      result.errors.push(`Purchase options fetch error: ${sourceOptErr.message}`);
-    } else {
-      for (const row of sourceOptions ?? []) {
-        const key = String(row.inventory_item_id ?? '');
-        if (!sourcePurchaseOptionsByItemId.has(key)) sourcePurchaseOptionsByItemId.set(key, []);
-        sourcePurchaseOptionsByItemId.get(key)!.push(row);
-      }
-    }
-  }
-
-  const buildSetupPayload = (source: any) => ({
-    name: source.name || '',
-    category: source.category || '',
-    itemtype: source.itemtype || '',
-    baseunit: source.baseunit || source.unit || '',
-    unit: source.unit || '',
-    parlevel: options.copyParLevels ? Number(source.parlevel ?? 0) : 0,
-    cost: options.copySupplierCostSettings ? Number(source.cost ?? 0) : 0,
-    purchasecost: options.copySupplierCostSettings && source.purchasecost != null ? Number(source.purchasecost) : null,
-    supplierid: options.copySupplierCostSettings && source.supplierid != null ? Number(source.supplierid) : null,
-    purchaseunits: options.copySupplierCostSettings && Array.isArray(source.purchaseunits) ? source.purchaseunits : [],
-    purchase_uom: options.copySupplierCostSettings ? source.purchase_uom ?? null : null,
-    pack_qty: options.copySupplierCostSettings && source.pack_qty != null ? Number(source.pack_qty) : null,
-    inner_unit_type: options.copySupplierCostSettings ? source.inner_unit_type ?? null : null,
-    inner_unit_size: options.copySupplierCostSettings && source.inner_unit_size != null ? Number(source.inner_unit_size) : null,
-    inner_unit_uom: options.copySupplierCostSettings ? source.inner_unit_uom ?? null : null,
-    base_uom: options.copySupplierCostSettings ? source.base_uom ?? null : null,
-    allowed_recipe_uoms: options.copySupplierCostSettings && Array.isArray(source.allowed_recipe_uoms) ? source.allowed_recipe_uoms : null,
-    pricetrend: source.pricetrend || 'steady',
-    priceincrease: Boolean(source.priceincrease),
+  const resp = await fetch('/api/inventory/copy-london-template', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${session.access_token}`,
+    },
+    body: JSON.stringify({
+      selectedItemIds: sourceRowIds,
+      targetLocationIds,
+      copyPar: options.copyParLevels,
+      copySupplierSettings: options.copySupplierCostSettings,
+      copyPurchaseOptions: options.copyPurchaseOptions,
+      copyStock: options.copyStock,
+      updateExistingSetupFields: options.updateExistingSetupFields,
+    }),
   });
 
-  const copyPurchaseOptionsForTarget = async (source: any, targetRowId: string) => {
-    if (!options.copyPurchaseOptions) return;
-    const sourceOptions = sourcePurchaseOptionsByItemId.get(String(source.id)) ?? [];
-    if (sourceOptions.length === 0) return;
-
-    const { data: existingOptions, error: existingOptErr } = await supabase
-      .from('purchase_options')
-      .select('*')
-      .eq('inventory_item_id', targetRowId);
-
-    if (existingOptErr) {
-      result.errors.push(`${source.name}@${targetRowId}: purchase option check failed: ${existingOptErr.message}`);
-      return;
-    }
-
-    const existingOptionKeys = new Set((existingOptions ?? []).map(getPurchaseOptionDuplicateKey));
-    const toInsert = sourceOptions
-      .filter((opt: any) => !existingOptionKeys.has(getPurchaseOptionDuplicateKey(opt)))
-      .map((opt: any) => ({
-        inventory_item_id: targetRowId,
-        supplier_name: opt.supplier_name ?? '',
-        supplier_product_name: opt.supplier_product_name ?? null,
-        purchase_uom: opt.purchase_uom ?? '',
-        pack_qty: opt.pack_qty != null ? Number(opt.pack_qty) : null,
-        pack_uom: opt.pack_uom ?? null,
-        unit_price: opt.unit_price != null ? Number(opt.unit_price) : 0,
-        is_preferred: Boolean(opt.is_preferred),
-      }));
-
-    if (toInsert.length === 0) return;
-
-    const { error: insertOptErr } = await supabase
-      .from('purchase_options')
-      .insert(toInsert);
-
-    if (insertOptErr) {
-      result.errors.push(`${source.name}@${targetRowId}: purchase option copy failed: ${insertOptErr.message}`);
-    } else {
-      result.purchaseOptionsCopied += toInsert.length;
-    }
-  };
-
-  for (const source of copyableSources) {
-    const sourceItemId = String(source.item_id ?? source.id);
-    for (const targetLocationId of targetLocationIds) {
-      const existingByItemId = sourceItemIds.length > 0
-        ? existingByLocationAndItemId.get(`${targetLocationId}|${sourceItemId}`)
-        : null;
-      const existingByFallback = existingByLocationAndFallback.get(`${targetLocationId}|${getInventoryDuplicateKey(source)}`);
-      const existing = existingByItemId ?? existingByFallback ?? null;
-
-      if (existing && !options.updateExistingSetupFields) {
-        result.skipped++;
-        continue;
-      }
-
-      if (existing && options.updateExistingSetupFields) {
-        const updatePayload: Record<string, any> = {
-          ...buildSetupPayload(source),
-          ...(options.copyStock ? { instock: Number(source.instock ?? 0) } : {}),
-        };
-        delete updatePayload.name;
-
-        const { data: updated, error: updateErr } = await supabase
-          .from('inventory_items')
-          .update(updatePayload)
-          .eq('id', existing.id)
-          .select()
-          .maybeSingle();
-
-        if (updateErr) {
-          result.failed++;
-          result.errors.push(`${source.name}@${targetLocationId}: update failed: ${updateErr.message}`);
-          continue;
-        }
-
-        result.updated++;
-        if (updated) result.updatedRows.push(mapInventoryToFrontend(updated));
-        await copyPurchaseOptionsForTarget(source, String(existing.id));
-        continue;
-      }
-
-      const rowId = crypto.randomUUID();
-      const insertPayload = {
-        id: rowId,
-        item_id: sourceItemId,
-        location_id: targetLocationId,
-        ...buildSetupPayload(source),
-        instock: options.copyStock ? Number(source.instock ?? 0) : 0,
-        linked_recipe_id: null,
-      };
-
-      const { data: inserted, error: insertErr } = await supabase
-        .from('inventory_items')
-        .insert(insertPayload)
-        .select()
-        .maybeSingle();
-
-      if (insertErr) {
-        result.failed++;
-        result.errors.push(`${source.name}@${targetLocationId}: insert failed: ${insertErr.message}`);
-        continue;
-      }
-
-      result.created++;
-      if (inserted) result.insertedRows.push(mapInventoryToFrontend(inserted));
-      await copyPurchaseOptionsForTarget(source, rowId);
-    }
+  const body = await resp.json().catch(() => ({}));
+  if (!resp.ok || !body?.success) {
+    return {
+      ...emptyResult,
+      failed: sourceRowIds.length * targetLocationIds.length,
+      errors: [body?.error || resp.statusText || 'Copy London template failed.'],
+    };
   }
 
-  return result;
+  return {
+    ...emptyResult,
+    ...body.data,
+    insertedRows: Array.isArray(body.data?.insertedRows) ? body.data.insertedRows : [],
+    updatedRows: Array.isArray(body.data?.updatedRows) ? body.data.updatedRows : [],
+    errors: Array.isArray(body.data?.errors) ? body.data.errors : [],
+  };
 }
 
 
@@ -5203,4 +5052,3 @@ export async function saveGratuitySettings(
   }
   return { success: true };
 }
-

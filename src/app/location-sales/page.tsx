@@ -30,6 +30,8 @@ import {
   Info
 } from "lucide-react";
 
+import { supabase } from "@/lib/supabase";
+
 export default function LocationSalesPage() {
   const { user } = useAuth();
   const hq = isHqAdmin(user);
@@ -38,6 +40,10 @@ export default function LocationSalesPage() {
   const [locations, setLocations] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  
+  // RLS / Active profile resolution states
+  const [resolvedLocationId, setResolvedLocationId] = useState<string | null>(null);
+  const [noActiveProfile, setNoActiveProfile] = useState(false);
 
   // ── Location Manager Sales Entry States ────────────────────────────────────
   const [salesDate, setSalesDate] = useState(() => {
@@ -101,6 +107,7 @@ export default function LocationSalesPage() {
   // Load Initial Metadata
   useEffect(() => {
     async function init() {
+      if (!user?.id) return;
       try {
         setLoading(true);
         const locs = await loadLocations();
@@ -118,9 +125,25 @@ export default function LocationSalesPage() {
 
           const sales = await loadDailySales(null, filterStartDate, filterEndDate);
           setAllSales(sales);
-        } else if (user?.locationId) {
-          // prefill sales if already entered for this date
-          await fetchExistingEntry(user.locationId, salesDate);
+        } else {
+          // Resolve manager active profile from DB
+          const { data: profile, error: profErr } = await supabase
+            .from('user_profiles')
+            .select('*')
+            .eq('user_id', user.id)
+            .eq('role', 'location_manager')
+            .eq('is_active', true)
+            .maybeSingle();
+
+          if (profErr || !profile) {
+            setNoActiveProfile(true);
+            setResolvedLocationId(null);
+          } else {
+            setNoActiveProfile(false);
+            setResolvedLocationId(profile.location_id);
+            // prefill sales if already entered for this date
+            await fetchExistingEntry(profile.location_id, salesDate);
+          }
         }
       } catch (err) {
         console.error(err);
@@ -129,7 +152,7 @@ export default function LocationSalesPage() {
       }
     }
     init();
-  }, [hq, user?.locationId]);
+  }, [hq, user?.id]);
 
   // Fetch Existing Entry for Manager date-change
   const fetchExistingEntry = async (locId: string, dateStr: string) => {
@@ -155,10 +178,10 @@ export default function LocationSalesPage() {
   };
 
   useEffect(() => {
-    if (!hq && user?.locationId && salesDate) {
-      fetchExistingEntry(user.locationId, salesDate);
+    if (!hq && resolvedLocationId && salesDate) {
+      fetchExistingEntry(resolvedLocationId, salesDate);
     }
-  }, [salesDate, hq, user?.locationId]);
+  }, [salesDate, hq, resolvedLocationId]);
 
   // HQ Load filtered sales
   const handleHqSearch = async () => {
@@ -177,10 +200,13 @@ export default function LocationSalesPage() {
   // Manager Save/Update Daily sales
   const handleSaveSales = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!user?.locationId) {
-      setMessage({ type: "error", text: "No assigned location found for your profile." });
+    if (!resolvedLocationId) {
+      setMessage({ type: "error", text: "No active location profile found. Please contact HQ." });
       return;
     }
+
+    const effectiveLocationId = resolvedLocationId;
+    console.log("Saving sales for location_id:", effectiveLocationId);
 
     const pos = Math.max(0, Number(posSales || 0));
     const uber = Math.max(0, Number(uberSales || 0));
@@ -198,7 +224,7 @@ export default function LocationSalesPage() {
     setMessage(null);
 
     const payload: LocationDailySales = {
-      locationId: user.locationId,
+      locationId: effectiveLocationId,
       salesDate,
       posSales: pos,
       uberSales: uber,
@@ -207,7 +233,7 @@ export default function LocationSalesPage() {
       skipSales: skip,
       doordashSales: dd,
       notes: salesNotes.trim() || null,
-      createdBy: user.id || null,
+      createdBy: user?.id || null,
     };
 
     const res = await upsertDailySales(payload);
@@ -371,7 +397,7 @@ export default function LocationSalesPage() {
     return Array.from(map.values()).sort((a, b) => b.month.localeCompare(a.month) || a.locationId.localeCompare(b.locationId));
   }, [allSales, hq]);
 
-  const assignedLoc = locations.find(l => l.id === user?.locationId);
+  const assignedLoc = locations.find(l => l.id === resolvedLocationId);
 
   // Return Manager UI View
   if (!hq) {
@@ -390,7 +416,7 @@ export default function LocationSalesPage() {
           </div>
           <div className="flex items-center gap-2 bg-brand-50/50 text-brand-700 px-3 py-1.5 rounded-lg border border-brand-200/50 text-xs font-bold uppercase tracking-wider shrink-0">
             <MapPin className="h-4 w-4" />
-            {assignedLoc ? assignedLoc.name : user?.locationId ?? "No Location"}
+            {assignedLoc ? assignedLoc.name : resolvedLocationId ?? "No Location"}
           </div>
         </div>
 
@@ -414,12 +440,12 @@ export default function LocationSalesPage() {
           </div>
         )}
 
-        {!user?.locationId ? (
+        {noActiveProfile || !resolvedLocationId ? (
           <div className="bg-amber-50 border border-amber-200 text-amber-800 p-5 rounded-xl flex items-center gap-3">
             <AlertCircle className="h-5 w-5 text-amber-600 shrink-0" />
             <div>
-              <p className="text-sm font-bold">No Location Assigned</p>
-              <p className="text-xs mt-1">Please contact your HQ Admin to assign a location profile to your credentials.</p>
+              <p className="text-sm font-bold">No active location profile found. Please contact HQ.</p>
+              <p className="text-xs mt-1">An active "location_manager" profile is required to enter sales logs.</p>
             </div>
           </div>
         ) : (
