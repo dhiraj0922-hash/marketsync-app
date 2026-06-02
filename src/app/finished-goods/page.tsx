@@ -133,9 +133,8 @@ const normalizeInventoryDisplayKey = (value: any) =>
 
 const getInventoryDisplayKey = (item: any) => {
   const itemId = String(item?.itemId ?? item?.item_id ?? "").trim();
-  if (itemId && itemId !== String(item?.id ?? "")) return `item:${itemId}`;
   return [
-    "fallback",
+    itemId && itemId !== String(item?.id ?? "") ? `item:${itemId}` : "fallback",
     normalizeInventoryDisplayKey(item?.name),
     normalizeInventoryDisplayKey(item?.baseUnit ?? item?.baseunit ?? item?.unit),
     normalizeInventoryDisplayKey(item?.supplierId ?? item?.supplierid ?? ""),
@@ -144,7 +143,7 @@ const getInventoryDisplayKey = (item: any) => {
 };
 
 const getSupplierSearchText = (item: any) =>
-  String(item?.preferredSupplierName ?? item?.supplierName ?? item?.supplier ?? item?.supplierId ?? "");
+  String(item?.selectedPurchaseOption?.supplierName ?? item?.preferredSupplierName ?? item?.supplierName ?? item?.supplier ?? item?.supplierId ?? "");
 
 const rankSubstituteMatch = (item: any, query: string) => {
   const q = normalizeInventoryDisplayKey(query);
@@ -152,12 +151,15 @@ const rankSubstituteMatch = (item: any, query: string) => {
   const name = normalizeInventoryDisplayKey(item?.name);
   const supplier = normalizeInventoryDisplayKey(getSupplierSearchText(item));
   const unit = normalizeInventoryDisplayKey(item?.unit ?? item?.baseUnit);
+  const category = normalizeInventoryDisplayKey(item?.category);
 
   if (name === q) return 100;
   if (name.startsWith(q)) return 90;
   if (name.includes(q)) return 70;
   if (supplier.startsWith(q)) return 50;
   if (supplier.includes(q)) return 40;
+  if (category.startsWith(q)) return 35;
+  if (category.includes(q)) return 30;
   if (unit === q || unit.includes(q)) return 25;
   return -1;
 };
@@ -410,8 +412,11 @@ export default function FinishedGoods() {
       : null;
 
   const substituteInventoryOptions = useMemo(() => {
-    const rawCandidates = inventoryData.filter((item: any) => {
-      const itemType = getSafeItemType(item);
+    const scopedInventory = currentProductionLocationId
+      ? inventoryData.filter((item: any) => item.locationId === currentProductionLocationId)
+      : inventoryData;
+    const rawCandidates = scopedInventory.filter((item: any) => {
+      const itemType = String(item?.itemType ?? item?.item_type ?? "").trim();
       return itemType !== "Finished Good" && itemType !== "Preparation";
     });
 
@@ -455,6 +460,43 @@ export default function FinishedGoods() {
 
     return groupedOptions;
   }, [currentProductionLocationId, inventoryData]);
+
+  useEffect(() => {
+    if (process.env.NODE_ENV !== "development") return;
+    if (!normalizeInventoryDisplayKey(debouncedSubstituteQuery).includes("butter")) return;
+    const scopedInventory = currentProductionLocationId
+      ? inventoryData.filter((item: any) => item.locationId === currentProductionLocationId)
+      : inventoryData;
+    const butterRaw = scopedInventory.filter((item: any) =>
+      normalizeInventoryDisplayKey(item?.name).includes("butter")
+    );
+    const butterGrouped = substituteInventoryOptions.filter((item: any) =>
+      normalizeInventoryDisplayKey(item?.name).includes("butter")
+    );
+    console.debug("[Production] Butter substitute diagnostic", {
+      currentProductionLocationId,
+      rawInventoryMatches: butterRaw.map((item: any) => ({
+        id: item.id,
+        itemId: item.itemId,
+        name: item.name,
+        locationId: item.locationId,
+        itemType: item.itemType,
+        unit: item.unit,
+        supplierId: item.supplierId,
+        cost: item.cost,
+      })),
+      groupedMatches: butterGrouped.map((item: any) => ({
+        id: item.id,
+        itemId: item.itemId,
+        name: item.name,
+        locationId: item.locationId,
+        displayKey: item.displayKey,
+        unit: item.unit,
+        supplierId: item.supplierId,
+        cost: item.cost,
+      })),
+    });
+  }, [currentProductionLocationId, debouncedSubstituteQuery, inventoryData, substituteInventoryOptions]);
 
   // ── Lazy-load production movements when history tab is active ────────────
   useEffect(() => {
@@ -1787,6 +1829,23 @@ export default function FinishedGoods() {
                     : candidates;
                   const filtered = rankedCandidates.slice(0, 50);
                   const hasMoreSubstituteResults = rankedCandidates.length > filtered.length;
+                  if (process.env.NODE_ENV === "development" && normalizeInventoryDisplayKey(q).includes("butter")) {
+                    console.debug("[Production] Butter substitute filtered results", {
+                      ingredientIndex: ingIdx,
+                      filteredMatches: filtered
+                        .filter((item: any) => normalizeInventoryDisplayKey(item?.name).includes("butter"))
+                        .map((item: any) => ({
+                          id: item.id,
+                          itemId: item.itemId,
+                          name: item.name,
+                          locationId: item.locationId,
+                          displayKey: item.displayKey,
+                          unit: item.unit,
+                          supplierId: item.supplierId,
+                          cost: item.cost,
+                        })),
+                    });
+                  }
 
                   return (
                     <TableRow
