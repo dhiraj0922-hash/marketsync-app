@@ -309,6 +309,8 @@ function UsersPageContent() {
   const [editActive, setEditActive]       = useState(true);
   const [editSaving, setEditSaving]       = useState(false);
   const [editError, setEditError]         = useState<string | null>(null);
+  const [editPwd, setEditPwd]             = useState("");
+  const [editPwdShow, setEditPwdShow]     = useState(false);
 
   // ── Add Location inline (shared by both drawers) ─────────────────────────
   const [isAddLocOpen, setIsAddLocOpen]   = useState(false);
@@ -535,6 +537,8 @@ function UsersPageContent() {
     setEditLocation(p.locationId ?? "");
     setEditActive(p.isActive !== false);
     setEditPhone(p.phone ?? "");
+    setEditPwd("");
+    setEditPwdShow(false);
     setEditTab("account");
     setEditError(null);
     
@@ -615,6 +619,21 @@ function UsersPageContent() {
     }
 
     setEditSaving(true); setEditError(null);
+
+    // Only update password if a value is provided
+    if (editPwd.trim()) {
+      if (editPwd.trim().length < 6) {
+        setEditError("New password must be at least 6 characters.");
+        setEditSaving(false);
+        return;
+      }
+      const pwdRes = await setUserPassword(editProfile.email || (editProfile as any).userEmail, editPwd.trim());
+      if (!pwdRes.success) {
+        setEditError(pwdRes.error ?? "Failed to update password.");
+        setEditSaving(false);
+        return;
+      }
+    }
     
     // Update user profile and billing together!
     const res = await updateUserProfileAndBilling(editProfile.id, {
@@ -1078,6 +1097,7 @@ function UsersPageContent() {
                         value={provName}
                         onChange={e => { setProvName(e.target.value); setProvError(null); }}
                         placeholder="Jane Doe"
+                        autoComplete="off"
                         className="w-full p-2 border border-neutral-300 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-neutral-50"
                       />
                     </div>
@@ -1088,6 +1108,7 @@ function UsersPageContent() {
                         value={provEmail}
                         onChange={e => { setProvEmail(e.target.value); setProvError(null); }}
                         placeholder="jane@example.com"
+                        autoComplete="off"
                         className="w-full p-2 border border-neutral-300 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-neutral-50"
                       />
                     </div>
@@ -1128,6 +1149,7 @@ function UsersPageContent() {
                       value={provPhone}
                       onChange={e => setProvPhone(e.target.value)}
                       placeholder="416-555-0100"
+                      autoComplete="off"
                       className="w-full p-2 border border-neutral-300 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-neutral-50"
                     />
                   </div>
@@ -1135,14 +1157,15 @@ function UsersPageContent() {
                   {/* Password */}
                   <div className="space-y-1.5 border-t border-neutral-100 pt-4">
                     <label className="text-xs font-semibold text-neutral-600 uppercase tracking-wider">
-                      Password <span className="text-neutral-400 font-normal">(optional — leave blank to auto-generate)</span>
+                      Initial Password <span className="text-neutral-400 font-normal">(optional — leave blank to auto-generate)</span>
                     </label>
                     <div className="relative">
                       <input
                         type={provPwdShow ? "text" : "password"}
                         value={provPwd}
                         onChange={e => setProvPwd(e.target.value)}
-                        placeholder="Min 8 characters, or leave blank"
+                        placeholder="Enter initial password"
+                        autoComplete="new-password"
                         className="w-full pr-20 pl-3 py-2 border border-neutral-300 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-neutral-50 font-mono"
                       />
                       <div className="absolute right-2 top-1/2 -translate-y-1/2 flex gap-1">
@@ -1278,6 +1301,7 @@ function UsersPageContent() {
                   type="text"
                   value={editName}
                   onChange={e => setEditName(e.target.value)}
+                  autoComplete="off"
                   className="w-full p-2 border border-neutral-300 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-neutral-50"
                 />
               </div>
@@ -1315,8 +1339,40 @@ function UsersPageContent() {
                   value={editPhone}
                   onChange={e => setEditPhone(e.target.value)}
                   placeholder="416-555-0100"
+                  autoComplete="off"
                   className="w-full p-2 border border-neutral-300 rounded-lg text-sm bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
                 />
+              </div>
+
+              {/* Reset Password / Set New Password */}
+              <div className="space-y-1.5 border-t border-neutral-100 pt-4">
+                <label className="text-xs font-semibold text-neutral-600 uppercase tracking-wider">
+                  Set New Password / Reset Password
+                </label>
+                <div className="relative">
+                  <input
+                    type={editPwdShow ? "text" : "password"}
+                    value={editPwd}
+                    onChange={e => setEditPwd(e.target.value)}
+                    placeholder="Enter new password"
+                    autoComplete="new-password"
+                    className="w-full pr-20 pl-3 py-2 border border-neutral-300 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-neutral-50 font-mono"
+                  />
+                  <div className="absolute right-2 top-1/2 -translate-y-1/2 flex gap-1">
+                    <button type="button" onClick={() => setEditPwd(generateTempPassword())} className="p-1 text-neutral-400 hover:text-brand-600" title="Generate">
+                      <RefreshCw className="h-3.5 w-3.5" />
+                    </button>
+                    <button type="button" onClick={() => setEditPwdShow(v => !v)} className="p-1 text-neutral-400 hover:text-neutral-700" title="Toggle visibility">
+                      {editPwdShow ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                    </button>
+                    {editPwd && (
+                      <CopyButton text={editPwd} />
+                    )}
+                  </div>
+                </div>
+                <p className="text-[10px] text-neutral-400">
+                  Leave blank to keep current password. Password must be at least 6 characters.
+                </p>
               </div>
 
               {/* Active toggle */}
@@ -1648,6 +1704,7 @@ function UsersPageContent() {
                         onKeyDown={e => e.key === "Enter" && handleSetPassword()}
                         placeholder="Minimum 6 characters"
                         autoFocus
+                        autoComplete="new-password"
                         className="w-full pr-20 pl-3 py-2.5 text-sm border border-neutral-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400 bg-neutral-50 font-mono tracking-widest"
                       />
                       <div className="absolute right-2 top-1/2 -translate-y-1/2 flex gap-1">
