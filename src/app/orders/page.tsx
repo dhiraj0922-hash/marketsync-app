@@ -30,7 +30,7 @@ import {
   Trash,
   X
 } from "lucide-react";
-import { loadOrders, saveOrders, insertOrder, updateOrder, deleteOrder, generateOrderId, loadInventory, saveInventory, loadSuppliers, resolveSupplier, loadLocations, logMovement, sendOrderToSupplier, loadPurchaseOptions } from "@/lib/storage";
+import { loadOrders, saveOrders, insertOrder, updateOrder, deleteOrder, generateOrderId, loadInventory, saveInventory, loadSuppliers, resolveSupplier, loadLocations, logMovement, sendOrderToSupplier, loadPurchaseOptions, savePurchaseOptions, insertPurchaseOptions } from "@/lib/storage";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/components/AuthProvider";
 import { isHqAdmin, resolveLocationId } from "@/lib/roles";
@@ -248,6 +248,18 @@ export default function Orders() {
   const [isCatalogOpen, setIsCatalogOpen] = useState(false);
   const [catalogSearchQuery, setCatalogSearchQuery] = useState("");
   const [debouncedCatalogSearchQuery, setDebouncedCatalogSearchQuery] = useState("");
+  const [editingLineItem, setEditingLineItem] = useState<{
+    index: number;
+    item: any;
+    quantity: string;
+    unitPrice: string;
+    purchaseUom: string;
+    packQty: string;
+    packUom: string;
+    syncInventory: boolean;
+    error: string | null;
+    isSaving: boolean;
+  } | null>(null);
   const [isSavingOrder, setIsSavingOrder] = useState(false);
   const [orderSaveError, setOrderSaveError] = useState<string | null>(null);
   const [toast, setToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
@@ -562,6 +574,124 @@ export default function Orders() {
       console.log("PO cart after add", nextItems);
       return nextItems;
     });
+  };
+
+  const openLineItemEditor = (item: any, index: number) => {
+    if (editorState.readOnly) return;
+    setEditingLineItem({
+      index,
+      item,
+      quantity: String(item.qty ?? 1),
+      unitPrice: String(item.expectedPrice ?? item.selectedPurchaseOption?.unitPrice ?? item.cost ?? 0),
+      purchaseUom: String(item.purchaseUom ?? item.selectedPurchaseOption?.purchaseUom ?? item.unit ?? ""),
+      packQty: item.packQty ?? item.selectedPurchaseOption?.packQty ? String(item.packQty ?? item.selectedPurchaseOption?.packQty) : "",
+      packUom: String(item.packUom ?? item.selectedPurchaseOption?.packUom ?? ""),
+      syncInventory: false,
+      error: null,
+      isSaving: false,
+    });
+  };
+
+  const updateEditingLineItem = (patch: Partial<NonNullable<typeof editingLineItem>>) => {
+    setEditingLineItem(prev => prev ? { ...prev, ...patch } : prev);
+  };
+
+  const findMatchingPurchaseOptionForLine = (item: any) => {
+    if (item.selectedPurchaseOption?.id) return item.selectedPurchaseOption;
+    const selectedSupplierName = String(selectedSupplier?.name ?? getSupplierName(selectedSupplier?.id));
+    const options = purchaseOptionsByInventoryItemId.get(String(item.id)) ?? [];
+    return chooseSupplierPurchaseOption(options, selectedSupplierName);
+  };
+
+  const saveLineItemEdit = async () => {
+    if (!editingLineItem) return;
+    const qty = Number(editingLineItem.quantity);
+    const unitPrice = Number(editingLineItem.unitPrice);
+    const packQtyText = editingLineItem.packQty.trim();
+    const packQty = packQtyText === "" ? null : Number(packQtyText);
+    const purchaseUom = editingLineItem.purchaseUom.trim();
+    const packUom = editingLineItem.packUom.trim();
+
+    if (!Number.isFinite(qty) || qty <= 0) {
+      updateEditingLineItem({ error: "Quantity must be greater than 0." });
+      return;
+    }
+    if (!Number.isFinite(unitPrice) || unitPrice < 0) {
+      updateEditingLineItem({ error: "Unit price must be 0 or greater." });
+      return;
+    }
+    if (packQtyText !== "" && (!Number.isFinite(packQty) || Number(packQty) <= 0)) {
+      updateEditingLineItem({ error: "Pack qty must be blank or greater than 0." });
+      return;
+    }
+
+    updateEditingLineItem({ error: null, isSaving: true });
+
+    try {
+      const currentItem = editingLineItem.item;
+      const matchingPurchaseOption = findMatchingPurchaseOptionForLine(currentItem);
+      const updatedLineItem = {
+        ...currentItem,
+        qty,
+        expectedPrice: unitPrice,
+        unitCost: unitPrice,
+        price: unitPrice,
+        purchaseUom,
+        packQty,
+        packUom,
+        selectedPurchaseOption: matchingPurchaseOption
+          ? {
+              ...matchingPurchaseOption,
+              unitPrice,
+              purchaseUom,
+              packQty,
+              packUom,
+            }
+          : currentItem.selectedPurchaseOption,
+      };
+
+      setDraftItems(prev =>
+        prev.map((row, idx) => idx === editingLineItem.index ? updatedLineItem : row)
+      );
+
+      if (editingLineItem.syncInventory) {
+        const supplierName = String(selectedSupplier?.name ?? getSupplierName(selectedSupplier?.id));
+        const payload = {
+          ...(matchingPurchaseOption?.id ? { id: matchingPurchaseOption.id } : {}),
+          inventoryItemId: String(currentItem.id),
+          supplierName,
+          supplierProductName: matchingPurchaseOption?.supplierProductName ?? currentItem.name,
+          purchaseUom,
+          packQty,
+          packUom,
+          unitPrice,
+          isPreferred: matchingPurchaseOption?.isPreferred ?? true,
+        };
+        const res: any = matchingPurchaseOption?.id
+          ? await savePurchaseOptions([payload])
+          : await insertPurchaseOptions([payload]);
+        if (!res?.success) {
+          const errorMessage =
+            typeof res?.error === "string"
+              ? res.error
+              : res?.error?.message ?? "Inventory supplier pricing update failed";
+          throw new Error(errorMessage);
+        }
+
+        const refreshedOptions = await loadPurchaseOptions();
+        setPurchaseOptionsData(Array.isArray(refreshedOptions) ? refreshedOptions : []);
+        showToast("success", "PO line and Inventory supplier pricing updated");
+      } else {
+        showToast("success", "PO line updated");
+      }
+
+      setEditingLineItem(null);
+    } catch (err: any) {
+      updateEditingLineItem({
+        error: err?.message ?? "Unable to save PO line item.",
+        isSaving: false,
+      });
+    }
   };
 
   const currentTotal = draftItems.reduce((sum, item) => sum + (item.expectedPrice * item.qty), 0);
@@ -1399,16 +1529,25 @@ export default function Orders() {
                             ${(item.expectedPrice * item.qty).toFixed(2)}
                           </TableCell>
 
-                          {!editorState.readOnly && (
-                            <TableCell className="text-right pr-2">
-                              <button 
-                                onClick={() => setDraftItems(draftItems.filter(i => i.id !== item.id))}
-                                className="p-1.5 text-neutral-400 hover:text-danger-600 hover:bg-danger-50 rounded transition-colors"
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </button>
-                            </TableCell>
-                          )}
+	                          {!editorState.readOnly && (
+	                            <TableCell className="text-right pr-2">
+                                <div className="flex justify-end gap-1">
+                                  <button
+                                    onClick={() => openLineItemEditor(item, idx)}
+                                    className="p-1.5 text-neutral-400 hover:text-brand-600 hover:bg-brand-50 rounded transition-colors"
+                                    title="Edit PO item"
+                                  >
+                                    <FileEdit className="h-4 w-4" />
+                                  </button>
+	                                <button 
+	                                  onClick={() => setDraftItems(draftItems.filter(i => i.id !== item.id))}
+	                                  className="p-1.5 text-neutral-400 hover:text-danger-600 hover:bg-danger-50 rounded transition-colors"
+	                                >
+	                                  <Trash2 className="h-4 w-4" />
+	                                </button>
+                                </div>
+	                            </TableCell>
+	                          )}
                         </TableRow>
                       ))}
                       
@@ -1459,8 +1598,8 @@ export default function Orders() {
         </div>
 
         {/* Catalog Search Modal - rendered inside the portal hierarchy to avoid focus block and overlay stacking fighting */}
-        {isCatalogOpen && (
-          <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/45 backdrop-blur-[2px]" onClick={(e) => { e.stopPropagation(); setIsCatalogOpen(false); }}>
+	        {isCatalogOpen && (
+	          <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/45 backdrop-blur-[2px]" onClick={(e) => { e.stopPropagation(); setIsCatalogOpen(false); }}>
              <div className="bg-white rounded-xl shadow-2xl border border-neutral-200 w-[500px] max-h-[80vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200" onClick={(e) => e.stopPropagation()}>
                <div className="flex justify-between items-center p-4 border-b border-neutral-100 bg-neutral-50/50">
                  <div>
@@ -1539,7 +1678,90 @@ export default function Orders() {
                     </div>
                   )}
                </div>
-             </div>
+	             </div>
+	          </div>
+	        )}
+        {editingLineItem && (
+          <div
+            className="fixed inset-0 z-[220] flex items-center justify-center bg-black/45 backdrop-blur-[2px] p-4"
+            onClick={(e) => { e.stopPropagation(); if (!editingLineItem.isSaving) setEditingLineItem(null); }}
+          >
+            <div
+              className="w-full max-w-lg overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-2xl animate-in zoom-in-95 duration-200"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between border-b border-neutral-100 bg-neutral-50/70 p-4">
+                <div>
+                  <h3 className="text-sm font-bold text-neutral-900">Edit PO Item</h3>
+                  <p className="mt-0.5 text-xs text-neutral-500">Adjust this order line. Inventory sync is optional.</p>
+                </div>
+                <button
+                  onClick={() => !editingLineItem.isSaving && setEditingLineItem(null)}
+                  className="text-neutral-400 hover:text-neutral-700"
+                  disabled={editingLineItem.isSaving}
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+              <div className="max-h-[70vh] space-y-4 overflow-y-auto p-4">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <label className="space-y-1 sm:col-span-2">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">Item name</span>
+                    <input value={editingLineItem.item.name ?? ""} readOnly className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm font-semibold text-neutral-800" />
+                  </label>
+                  <label className="space-y-1 sm:col-span-2">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">Supplier</span>
+                    <input value={String(selectedSupplier?.name ?? getSupplierName(selectedSupplier?.id))} readOnly className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm text-neutral-800" />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">Quantity</span>
+                    <input type="number" min="0.01" step="0.01" value={editingLineItem.quantity} onChange={(e) => updateEditingLineItem({ quantity: e.target.value, error: null })} className="w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100" />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">Unit Price</span>
+                    <input type="number" min="0" step="0.01" value={editingLineItem.unitPrice} onChange={(e) => updateEditingLineItem({ unitPrice: e.target.value, error: null })} className="w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100" />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">Purchase UOM</span>
+                    <input value={editingLineItem.purchaseUom} onChange={(e) => updateEditingLineItem({ purchaseUom: e.target.value, error: null })} className="w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100" />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">Pack Qty</span>
+                    <input type="number" min="0.01" step="0.01" value={editingLineItem.packQty} onChange={(e) => updateEditingLineItem({ packQty: e.target.value, error: null })} className="w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100" />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">Pack UOM</span>
+                    <input value={editingLineItem.packUom} onChange={(e) => updateEditingLineItem({ packUom: e.target.value, error: null })} className="w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100" />
+                  </label>
+                </div>
+                <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-3 text-xs text-neutral-600">
+                  <div className="font-semibold text-neutral-800">Current inventory/master values</div>
+                  <div className="mt-1">
+                    Price: ${Number(editingLineItem.item.selectedPurchaseOption?.unitPrice ?? editingLineItem.item.cost ?? 0).toFixed(2)}
+                    {" "}• Purchase UOM: {editingLineItem.item.selectedPurchaseOption?.purchaseUom ?? editingLineItem.item.purchaseUom ?? editingLineItem.item.unit ?? "N/A"}
+                    {" "}• Pack: {editingLineItem.item.selectedPurchaseOption?.packQty ?? editingLineItem.item.packQty ?? "N/A"} {editingLineItem.item.selectedPurchaseOption?.packUom ?? editingLineItem.item.packUom ?? ""}
+                  </div>
+                </div>
+                <label className="flex items-start gap-2 rounded-lg border border-brand-100 bg-brand-50/60 p-3 text-sm text-neutral-700">
+                  <input type="checkbox" checked={editingLineItem.syncInventory} onChange={(e) => updateEditingLineItem({ syncInventory: e.target.checked, error: null })} className="mt-0.5 h-4 w-4 rounded border-neutral-300 text-brand-600 focus:ring-brand-500" />
+                  <span>
+                    <span className="block font-semibold text-neutral-900">Apply this price/packing to Inventory for future orders</span>
+                    <span className="block text-xs text-neutral-500">Updates the matching supplier purchase option. Leave unchecked to change only this PO line.</span>
+                  </span>
+                </label>
+                {editingLineItem.error && (
+                  <div className="rounded-lg border border-danger-200 bg-danger-50 px-3 py-2 text-sm text-danger-700">{editingLineItem.error}</div>
+                )}
+              </div>
+              <div className="flex justify-end gap-2 border-t border-neutral-100 bg-neutral-50/70 p-4">
+                <button onClick={() => setEditingLineItem(null)} disabled={editingLineItem.isSaving} className="rounded-lg border border-neutral-200 bg-white px-4 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50 disabled:opacity-60">
+                  Cancel
+                </button>
+                <button onClick={saveLineItemEdit} disabled={editingLineItem.isSaving} className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 disabled:opacity-60">
+                  {editingLineItem.isSaving ? "Saving..." : "Save"}
+                </button>
+              </div>
+            </div>
           </div>
         )}
       </Drawer>
