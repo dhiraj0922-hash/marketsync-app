@@ -30,7 +30,7 @@ import {
   Trash,
   X
 } from "lucide-react";
-import { loadOrders, saveOrders, insertOrder, updateOrder, deleteOrder, generateOrderId, loadInventory, saveInventory, loadSuppliers, resolveSupplier, loadLocations, logMovement, sendOrderToSupplier } from "@/lib/storage";
+import { loadOrders, saveOrders, insertOrder, updateOrder, deleteOrder, generateOrderId, loadInventory, saveInventory, loadSuppliers, resolveSupplier, loadLocations, logMovement, sendOrderToSupplier, loadPurchaseOptions } from "@/lib/storage";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/components/AuthProvider";
 import { isHqAdmin, resolveLocationId } from "@/lib/roles";
@@ -39,6 +39,37 @@ const HQ_LOCATION_ID = "LOC-HQ";
 
 const normalizeInventoryDisplayKey = (value: any) =>
   String(value ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+
+const normalizeSupplierName = (value: any) =>
+  String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\band\b/g, " and ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const UNIT_LIKE_SUPPLIER_NAMES = new Set([
+  "ea",
+  "each",
+  "lb",
+  "lbs",
+  "kg",
+  "g",
+  "gr",
+  "l",
+  "ml",
+  "pack",
+  "bag",
+  "case",
+  "cs",
+  "box",
+  "supplies",
+]);
+
+const isUnitLikeSupplierName = (value: any) =>
+  UNIT_LIKE_SUPPLIER_NAMES.has(normalizeSupplierName(value));
 
 const getInventoryDisplayKey = (item: any) => {
   const itemId = String(item?.itemId ?? item?.item_id ?? "").trim();
@@ -53,7 +84,7 @@ const getInventoryDisplayKey = (item: any) => {
 };
 
 const getCatalogSupplierText = (item: any) =>
-  String(item?.preferredSupplierName ?? item?.supplierName ?? item?.supplier ?? item?.supplierId ?? "");
+  String(item?.selectedPurchaseOption?.supplierName ?? item?.catalogSupplierName ?? item?.preferredSupplierName ?? item?.supplierName ?? item?.supplier ?? item?.supplierId ?? "");
 
 const rankCatalogMatch = (item: any, query: string) => {
   const q = normalizeInventoryDisplayKey(query);
@@ -62,6 +93,7 @@ const rankCatalogMatch = (item: any, query: string) => {
   const supplier = normalizeInventoryDisplayKey(getCatalogSupplierText(item));
   const category = normalizeInventoryDisplayKey(item?.category);
   const unit = normalizeInventoryDisplayKey(item?.unit ?? item?.baseUnit);
+  const purchaseUom = normalizeInventoryDisplayKey(item?.selectedPurchaseOption?.purchaseUom ?? item?.purchaseUom);
 
   if (name === q) return 100;
   if (name.startsWith(q)) return 90;
@@ -71,7 +103,23 @@ const rankCatalogMatch = (item: any, query: string) => {
   if (category.startsWith(q)) return 35;
   if (category.includes(q)) return 30;
   if (unit === q || unit.includes(q)) return 20;
+  if (purchaseUom === q || purchaseUom.includes(q)) return 15;
   return -1;
+};
+
+const chooseSupplierPurchaseOption = (options: any[], selectedSupplierName: string) => {
+  const selectedNormalized = normalizeSupplierName(selectedSupplierName);
+  const matches = options.filter((option: any) =>
+    normalizeSupplierName(option?.supplierName) === selectedNormalized
+  );
+  if (matches.length === 0) return null;
+  return [...matches].sort((a: any, b: any) => {
+    if (Boolean(a.isPreferred) !== Boolean(b.isPreferred)) return a.isPreferred ? -1 : 1;
+    const aPrice = Number.isFinite(Number(a.unitPrice)) ? Number(a.unitPrice) : Number.POSITIVE_INFINITY;
+    const bPrice = Number.isFinite(Number(b.unitPrice)) ? Number(b.unitPrice) : Number.POSITIVE_INFINITY;
+    if (aPrice !== bPrice) return aPrice - bPrice;
+    return String(a.id ?? "").localeCompare(String(b.id ?? ""));
+  })[0];
 };
 
 export default function Orders() {
@@ -87,6 +135,7 @@ export default function Orders() {
 
   const [orders, setOrders] = useState<any[]>([]);
   const [inventoryData, setInventoryData] = useState<any[]>([]);
+  const [purchaseOptionsData, setPurchaseOptionsData] = useState<any[]>([]);
   const [suppliersData, setSuppliersData] = useState<any[]>([]);
   const [locations, setLocations] = useState<any[]>([]);  // live from DB — replaces hardcoded locationsData
   const [isLoading, setIsLoading] = useState(true);
@@ -116,11 +165,12 @@ export default function Orders() {
       console.log("[Orders] load start  requestId=", thisRequestId, " queryLocationId=", queryLocationId);
 
       try {
-        const [loadedOrders, loadedInv, loadedSup, loadedLocs] = await Promise.all([
+        const [loadedOrders, loadedInv, loadedSup, loadedLocs, loadedPurchaseOptions] = await Promise.all([
           loadOrders(queryLocationId),
           loadInventory(),
           loadSuppliers(),
           loadLocations(),
+          loadPurchaseOptions(),
         ]);
 
         // Discard if a newer request has already started
@@ -137,6 +187,7 @@ export default function Orders() {
 
         setOrders(loadedOrders);
         setInventoryData(loadedInv);
+        setPurchaseOptionsData(Array.isArray(loadedPurchaseOptions) ? loadedPurchaseOptions : []);
         setSuppliersData(loadedSup);
         setLocations(loadedLocs);
 
@@ -255,20 +306,87 @@ export default function Orders() {
     }
   }, [isCatalogOpen]);
 
+  const purchaseOptionsByInventoryItemId = useMemo(() => {
+    const byItemId = new Map<string, any[]>();
+    for (const option of purchaseOptionsData) {
+      const key = String(option?.inventoryItemId ?? "");
+      if (!key) continue;
+      if (!byItemId.has(key)) byItemId.set(key, []);
+      byItemId.get(key)!.push(option);
+    }
+    return byItemId;
+  }, [purchaseOptionsData]);
+
   const supplierCatalogItems = useMemo(() => {
     if (!selectedSupplier?.id) return [];
-    const supplierRows = inventoryData.filter(
-      (item: any) => Number(item.supplierId) === Number(selectedSupplier.id)
-    );
+    const selectedSupplierName = String(selectedSupplier?.name ?? getSupplierName(selectedSupplier.id));
+    const selectedSupplierNormalized = normalizeSupplierName(selectedSupplierName);
+    let purchaseOptionMatches = 0;
+    let supplierIdMatches = 0;
+
+    const supplierRows = inventoryData
+      .map((item: any) => {
+        const supplierNameFromId = getSupplierName(item.supplierId);
+        if (process.env.NODE_ENV === "development" && item.supplierId && isUnitLikeSupplierName(supplierNameFromId)) {
+          console.warn("[Orders] inventory_items.supplierId points to unit-like supplier", {
+            itemId: item.id,
+            itemName: item.name,
+            supplierId: item.supplierId,
+            supplierName: supplierNameFromId,
+          });
+        }
+
+        const itemPurchaseOptions = purchaseOptionsByInventoryItemId.get(String(item.id)) ?? [];
+        const selectedPurchaseOption = chooseSupplierPurchaseOption(itemPurchaseOptions, selectedSupplierName);
+        if (selectedPurchaseOption) {
+          purchaseOptionMatches += 1;
+          return {
+            ...item,
+            selectedPurchaseOption,
+            catalogSupplierName: selectedPurchaseOption.supplierName,
+            purchaseUom: selectedPurchaseOption.purchaseUom ?? item.purchaseUom,
+            packQty: selectedPurchaseOption.packQty ?? item.packQty,
+            packUom: selectedPurchaseOption.packUom ?? item.packUom,
+            unitCost: selectedPurchaseOption.unitPrice,
+            price: selectedPurchaseOption.unitPrice,
+            cost: selectedPurchaseOption.unitPrice,
+            expectedPrice: selectedPurchaseOption.unitPrice,
+            isPreferredPurchaseOption: Boolean(selectedPurchaseOption.isPreferred),
+          };
+        }
+
+        const supplierIdMatchesSelected = Number(item.supplierId) === Number(selectedSupplier.id);
+        const supplierIdNameIsReal = !isUnitLikeSupplierName(supplierNameFromId);
+        if (supplierIdMatchesSelected && supplierIdNameIsReal) {
+          supplierIdMatches += 1;
+          return {
+            ...item,
+            catalogSupplierName: supplierNameFromId,
+          };
+        }
+
+        return null;
+      })
+      .filter(Boolean);
+
     const groups = new Map<string, any[]>();
     for (const item of supplierRows) {
-      const key = getInventoryDisplayKey(item);
+      const itemId = String(item?.itemId ?? item?.item_id ?? "").trim();
+      const key = [
+        itemId ? `item:${itemId}` : "item:missing",
+        normalizeInventoryDisplayKey(item?.name),
+        normalizeInventoryDisplayKey(item?.baseUnit ?? item?.baseunit ?? item?.unit),
+        selectedSupplierNormalized,
+        normalizeInventoryDisplayKey(item?.selectedPurchaseOption?.unitPrice ?? item?.cost ?? ""),
+      ].join("|");
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key)!.push(item);
     }
 
     const groupedItems = Array.from(groups.entries()).map(([displayKey, rows]) => {
       const representative =
+        rows.find((row: any) => row.selectedPurchaseOption?.isPreferred) ??
+        rows.find((row: any) => row.selectedPurchaseOption) ??
         rows.find((row: any) => Number(row.inStock ?? 0) > 0) ??
         rows.find((row: any) => row.locationId !== HQ_LOCATION_ID) ??
         rows[0];
@@ -291,8 +409,19 @@ export default function Orders() {
       console.warn("[Orders] Duplicate catalog display keys before rendering", Array.from(duplicateDisplayKeys));
     }
 
+    if (process.env.NODE_ENV === "development") {
+      console.debug("[Orders] PO catalog supplier matching", {
+        selectedSupplierId: selectedSupplier.id,
+        selectedSupplierName,
+        rawInventoryCount: inventoryData.length,
+        purchaseOptionMatches,
+        supplierIdMatches,
+        groupedCount: groupedItems.length,
+      });
+    }
+
     return groupedItems;
-  }, [inventoryData, selectedSupplier?.id]);
+  }, [inventoryData, purchaseOptionsByInventoryItemId, selectedSupplier?.id, selectedSupplier?.name, suppliersData]);
 
   const catalogSearchResults = useMemo(() => {
     const q = debouncedCatalogSearchQuery.trim();
@@ -315,6 +444,33 @@ export default function Orders() {
 
   const filteredCatalogItems = catalogSearchResults.items;
   const hasMoreCatalogResults = catalogSearchResults.total > filteredCatalogItems.length;
+
+  useEffect(() => {
+    if (process.env.NODE_ENV !== "development") return;
+    if (!normalizeInventoryDisplayKey(debouncedCatalogSearchQuery).includes("onion")) return;
+    const onionGrouped = supplierCatalogItems.filter((item: any) =>
+      normalizeInventoryDisplayKey(item?.name).includes("onion")
+    );
+    const onionFiltered = filteredCatalogItems.filter((item: any) =>
+      normalizeInventoryDisplayKey(item?.name).includes("onion")
+    );
+    console.debug("[Orders] Onion catalog diagnostic", {
+      selectedSupplierId: selectedSupplier?.id,
+      selectedSupplierName: selectedSupplier?.name,
+      onionPresentAfterSupplierMatchAndGrouping: onionGrouped.map((item: any) => ({
+        id: item.id,
+        name: item.name,
+        price: item.selectedPurchaseOption?.unitPrice ?? item.cost,
+        supplier: getCatalogSupplierText(item),
+      })),
+      onionPresentAfterSearch: onionFiltered.map((item: any) => ({
+        id: item.id,
+        name: item.name,
+        price: item.selectedPurchaseOption?.unitPrice ?? item.cost,
+        supplier: getCatalogSupplierText(item),
+      })),
+    });
+  }, [debouncedCatalogSearchQuery, filteredCatalogItems, selectedSupplier?.id, selectedSupplier?.name, supplierCatalogItems]);
 
   const filteredOrders = orders.filter(order => {
     if (filterStatus !== "All" && order.status !== filterStatus) return false;
@@ -1348,6 +1504,7 @@ export default function Orders() {
                                 <div className="text-sm font-semibold text-neutral-900 group-hover:text-brand-700 transition-colors">{item.name}</div>
                                 <div className="text-[10px] text-neutral-500">
                                   {item.category} • {item.inStock} {item.unit} in stock
+                                  {item.selectedPurchaseOption ? ` • $${Number(item.selectedPurchaseOption.unitPrice ?? 0).toFixed(2)} / ${item.selectedPurchaseOption.purchaseUom || item.unit}` : item.cost ? ` • $${Number(item.cost).toFixed(2)} / ${item.unit}` : ""}
                                   {item.sharedLocationCount > 1 ? ` • Shared across ${item.sharedLocationCount} locations` : ""}
                                 </div>
                              </div>
