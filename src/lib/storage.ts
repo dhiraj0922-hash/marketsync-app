@@ -102,7 +102,111 @@ export function convertYieldToBaseUnit(
   return { qty: converted, converted: true };
 }
 
-// ----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
+// MEASUREMENT FAMILY HELPERS
+//
+// These pure functions drive the Add/Edit Inventory Item UI:
+//   - deriveLockedBaseUnit       → the canonical storage unit for a family
+//   - getFamilyAllowedInnerUnits → which inner measurement units are valid
+//   - calcBaseQtyPerPurchaseUnit → total base-unit qty in one purchase unit
+//   - inferMeasurementFamily     → auto-detect family from an existing baseUnit
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type MeasurementFamily =
+  | 'weight' | 'volume' | 'count' | 'labour' | 'preparation' | 'finished_good';
+
+/** The locked internal base unit for each measurement family. */
+export function deriveLockedBaseUnit(family: string): string {
+  switch (family) {
+    case 'weight':       return 'g';
+    case 'volume':       return 'ml';
+    case 'count':        return 'ea';
+    case 'labour':       return 'hr';
+    case 'preparation':  return 'g';   // preparation items are always weighed internally
+    case 'finished_good':return 'ea';
+    default:             return '';
+  }
+}
+
+/** Measurement units that are valid for the inner pack (innerMeasurementUnit). */
+export function getFamilyAllowedInnerUnits(family: string): string[] {
+  switch (family) {
+    case 'weight':
+    case 'preparation':
+      return ['g', 'kg', 'lb', 'oz'];
+    case 'volume':
+      return ['ml', 'l', 'fl oz'];
+    case 'count':
+    case 'finished_good':
+      return ['ea'];
+    case 'labour':
+      return ['hr', 'min'];
+    default:
+      return [];
+  }
+}
+
+/**
+ * Compute the total base-unit quantity contained in one purchase unit.
+ *
+ * Examples:
+ *   weight, innerPackCount=6, innerQty=3, innerMeasurementUnit='lb'
+ *     → 6 × 3 lb × 453.59237 g/lb = 8164.66 g
+ *
+ *   volume, innerPackCount=1, innerQty=16, innerMeasurementUnit='l'
+ *     → 1 × 16 l × 1000 ml/l = 16000 ml
+ *
+ *   count, innerPackCount=1, innerQty=1, innerMeasurementUnit='ea'
+ *     → 1 ea
+ *
+ *   labour, innerPackCount=1, innerQty=1, innerMeasurementUnit='hr'
+ *     → 1 hr
+ *
+ * Returns null when the conversion is impossible (incompatible units).
+ */
+export function calcBaseQtyPerPurchaseUnit(
+  family: string,
+  innerPackCount: number,
+  innerQty: number,
+  innerMeasurementUnit: string,
+): number | null {
+  if (innerPackCount <= 0 || innerQty <= 0) return null;
+
+  const lockedBase = deriveLockedBaseUnit(family);
+  if (!lockedBase) return null;
+
+  const totalInner = innerPackCount * innerQty;
+
+  // Count / labour / finished_good: no dimensional conversion needed
+  if (['ea', 'hr'].includes(lockedBase)) {
+    if (innerMeasurementUnit === lockedBase || innerMeasurementUnit === 'min') {
+      if (innerMeasurementUnit === 'min') return totalInner / 60; // min → hr
+      return totalInner;
+    }
+    return null;
+  }
+
+  // Weight (g) or Volume (ml): use convertUnit
+  const converted = convertUnit(totalInner, innerMeasurementUnit, lockedBase);
+  return converted; // null if units are incompatible
+}
+
+/**
+ * Auto-infer measurement family from a legacy baseUnit string.
+ * Used when opening an existing inventory item that was created before
+ * measurement_family was added to the schema.
+ */
+export function inferMeasurementFamily(baseUnit: string | null | undefined): MeasurementFamily | '' {
+  if (!baseUnit) return '';
+  const u = baseUnit.trim().toLowerCase();
+  if (['g', 'kg', 'lb', 'oz'].includes(u))       return 'weight';
+  if (['ml', 'l', 'fl oz'].includes(u))           return 'volume';
+  if (['ea', 'each', 'piece', 'pcs'].includes(u)) return 'count';
+  if (['hr', 'hour'].includes(u))                 return 'labour';
+  return '';
+}
+
+
 // 1. INVENTORY ITEMS 
 // ----------------------------------------------------------------------------
 const mapInventoryToFrontend = (db: any) => ({
@@ -135,6 +239,8 @@ const mapInventoryToFrontend = (db: any) => ({
      innerUnitUom:      db.inner_unit_uom    ?? null,  // measurement unit of innerUnitSize
      baseUomNew:        db.base_uom          ?? null,  // preferred costing unit (overrides baseUnit when set)
      allowedRecipeUoms: Array.isArray(db.allowed_recipe_uoms) ? db.allowed_recipe_uoms : null,
+     // ── Phase 2: Measurement family (drives locked base unit)
+     measurementFamily: db.measurement_family ?? null,
      // Explicit production recipe link — set via Production → Prep/Base "Link Recipe" picker
      linkedRecipeId:    db.linked_recipe_id ?? null,
 });
@@ -153,7 +259,7 @@ const mapInventoryToDB = (item: any) => {
      name: item.name || '',
      category: item.category || '',
      itemtype: item.itemType || '',
-     baseunit: resolvedBaseUnit,   // backfill from base_uom only when baseunit is blank
+     baseunit: resolvedBaseUnit,
      unit: item.unit || '',
      instock: isNaN(parseFloat(item.inStock)) ? 0 : parseFloat(item.inStock),
      parlevel: isNaN(parseFloat(item.parLevel)) ? 0 : parseFloat(item.parLevel),
@@ -174,6 +280,8 @@ const mapInventoryToDB = (item: any) => {
      inner_unit_uom:      item.innerUnitUom   ?? null,
      base_uom:            newBaseUom          || null,
      allowed_recipe_uoms: Array.isArray(item.allowedRecipeUoms) ? item.allowedRecipeUoms : null,
+     // ── Phase 2: Measurement family
+     measurement_family:  item.measurementFamily ?? null,
      // Explicit prep→recipe linkage — persist whatever HQ sets
      linked_recipe_id:    item.linkedRecipeId ? String(item.linkedRecipeId) : null,
   };
@@ -351,6 +459,43 @@ export async function deductInventoryItemStock(
     console.error('[deductInventoryItemStock] update error', updateErr);
     return { success: false, error: updateErr };
   }
+  return { success: true, newStock };
+}
+
+/**
+ * Adjust a single inventory_items row by delta.
+ * Positive delta adds stock, negative delta removes stock. Floors at zero.
+ * Used by production void/correction flows so every stock correction can be
+ * paired with explicit inventory_movements reversal rows.
+ */
+export async function adjustInventoryItemStock(
+  rowId: string,
+  delta: number
+): Promise<{ success: boolean; newStock?: number; error?: any }> {
+  const { data: current, error: fetchErr } = await supabase
+    .from('inventory_items')
+    .select('instock')
+    .eq('id', rowId)
+    .single();
+
+  if (fetchErr || !current) {
+    console.error('[adjustInventoryItemStock] fetch error', fetchErr);
+    return { success: false, error: fetchErr ?? { message: 'Inventory item not found' } };
+  }
+
+  const currentStock = Number(current.instock ?? 0);
+  const newStock = Math.max(0, currentStock + delta);
+
+  const { error: updateErr } = await supabase
+    .from('inventory_items')
+    .update({ instock: newStock })
+    .eq('id', rowId);
+
+  if (updateErr) {
+    console.error('[adjustInventoryItemStock] update error', updateErr);
+    return { success: false, error: updateErr };
+  }
+
   return { success: true, newStock };
 }
 

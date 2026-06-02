@@ -28,7 +28,9 @@
  *   convertQuantity()       safe wrapper around normalizeUnit — returns { qty, error }
  *   resolveEffectiveBaseUom() pick the correct costing base unit for an item
  *   computeBaseUnitCostFromPack()  pack-field cost decomposition (Path 1)
+ *   CostAuditRecord                10-field breakdown from every successful cost result
  *   computeIngredientLineCost()    THE SINGLE COSTING ENTRYPOINT — all sites use this
+ *   calculateIngredientLineCost()  named wrapper: { item, recipeQty, recipeUnit }
  *   auditItemUnitAmbiguity()       soft-warning audit for inventory items
  */
 
@@ -396,9 +398,26 @@ export function computeBaseUnitCostFromPack(item: {
  * @param invItem     The inventory item (front-end camelCase shape from storage.ts)
  *
  * @returns
- *   ok: true   → { cost, normalizedQty, baseUnit, costPerBaseUnit }
+ *   ok: true   → { cost, normalizedQty, baseUnit, costPerBaseUnit, costAudit }
  *   ok: false  → { error, normalizedQty (null), baseUnit }
  */
+
+/** Full breakdown carried in every successful costing result. Rendered in audit panels. */
+export type CostAuditRecord = {
+  itemName:            string;
+  measurementFamily:   string;   // '' when not set on the item
+  purchaseUnit:        string;   // purchaseUom / purchase unit label, '' if not set
+  purchaseCost:        number;   // raw purchaseCost field on the item
+  baseQtyPerPurchUnit: number | null;  // computed from pack fields (Path 1) or purchaseUnits
+  costPerBaseUnit:     number;   // effectiveBaseCost ($/<baseUnit>)
+  recipeQty:           number;
+  recipeUnit:          string;
+  normalizedRecipeQty: number;   // recipeQty converted to baseUnit
+  calculatedCost:      number;   // final line cost
+  costPath:            1 | 2 | 3;
+  baseUnit:            string;
+};
+
 export type IngredientLineCostResult =
   | {
       ok:             true;
@@ -407,6 +426,7 @@ export type IngredientLineCostResult =
       baseUnit:       string;   // effective base unit used
       costPerBaseUnit:number;   // cost per base unit ($)
       costPath:       1 | 2 | 3; // which path resolved the cost
+      costAudit:      CostAuditRecord;
     }
   | {
       ok:             false;
@@ -421,15 +441,19 @@ export function computeIngredientLineCost(
   recipeQty:  number,
   recipeUnit: string,
   invItem: {
-    cost?:          number | null;
-    purchaseCost?:  number | null;
-    purchaseUnits?: Array<{ isPrimary?: boolean; conversion: number }> | null;
-    packQty?:       number | null;
-    innerUnitSize?: number | null;
-    innerUnitUom?:  string | null;
-    baseUomNew?:    string | null;
-    baseUnit?:      string | null;
-    unit?:          string | null;
+    name?:              string | null;
+    measurementFamily?: string | null;   // NEW: locked family from inventory engine
+    cost?:              number | null;
+    purchaseCost?:      number | null;
+    purchaseUnits?:     Array<{ isPrimary?: boolean; conversion: number }> | null;
+    packQty?:           number | null;
+    innerUnitSize?:     number | null;
+    innerUnitUom?:      string | null;
+    baseUomNew?:        string | null;
+    baseUnit?:          string | null;
+    unit?:              string | null;
+    // Structured pack fields (new model — map to Path 1 via computeBaseUnitCostFromPack)
+    purchaseUom?:       string | null;
   },
 ): IngredientLineCostResult {
   const baseUnit = resolveEffectiveBaseUom(invItem);
@@ -451,12 +475,25 @@ export function computeIngredientLineCost(
   // ── Step 2: Cost per base unit — three-path chain ─────────────────────────
   let effectiveBaseCost: number;
   let costPath: 1 | 2 | 3;
+  let baseQtyPerPurchUnit: number | null = null;
 
   // Path 1: structured pack fields (purchaseCost, packQty, innerUnitSize, innerUnitUom)
   const structuredCost = computeBaseUnitCostFromPack(invItem);
   if (structuredCost !== null) {
     effectiveBaseCost = structuredCost;
     costPath          = 1;
+    // Derive baseQtyPerPurchUnit for audit display
+    if (
+      invItem.packQty       != null && invItem.packQty       > 0 &&
+      invItem.innerUnitSize != null && invItem.innerUnitSize > 0 &&
+      invItem.innerUnitUom?.trim()
+    ) {
+      try {
+        const totalInnerQty = invItem.packQty * invItem.innerUnitSize;
+        const converted     = normalizeUnit(totalInnerQty, invItem.innerUnitUom!, baseUnit);
+        baseQtyPerPurchUnit = converted > 0 ? converted : null;
+      } catch { /* ignore — audit only */ }
+    }
   } else if (invItem.purchaseUnits && invItem.purchaseUnits.length > 0) {
     // Path 2: legacy purchaseUnits JSONB
     const primary = invItem.purchaseUnits.find((u) => u.isPrimary) ?? invItem.purchaseUnits[0];
@@ -464,24 +501,69 @@ export function computeIngredientLineCost(
       invItem.purchaseCost !== undefined && invItem.purchaseCost !== null
         ? Number(invItem.purchaseCost)
         : Number(invItem.cost ?? 0) * primary.conversion; // reconstruct if purchaseCost missing
-    effectiveBaseCost = purchCost / primary.conversion;
-    costPath          = 2;
+    effectiveBaseCost   = purchCost / primary.conversion;
+    costPath            = 2;
+    baseQtyPerPurchUnit = primary.conversion;
   } else {
     // Path 3: item.cost is already the per-base-unit cost (legacy)
-    effectiveBaseCost = Number(invItem.cost ?? 0);
-    costPath          = 3;
+    effectiveBaseCost   = Number(invItem.cost ?? 0);
+    costPath            = 3;
+    baseQtyPerPurchUnit = null;
   }
 
   const cost = normalizedQty * effectiveBaseCost;
+  const roundedCost = Math.round(cost * 1_000_000) / 1_000_000;
+
+  const costAudit: CostAuditRecord = {
+    itemName:            invItem.name?.trim()         ?? 'Unknown',
+    measurementFamily:   invItem.measurementFamily?.trim() ?? '',
+    purchaseUnit:        invItem.purchaseUom?.trim()  ?? '',
+    purchaseCost:        Number(invItem.purchaseCost  ?? invItem.cost ?? 0),
+    baseQtyPerPurchUnit,
+    costPerBaseUnit:     effectiveBaseCost,
+    recipeQty,
+    recipeUnit,
+    normalizedRecipeQty: normalizedQty,
+    calculatedCost:      roundedCost,
+    costPath,
+    baseUnit,
+  };
 
   return {
     ok:             true,
-    cost:           Math.round(cost * 1_000_000) / 1_000_000, // 6dp precision
+    cost:           roundedCost,
     normalizedQty,
     baseUnit,
     costPerBaseUnit:effectiveBaseCost,
     costPath,
+    costAudit,
   };
+}
+
+// ─── 9b. calculateIngredientLineCost — named wrapper (user-facing API) ────────
+
+/**
+ * Named wrapper around computeIngredientLineCost that accepts the
+ * user-facing parameter shape: { item, recipeQty, recipeUnit }.
+ *
+ * This is the canonical export referenced by recipe and production pages.
+ * Both modules MUST call this (or computeIngredientLineCost directly)
+ * and MUST NOT perform any inline cost arithmetic.
+ *
+ * @example
+ *   const result = calculateIngredientLineCost({ item: invItem, recipeQty: 100, recipeUnit: 'g' });
+ *   if (result.ok) console.log(result.costAudit);
+ */
+export function calculateIngredientLineCost({
+  item,
+  recipeQty,
+  recipeUnit,
+}: {
+  item:       Parameters<typeof computeIngredientLineCost>[2];
+  recipeQty:  number;
+  recipeUnit: string;
+}): IngredientLineCostResult {
+  return computeIngredientLineCost(recipeQty, recipeUnit, item);
 }
 
 // ─── 10. auditItemUnitAmbiguity — soft-warning audit ─────────────────────────
@@ -493,11 +575,12 @@ export function computeIngredientLineCost(
  */
 export function auditItemUnitAmbiguity(
   item: {
-    name?:             string | null;
-    baseUomNew?:       string | null;
-    baseUnit?:         string | null;
-    unit?:             string | null;
-    innerUnitUom?:     string | null;
+    name?:              string | null;
+    measurementFamily?: string | null;
+    baseUomNew?:        string | null;
+    baseUnit?:          string | null;
+    unit?:              string | null;
+    innerUnitUom?:      string | null;
     allowedRecipeUoms?: string[] | null;
   },
   usedUnit?: string | null,
@@ -557,3 +640,4 @@ export function auditItemUnitAmbiguity(
 
   return warnings;
 }
+

@@ -10,7 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
 import { Search, Plus, Upload, MoreHorizontal, ShoppingCart, History, Save, Trash2, ArrowDown, ArrowUp, AlertTriangle, X, Download, Loader2, Link2, ChevronDown, ChevronRight, GitMerge, MapPin, Copy } from "lucide-react";
-import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId, logMovement, deleteInventoryItem, deleteSaleItemByNameOrId, insertPurchaseOptions, loadPurchaseOptions, savePurchaseOptions, deletePurchaseOption, updateInventoryRowItemId, allocateInventoryToLocations, loadLocations, copyInventoryItemsToLocations, type CopyInventoryItemsToLocationsResult } from "@/lib/storage";
+import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId, logMovement, deleteInventoryItem, deleteSaleItemByNameOrId, insertPurchaseOptions, loadPurchaseOptions, savePurchaseOptions, deletePurchaseOption, updateInventoryRowItemId, allocateInventoryToLocations, loadLocations, copyInventoryItemsToLocations, type CopyInventoryItemsToLocationsResult, deriveLockedBaseUnit, getFamilyAllowedInnerUnits, calcBaseQtyPerPurchaseUnit, inferMeasurementFamily } from "@/lib/storage";
 import { normalizeInventoryName } from "@/lib/inventoryIdentity";
 import { SupplierCombobox } from "@/components/InventoryEditDrawer";
 
@@ -89,18 +89,32 @@ export default function Inventory() {
 
   // Add Item Drawer States
   const [isAddDrawerOpen, setIsAddDrawerOpen] = useState(false);
+  // ── Add drawer: Measurement Family + Structured Packaging ───────────────────────
+  const [newItemName, setNewItemName]         = useState("");
+  const [newItemType, setNewItemType]         = useState("Raw");
+  const [newItemCategory, setNewItemCategory] = useState("Produce");
+  const [newMeasFamily, setNewMeasFamily]     = useState(""); // 'weight'|'volume'|'count'|'labour'|'preparation'|'finished_good'
+  // Structured packaging
+  const [newPurchUnitLabel, setNewPurchUnitLabel] = useState("Case");
+  const [newInnerPackCount, setNewInnerPackCount] = useState("");
+  const [newInnerUnitLabel, setNewInnerUnitLabel] = useState("");
+  const [newInnerQty, setNewInnerQty]             = useState("");
+  const [newInnerMeasUnit, setNewInnerMeasUnit]   = useState("");
+  // Supplier & Cost
+  const [newSupplier, setNewSupplier]   = useState("");
+  const [newCostInput, setNewCostInput] = useState(""); // cost per purchase unit
+  // Stock
+  const [newInStock, setNewInStock]   = useState("");
+  const [addItemParLevel, setAddItemParLevel] = useState("");
+  const [newMinOnHand, setNewMinOnHand] = useState("");
+  const [newStockCountUnit, setNewStockCountUnit] = useState("base"); // 'base'|'purchase'
+  // Legacy newItem kept for CSV import / old code paths that still reference it
   const [newItem, setNewItem] = useState({
     name: "", category: "Produce", itemType: "Raw", unit: "kg",
-    supplier: "Fresh Farms Produce", inStock: "", parLevel: "", cost: "",
+    supplier: "", inStock: "", parLevel: "", cost: "",
     purchaseUnits: [{ name: "Case", conversion: '1', isPrimary: true }] as any[],
-    // Phase 2: Structured packaging fields (all optional, all default null/empty)
-    purchaseUom: "",   // e.g. 'case', 'bag'
-    packQty: "",   // inner units per purchase_uom
-    innerUnitType: "",   // e.g. 'can', 'bottle'
-    innerUnitSize: "",   // qty per inner unit
-    innerUnitUom: "",   // unit for innerUnitSize
-    baseUomNew: "",   // preferred costing unit (backfills baseunit if blank)
-    allowedRecipeUoms: "",   // comma-separated, parsed on save
+    purchaseUom: "", packQty: "", innerUnitType: "",
+    innerUnitSize: "", innerUnitUom: "", baseUomNew: "", allowedRecipeUoms: "",
   });
 
   // Import Drawer States
@@ -146,7 +160,17 @@ export default function Inventory() {
   const [isEditDrawerOpen, setIsEditDrawerOpen] = useState(false);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [editItem, setEditItem] = useState<any>(null);
-  // Edit packaging fields (separate string state for controlled inputs)
+  // ── Edit drawer: Measurement Family + Structured Packaging ──────────────────
+  const [editMeasFamily, setEditMeasFamily]     = useState("");
+  const [editPurchUnitLabel, setEditPurchUnitLabel] = useState("Case");
+  const [editInnerPackCount, setEditInnerPackCount] = useState("");
+  const [editInnerUnitLabel, setEditInnerUnitLabel] = useState("");
+  const [editInnerQty, setEditInnerQty]             = useState("");
+  const [editInnerMeasUnit, setEditInnerMeasUnit]   = useState("");
+  const [editCostInput, setEditCostInput]           = useState(""); // cost per purchase unit
+  const [editMinOnHand, setEditMinOnHand]           = useState("");
+  const [editStockCountUnit, setEditStockCountUnit] = useState("base"); // 'base'|'purchase'
+  // Legacy field aliases (kept for the purchase-options supplier section below)
   const [editPurchaseUom, setEditPurchaseUom] = useState("");
   const [editPackQty, setEditPackQty] = useState("");
   const [editInnerUnitType, setEditInnerUnitType] = useState("");
@@ -607,7 +631,23 @@ export default function Inventory() {
         ? String(item.purchaseCost)
         : item.cost !== undefined ? String(item.cost) : ""
     );
-    // Packaging fields — coerce null → ""
+    // ── New: Measurement family (auto-infer if not yet set) ──────────────────
+    const family = item.measurementFamily ?? inferMeasurementFamily(item.baseUnit || item.unit);
+    setEditMeasFamily(family);
+    // ── New: Structured packaging (map from legacy fields if present) ─────────
+    setEditPurchUnitLabel(item.purchaseUom ?? "Case");
+    // packQty = inner pack count (how many inner units per purchase unit)
+    setEditInnerPackCount(item.packQty != null ? String(item.packQty) : "");
+    setEditInnerUnitLabel(item.innerUnitType ?? "");
+    setEditInnerQty(item.innerUnitSize != null ? String(item.innerUnitSize) : "");
+    setEditInnerMeasUnit(item.innerUnitUom ?? "");
+    // Cost: prefer purchaseCost (price per purchase unit); fall back to item.cost
+    setEditCostInput(
+      item.purchaseCost != null ? String(item.purchaseCost) : (item.cost != null ? String(item.cost) : "")
+    );
+    setEditMinOnHand(item.minOnHand != null ? String(item.minOnHand) : "");
+    setEditStockCountUnit("base");
+    // ── Legacy field aliases (for the existing purchase-options section) ──────
     setEditPurchaseUom(item.purchaseUom ?? "");
     setEditPackQty(item.packQty != null ? String(item.packQty) : "");
     setEditInnerUnitType(item.innerUnitType ?? "");
@@ -638,26 +678,60 @@ export default function Inventory() {
     console.log("[EditItem] save start  id=", editItem.id);
 
     try {
-      let pUnits = editItem.purchaseUnits
-        ? JSON.parse(JSON.stringify(editItem.purchaseUnits))
-        : editPurchaseUnits;
-      pUnits = pUnits
-        .map((u: any) => ({ ...u, conversion: parseFloat(u.conversion) }))
-        .filter((u: any) => u.name?.trim());
-      if (pUnits.length > 0 && !pUnits.some((u: any) => u.isPrimary)) pUnits[0].isPrimary = true;
+      // ── New: compute base qty from structured packaging ──────────────────────
+      const ipc   = parseFloat(editInnerPackCount);
+      const iqty  = parseFloat(editInnerQty);
+      const baseQtyPerPurchUnit = (editMeasFamily && !isNaN(ipc) && !isNaN(iqty) && editInnerMeasUnit)
+        ? calcBaseQtyPerPurchaseUnit(editMeasFamily, ipc, iqty, editInnerMeasUnit)
+        : null;
 
-      const primaryUnit = pUnits.find((u: any) => u.isPrimary) || pUnits[0];
-      const hasValidPrim = primaryUnit && primaryUnit.name && primaryUnit.conversion > 0;
+      // ── Locked base unit from family; fall back to legacy editBaseUnit ────────
+      const lockedBase = editMeasFamily ? deriveLockedBaseUnit(editMeasFamily) : (editBaseUnit || editItem.unit || "");
 
-      const parsedCost = parseFloat(editPurchaseCost);
-      const baseCost = hasValidPrim && !isNaN(parsedCost)
-        ? parsedCost / primaryUnit.conversion
-        : (!isNaN(parsedCost) ? parsedCost : editItem.cost);
-      const purchCost = hasValidPrim && !isNaN(parsedCost) ? parsedCost : null;
+      // ── Cost computation ──────────────────────────────────────────────────────
+      const parsedPurchaseCost = parseFloat(editCostInput || editPurchaseCost);
+      let baseCost: number = editItem.cost;
+      let purchCost: number | null = null;
+      if (!isNaN(parsedPurchaseCost)) {
+        purchCost = parsedPurchaseCost;
+        if (baseQtyPerPurchUnit && baseQtyPerPurchUnit > 0) {
+          baseCost = parsedPurchaseCost / baseQtyPerPurchUnit;
+        } else {
+          // Legacy: fall back to purchaseUnits conversion
+          let pUnitsForCost = editItem.purchaseUnits
+            ? JSON.parse(JSON.stringify(editItem.purchaseUnits))
+            : editPurchaseUnits;
+          pUnitsForCost = pUnitsForCost
+            .map((u: any) => ({ ...u, conversion: parseFloat(u.conversion) }))
+            .filter((u: any) => u.name?.trim());
+          const primUnit = pUnitsForCost.find((u: any) => u.isPrimary) || pUnitsForCost[0];
+          if (primUnit && primUnit.conversion > 0) {
+            baseCost = parsedPurchaseCost / primUnit.conversion;
+          } else {
+            baseCost = parsedPurchaseCost;
+          }
+        }
+      }
+
+      // ── Build purchaseUnits array from structured fields (backward-compat) ────
+      let pUnits: any[] = [];
+      if (editMeasFamily && baseQtyPerPurchUnit && baseQtyPerPurchUnit > 0) {
+        pUnits = [{
+          name: editPurchUnitLabel || "Case",
+          conversion: baseQtyPerPurchUnit,
+          isPrimary: true,
+        }];
+      } else {
+        pUnits = editItem.purchaseUnits
+          ? JSON.parse(JSON.stringify(editItem.purchaseUnits))
+          : editPurchaseUnits;
+        pUnits = pUnits
+          .map((u: any) => ({ ...u, conversion: parseFloat(u.conversion) }))
+          .filter((u: any) => u.name?.trim());
+        if (pUnits.length > 0 && !pUnits.some((u: any) => u.isPrimary)) pUnits[0].isPrimary = true;
+      }
 
       // Compute preferred supplier summary from purchase_options state.
-      // This MUST be included in `updated` so that setInventoryData(newInventory)
-      // does not discard the patch applied by syncInventoryRowSupplier / makePreferred.
       const _prefRow = editPurchaseOptions.find((r: any) => r.isPreferred);
       const _lowRow = editPurchaseOptions.length > 0
         ? [...editPurchaseOptions].sort((a: any, b: any) => a.unitPrice - b.unitPrice)[0]
@@ -666,43 +740,29 @@ export default function Inventory() {
 
       const updated = {
         ...editItem,
-        baseUnit: editBaseUnit || editItem.unit || "",
-        unit: editBaseUnit || editItem.unit || "",
+        baseUnit: lockedBase,
+        unit: lockedBase,
         purchaseUnits: pUnits,
         cost: baseCost,
         purchaseCost: purchCost,
         updatedAt: Date.now(),
-        // Packaging fields
-        purchaseUom: editPurchaseUom.trim() || null,
-        packQty: editPackQty !== "" ? Number(editPackQty) : null,
-        innerUnitType: editInnerUnitType.trim() || null,
-        innerUnitSize: editInnerUnitSize !== "" ? Number(editInnerUnitSize) : null,
-        innerUnitUom: editInnerUnitUom.trim() || null,
-        // base_uom: only backfill baseunit when currently blank
-        baseUomNew: editBaseUomNew.trim() || null,
+        // ── New structured packaging fields ──────────────────────────────────
+        measurementFamily: editMeasFamily || null,
+        purchaseUom: editPurchUnitLabel.trim() || editPurchaseUom.trim() || null,
+        packQty: !isNaN(ipc) && ipc > 0 ? ipc : (editPackQty !== "" ? Number(editPackQty) : null),
+        innerUnitType: editInnerUnitLabel.trim() || editInnerUnitType.trim() || null,
+        innerUnitSize: !isNaN(iqty) && iqty > 0 ? iqty : (editInnerUnitSize !== "" ? Number(editInnerUnitSize) : null),
+        innerUnitUom: editInnerMeasUnit.trim() || editInnerUnitUom.trim() || null,
+        baseUomNew: lockedBase || editBaseUomNew.trim() || null,
         allowedRecipeUoms: editAllowedUoms.trim()
           ? editAllowedUoms.split(",").map(s => s.trim()).filter(Boolean)
           : null,
-        // Preserve purchase_options-derived supplier summary so the inventory list
-        // does not revert to legacy supplierId / suppliersData after Save Changes.
+        // Preserve purchase_options-derived supplier summary
         preferredSupplierName: _chosen?.supplierName ?? null,
         preferredCost: _chosen?.unitPrice ?? null,
       };
 
       const newInventory = inventoryData.map(i => i.id === updated.id ? updated : i);
-
-      // Diagnostic: confirm preferred supplier fields are present before and after save
-      const _beforeRow = inventoryData.find((i: any) => i.id === updated.id);
-      console.log('[handleEditSave] BEFORE setInventoryData', {
-        id: updated.id,
-        preferredSupplierName_before: _beforeRow?.preferredSupplierName,
-        preferredCost_before: _beforeRow?.preferredCost,
-        preferredSupplierName_on_updated: updated.preferredSupplierName,
-        preferredCost_on_updated: updated.preferredCost,
-        editPurchaseOptions: editPurchaseOptions.map((r: any) => ({
-          supplierName: r.supplierName, isPreferred: r.isPreferred, unitPrice: r.unitPrice,
-        })),
-      });
 
       console.log("[EditItem] request start  id=", updated.id);
       const res = await saveInventory(newInventory);
@@ -714,15 +774,6 @@ export default function Inventory() {
       }
       console.log("[EditItem] request success");
       setInventoryData(newInventory);
-
-      // Diagnostic: confirm the row in newInventory after setInventoryData
-      const _afterRow = newInventory.find((i: any) => i.id === updated.id);
-      console.log('[handleEditSave] AFTER setInventoryData', {
-        id: updated.id,
-        preferredSupplierName_after: _afterRow?.preferredSupplierName,
-        preferredCost_after: _afterRow?.preferredCost,
-      });
-
       setIsEditDrawerOpen(false);
     } catch (err: any) {
       console.log("[EditItem] caught error", err?.message);
@@ -1188,10 +1239,11 @@ export default function Inventory() {
   };
 
   const handleAddNewItem = async () => {
-    if (!newItem.name || !newItem.inStock || !newItem.parLevel || !newItem.cost) {
-      alert("Please fill in all required fields.");
-      return;
-    }
+    // ── Validate required fields ───────────────────────────────────────────────
+    if (!newItemName.trim()) { alert("Item Name is required."); return; }
+    if (!newMeasFamily)      { alert("Please select a Measurement Family before saving."); return; }
+    if (!newInStock)         { alert("Current Stock is required."); return; }
+    if (!addItemParLevel)        { alert("Par Level is required."); return; }
 
     // ── Resolve location_id for this new item ──────────────────────────────
     //
@@ -1216,7 +1268,6 @@ export default function Inventory() {
       locationId = resolveLocationId(user);
     }
 
-    // Debug logging — confirms exact values sent to DB
     console.log(
       "[AddItem] role=", user?.role,
       "| user.locationId=", user?.locationId,
@@ -1230,7 +1281,8 @@ export default function Inventory() {
       return;
     }
 
-    let suppText = newItem.supplier.trim();
+    // ── Resolve supplier ───────────────────────────────────────────────────────
+    let suppText = newSupplier.trim() || newItem.supplier.trim();
     let suppIdCode = null;
     if (suppText) {
       try {
@@ -1241,51 +1293,64 @@ export default function Inventory() {
       }
     }
 
-    let pUnits = [...newItem.purchaseUnits];
-    pUnits.forEach((u: any) => u.conversion = parseFloat(u.conversion));
-    if (pUnits.length > 0 && !pUnits.some((u: any) => u.isPrimary)) {
-      pUnits[0].isPrimary = true;
+    // ── Structured packaging → base qty ───────────────────────────────────────
+    const ipc  = parseFloat(newInnerPackCount);
+    const iqty = parseFloat(newInnerQty);
+    const baseQtyPerPurchUnit = (newMeasFamily && !isNaN(ipc) && !isNaN(iqty) && newInnerMeasUnit)
+      ? calcBaseQtyPerPurchaseUnit(newMeasFamily, ipc, iqty, newInnerMeasUnit)
+      : null;
+
+    // ── Validate unit compatibility ────────────────────────────────────────────
+    if (newInnerMeasUnit && newMeasFamily && baseQtyPerPurchUnit === null) {
+      alert("Unit conversion missing or incompatible. Cost cannot be trusted.\n\nPlease check that the Inner Measurement Unit is compatible with the selected Measurement Family.");
+      return;
     }
 
-    pUnits = pUnits.filter((u: any) => u.name.trim() !== "");
+    // ── Locked base unit ──────────────────────────────────────────────────────
+    const lockedBase = deriveLockedBaseUnit(newMeasFamily);
 
-    const primaryUnit = pUnits.find(u => u.isPrimary) || pUnits[0];
-    const hasValidPrimary = primaryUnit && primaryUnit.name && primaryUnit.conversion > 0;
+    // ── Cost computation ──────────────────────────────────────────────────────
+    const parsedPurchaseCost = parseFloat(newCostInput || newItem.cost as string);
+    let baseCost = isNaN(parsedPurchaseCost) ? 0 : parsedPurchaseCost;
+    let purchaseCost = isNaN(parsedPurchaseCost) ? 0 : parsedPurchaseCost;
+    if (!isNaN(parsedPurchaseCost) && baseQtyPerPurchUnit && baseQtyPerPurchUnit > 0) {
+      baseCost = parsedPurchaseCost / baseQtyPerPurchUnit;
+    }
 
-    let parsedInput = parseFloat(newItem.cost as string);
-    let baseCost = parsedInput;
-    let purchaseCost = parsedInput;
-
-    if (hasValidPrimary) {
-      purchaseCost = parsedInput;
-      baseCost = purchaseCost / primaryUnit.conversion;
-      primaryUnit.cost = purchaseCost;
+    // ── Build purchaseUnits array for backward-compat ─────────────────────────
+    let pUnits: any[] = [];
+    if (baseQtyPerPurchUnit && baseQtyPerPurchUnit > 0) {
+      pUnits = [{
+        name: newPurchUnitLabel || "Case",
+        conversion: baseQtyPerPurchUnit,
+        isPrimary: true,
+      }];
     }
 
     const finalItem = {
-      ...newItem,
-      baseUnit: newItem.unit,
+      name: newItemName.trim(),
+      category: newItemCategory,
+      itemType: newItemType,
+      unit: lockedBase,
+      baseUnit: lockedBase,
+      measurementFamily: newMeasFamily,
       purchaseUnits: pUnits,
       purchaseCost: purchaseCost,
       supplierId: suppIdCode,
-      inStock: parseFloat(newItem.inStock as string),
-      parLevel: parseFloat(newItem.parLevel as string),
+      inStock: parseFloat(newInStock) || 0,
+      parLevel: parseFloat(addItemParLevel) || 0,
       cost: baseCost,
       priceTrend: "steady",
       priceIncrease: false,
       updatedAt: Date.now(),
-      // Phase 2: structured packaging fields — pass nulls when left blank so the
-      // DB columns stay NULL and costing falls back to legacy for this item.
-      purchaseUom: newItem.purchaseUom.trim() || null,
-      packQty: newItem.packQty !== "" ? Number(newItem.packQty) : null,
-      innerUnitType: newItem.innerUnitType.trim() || null,
-      innerUnitSize: newItem.innerUnitSize !== "" ? Number(newItem.innerUnitSize) : null,
-      innerUnitUom: newItem.innerUnitUom.trim() || null,
-      baseUomNew: newItem.baseUomNew.trim() || null,
-      // allowedRecipeUoms: comma-separated in the UI → split into TEXT[] for the DB
-      allowedRecipeUoms: newItem.allowedRecipeUoms.trim()
-        ? newItem.allowedRecipeUoms.split(',').map(s => s.trim()).filter(Boolean)
-        : null,
+      // Structured packaging
+      purchaseUom: newPurchUnitLabel.trim() || null,
+      packQty: !isNaN(ipc) && ipc > 0 ? ipc : null,
+      innerUnitType: newInnerUnitLabel.trim() || null,
+      innerUnitSize: !isNaN(iqty) && iqty > 0 ? iqty : null,
+      innerUnitUom: newInnerMeasUnit.trim() || null,
+      baseUomNew: lockedBase || null,
+      allowedRecipeUoms: getFamilyAllowedInnerUnits(newMeasFamily),
     };
 
     const res = await insertInventoryItem(finalItem, locationId);
@@ -1297,6 +1362,16 @@ export default function Inventory() {
     // Use the returned UUID as the canonical id for local state
     const localItem = { ...finalItem, id: res.id };
     setInventoryData([localItem, ...inventoryData]);
+
+    // Reset new-item form state
+    setNewItemName(""); setNewItemType("Raw"); setNewItemCategory("Produce");
+    setNewMeasFamily(""); setNewPurchUnitLabel("Case");
+    setNewInnerPackCount(""); setNewInnerUnitLabel("");
+    setNewInnerQty(""); setNewInnerMeasUnit("");
+    setNewSupplier(""); setNewCostInput("");
+    setNewInStock(""); setAddItemParLevel(""); setNewMinOnHand("");
+    setNewStockCountUnit("base");
+    // Also reset legacy newItem
     setNewItem({
       name: "", category: "Produce", itemType: "Raw", unit: "kg",
       supplier: "", inStock: "", parLevel: "", cost: "",
@@ -2803,7 +2878,7 @@ export default function Inventory() {
                     <div className="flex gap-4 items-end">
                       <div className="space-y-1.5 flex-1">
                         <label className="text-xs font-semibold text-neutral-900">New Par Benchmark ({selectedItem.unit})</label>
-                        <input type="number" min="0" step="0.1" value={newParLevel} onChange={(e) => setNewParLevel(e.target.value)} className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white" placeholder={selectedItem.parLevel.toString()} />
+                        <input type="number" min="0" step="0.1" value={addItemParLevel} onChange={(e) => setAddItemParLevel(e.target.value)} className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white" placeholder={selectedItem.parLevel.toString()} />
                       </div>
                     </div>
                     <div className="space-y-1.5">
@@ -3058,8 +3133,8 @@ export default function Inventory() {
               />
             </div>
 
-            {/* Type + Category + Base Unit */}
-            <div className="grid grid-cols-3 gap-3">
+            {/* Type + Category */}
+            <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Type</label>
                 <select
@@ -3082,19 +3157,154 @@ export default function Inventory() {
                   {categories.map(c => <option key={c} value={c}>{c}</option>)}
                 </select>
               </div>
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Base Unit</label>
-                <input
-                  type="text"
-                  value={editBaseUnit}
-                  onChange={e => setEditBaseUnit(e.target.value)}
-                  className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
-                  placeholder="kg, L, ea…"
-                />
+            </div>
+
+            {/* ── Measurement Family ──────────────────────────────────────── */}
+            <div className="space-y-2 border border-neutral-200 rounded-lg p-3 bg-neutral-50">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Measurement Family</label>
+                {editMeasFamily && (
+                  <div className="flex items-center gap-1.5 bg-brand-50 border border-brand-200 rounded-md px-2 py-1">
+                    <span className="text-[10px] text-neutral-500 font-medium">Locked Base Unit:</span>
+                    <span className="text-xs font-bold text-brand-700">{deriveLockedBaseUnit(editMeasFamily)}</span>
+                  </div>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {(['weight', 'volume', 'count', 'labour', 'preparation', 'finished_good'] as const).map(fam => (
+                  <button
+                    key={fam}
+                    type="button"
+                    onClick={() => { setEditMeasFamily(fam); setEditInnerMeasUnit(''); }}
+                    className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-all ${
+                      editMeasFamily === fam
+                        ? 'bg-brand-600 text-white border-brand-600 shadow-sm'
+                        : 'bg-white text-neutral-600 border-neutral-200 hover:border-brand-400 hover:text-brand-600'
+                    }`}
+                  >
+                    {fam === 'finished_good' ? 'Finished Good' : fam.charAt(0).toUpperCase() + fam.slice(1)}
+                  </button>
+                ))}
+              </div>
+              {!editMeasFamily && (
+                <p className="text-[11px] text-amber-600">Auto-inferred from base unit. Select to override.</p>
+              )}
+            </div>
+
+            {/* ── Structured Packaging ────────────────────────────────────── */}
+            <div className="space-y-3 border border-neutral-200 rounded-lg p-3 bg-neutral-50">
+              <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider block">Structured Packaging</label>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Purchase Unit Label</label>
+                  <select value={editPurchUnitLabel} onChange={e => setEditPurchUnitLabel(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white">
+                    {['Case', 'Bag', 'Box', 'Bottle', 'Can', 'Jug', 'Pack', 'Each', 'Barrel', 'Pail'].map(l => <option key={l}>{l}</option>)}
+                  </select>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Inner Pack Count</label>
+                  <input type="number" min="0" step="1" value={editInnerPackCount} onChange={e => setEditInnerPackCount(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="e.g. 6" />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Inner Unit Label</label>
+                  <select value={editInnerUnitLabel} onChange={e => setEditInnerUnitLabel(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white">
+                    <option value="">— not set —</option>
+                    {['Bag', 'Can', 'Bottle', 'Jug', 'Pouch', 'Portion', 'Each'].map(l => <option key={l}>{l}</option>)}
+                  </select>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Inner Size</label>
+                  <input type="number" min="0" step="any" value={editInnerQty} onChange={e => setEditInnerQty(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="e.g. 3" />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Measurement Unit</label>
+                  <select
+                    value={editInnerMeasUnit}
+                    onChange={e => setEditInnerMeasUnit(e.target.value)}
+                    className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
+                  >
+                    <option value="">— select —</option>
+                    {(editMeasFamily ? getFamilyAllowedInnerUnits(editMeasFamily) : ['g','kg','lb','oz','ml','l','fl oz','ea','hr','min']).map(u => (
+                      <option key={u} value={u}>{u}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Incompatibility warning */}
+              {editInnerMeasUnit && editMeasFamily && (() => {
+                const allowed = getFamilyAllowedInnerUnits(editMeasFamily);
+                if (!allowed.includes(editInnerMeasUnit)) {
+                  return (
+                    <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-lg p-2.5">
+                      <AlertTriangle className="h-4 w-4 text-red-500 flex-shrink-0 mt-0.5" />
+                      <p className="text-[11px] text-red-700 font-medium">
+                        <strong>{editInnerMeasUnit}</strong> is not compatible with the <strong>{editMeasFamily}</strong> family.
+                        Allowed: {getFamilyAllowedInnerUnits(editMeasFamily).join(', ')}.
+                      </p>
+                    </div>
+                  );
+                }
+                return null;
+              })()}
+
+              {/* Live calculation preview */}
+              {(() => {
+                const ipc = parseFloat(editInnerPackCount);
+                const iqty = parseFloat(editInnerQty);
+                if (!editMeasFamily || isNaN(ipc) || isNaN(iqty) || !editInnerMeasUnit) return null;
+                const baseQty = calcBaseQtyPerPurchaseUnit(editMeasFamily, ipc, iqty, editInnerMeasUnit);
+                const lockedBase = deriveLockedBaseUnit(editMeasFamily);
+                const allowed = getFamilyAllowedInnerUnits(editMeasFamily);
+                if (baseQty === null || !allowed.includes(editInnerMeasUnit)) return null;
+                const innerLabel = editInnerUnitLabel || editInnerMeasUnit;
+                const totalInner = ipc * iqty;
+                return (
+                  <div className="bg-brand-50 border border-brand-200 rounded-lg px-3 py-2.5 space-y-1">
+                    <p className="text-[11px] font-bold text-brand-800 tracking-wide uppercase">Auto Calculation</p>
+                    <p className="text-[13px] font-semibold text-brand-900">
+                      1 {editPurchUnitLabel} = {ipc} {innerLabel}{ipc !== 1 ? 's' : ''} × {iqty} {editInnerMeasUnit}
+                      {editInnerMeasUnit !== lockedBase ? (
+                        <span> = {totalInner} {editInnerMeasUnit} = <strong>{baseQty.toFixed(2)} {lockedBase}</strong></span>
+                      ) : (
+                        <span> = <strong>{baseQty.toFixed(2)} {lockedBase}</strong></span>
+                      )}
+                    </p>
+                    <p className="text-[10px] text-brand-600">Calculated Base Qty per Purchase Unit: <strong>{baseQty.toFixed(4)} {lockedBase}</strong></p>
+                  </div>
+                );
+              })()}
+
+              {/* Cost per Purchase Unit + auto-derived per-base-unit */}
+              <div className="grid grid-cols-2 gap-3 pt-1">
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Cost per {editPurchUnitLabel || 'Purchase Unit'} ($)</label>
+                  <input type="number" step="0.01" min="0" value={editCostInput} onChange={e => setEditCostInput(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="$0.00" />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Cost per Base Unit (auto)</label>
+                  <div className="w-full p-2 border border-neutral-100 bg-white rounded text-sm text-neutral-500 font-mono">
+                    {(() => {
+                      const ipc = parseFloat(editInnerPackCount);
+                      const iqty = parseFloat(editInnerQty);
+                      const cost = parseFloat(editCostInput);
+                      if (!editMeasFamily || isNaN(ipc) || isNaN(iqty) || !editInnerMeasUnit || isNaN(cost) || cost <= 0) return '—';
+                      const baseQty = calcBaseQtyPerPurchaseUnit(editMeasFamily, ipc, iqty, editInnerMeasUnit);
+                      if (!baseQty || baseQty <= 0) return '—';
+                      const lockedBase = deriveLockedBaseUnit(editMeasFamily);
+                      return `$${(cost / baseQty).toFixed(5)} / ${lockedBase}`;
+                    })()}
+                  </div>
+                </div>
               </div>
             </div>
 
-            {/* Purchase Units */}
+            {/* Purchase Units (legacy — kept for backward compat with old items) */}
+
             <div className="space-y-2 border border-neutral-200 p-3 rounded-lg bg-neutral-50">
               <label className="text-xs font-semibold text-neutral-900 uppercase flex justify-between">
                 Purchase Units (Ordering)
@@ -3506,265 +3716,228 @@ export default function Inventory() {
       <Drawer
         isOpen={isAddDrawerOpen}
         onClose={() => setIsAddDrawerOpen(false)}
-        title="Add Single Item"
-        description="Manually insert a specific structural item into the inventory register."
+        title="Add Inventory Item"
+        description="Define the item's measurement family, packaging structure, and cost."
         footer={
           <div className="flex items-center gap-3">
             <button onClick={() => setIsAddDrawerOpen(false)} className="px-4 py-2 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 transition-colors w-full">Cancel</button>
-            <button onClick={handleAddNewItem} className="px-4 py-2 text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors shadow-sm w-full">Save Item</button>
+            <button onClick={handleAddNewItem} className="px-4 py-2 text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors shadow-sm w-full flex items-center justify-center gap-2"><Save className="h-4 w-4" /> Save Item</button>
           </div>
         }
       >
-        <div className="space-y-4">
-          <div className="space-y-1.5">
-            <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Item Name</label>
-            <input type="text" value={newItem.name} onChange={e => setNewItem({ ...newItem, name: e.target.value })} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="e.g. Garlic Powder" />
-          </div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+        <div className="space-y-5">
+
+          {/* ── Section 1: Item Identity ──────────────────────────────────────── */}
+          <div className="space-y-3">
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Node Taxonomy</label>
-              <select value={newItem.itemType} onChange={e => setNewItem({ ...newItem, itemType: e.target.value })} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white">
-                <option value="Raw">Raw Asset</option>
-                <option value="Preparation">Preparation Base</option>
-                <option value="Finished Good">Finished Good</option>
-              </select>
+              <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Item Name <span className="text-red-500">*</span></label>
+              <input type="text" value={newItemName} onChange={e => setNewItemName(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="e.g. Whole Garlic Bag" />
             </div>
-            <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Category</label>
-              <select value={newItem.category} onChange={e => setNewItem({ ...newItem, category: e.target.value })} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white">
-                {categories.map(c => <option key={c} value={c}>{c}</option>)}
-              </select>
-            </div>
-            <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Base Unit (Calculations)</label>
-              <input type="text" value={newItem.unit} onChange={e => setNewItem({ ...newItem, unit: e.target.value })} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="kg, L, box..." />
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Item Type</label>
+                <select value={newItemType} onChange={e => setNewItemType(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white">
+                  <option value="Raw">Raw Asset</option>
+                  <option value="Preparation">Preparation Base</option>
+                  <option value="Finished Good">Finished Good</option>
+                </select>
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Category</label>
+                <select value={newItemCategory} onChange={e => setNewItemCategory(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white">
+                  {categories.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
             </div>
           </div>
 
-          <div className="space-y-2 border border-neutral-200 p-3 rounded-lg bg-neutral-50 shadow-sm">
-            <label className="text-xs font-semibold text-neutral-900 uppercase flex justify-between">
-              Purchase Units (Ordering)
-              <button onClick={() => setNewItem({ ...newItem, purchaseUnits: [...newItem.purchaseUnits, { name: "", conversion: 1, isPrimary: newItem.purchaseUnits.length === 0 }] })} className="text-brand-600 hover:text-brand-700 font-bold flex items-center gap-1"><Plus className="h-3 w-3" /> Add</button>
-            </label>
-            {newItem.purchaseUnits.length === 0 ? (
-              <div className="text-xs text-neutral-500 italic py-2">No purchase units mapped. System will fall back to base unit for POs.</div>
-            ) : newItem.purchaseUnits.map((pu, idx) => (
-              <div key={idx} className="flex gap-2 items-center bg-white p-2 rounded border border-neutral-200">
-                <input type="radio" name="new_primary_unit" checked={pu.isPrimary} onChange={() => {
-                  const copy = [...newItem.purchaseUnits];
-                  copy.forEach(u => u.isPrimary = false);
-                  copy[idx].isPrimary = true;
-                  setNewItem({ ...newItem, purchaseUnits: copy });
-                }} className="w-4 h-4 text-brand-600" title="Set as Primary for Auto-PO" />
-                <input type="text" value={pu.name} onChange={(e) => {
-                  const copy = [...newItem.purchaseUnits];
-                  copy[idx].name = e.target.value;
-                  setNewItem({ ...newItem, purchaseUnits: copy });
-                }} className="flex-1 py-1.5 px-2 border border-neutral-200 rounded text-sm outline-none focus:border-brand-500" placeholder="Name (e.g. Case)" />
-                <span className="text-xs text-neutral-500">=</span>
-                <input type="number" min="0" step="0.01" value={pu.conversion} onChange={(e) => {
-                  const copy = [...newItem.purchaseUnits];
-                  copy[idx].conversion = e.target.value;
-                  setNewItem({ ...newItem, purchaseUnits: copy });
-                }} className="w-20 py-1.5 px-2 border border-neutral-200 rounded text-sm outline-none focus:border-brand-500" placeholder="Qty" />
-                <span className="text-xs text-neutral-500 truncate w-8">{newItem.unit || 'base'}</span>
-                <button onClick={() => {
-                  const copy = newItem.purchaseUnits.filter((_, i) => i !== idx);
-                  if (pu.isPrimary && copy.length > 0) copy[0].isPrimary = true;
-                  setNewItem({ ...newItem, purchaseUnits: copy });
-                }} className="p-1.5 text-neutral-400 hover:text-danger-600 hover:bg-danger-50 rounded transition-colors"><Trash2 className="h-3 w-3" /></button>
-              </div>
-            ))}
+          {/* ── Section 2: Measurement Family ─────────────────────────────────── */}
+          <div className="space-y-2 border border-neutral-200 rounded-lg p-3 bg-neutral-50">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Measurement Family <span className="text-red-500">*</span></label>
+              {newMeasFamily && (
+                <div className="flex items-center gap-1.5 bg-brand-50 border border-brand-200 rounded-md px-2 py-1">
+                  <span className="text-[10px] text-neutral-500 font-medium">Locked Base Unit:</span>
+                  <span className="text-xs font-bold text-brand-700">{deriveLockedBaseUnit(newMeasFamily)}</span>
+                </div>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {(['weight', 'volume', 'count', 'labour', 'preparation', 'finished_good'] as const).map(fam => (
+                <button
+                  key={fam}
+                  type="button"
+                  onClick={() => { setNewMeasFamily(fam); setNewInnerMeasUnit(''); }}
+                  className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-all ${
+                    newMeasFamily === fam
+                      ? 'bg-brand-600 text-white border-brand-600 shadow-sm'
+                      : 'bg-white text-neutral-600 border-neutral-200 hover:border-brand-400 hover:text-brand-600'
+                  }`}
+                >
+                  {fam === 'finished_good' ? 'Finished Good' : fam.charAt(0).toUpperCase() + fam.slice(1)}
+                </button>
+              ))}
+            </div>
+            {!newMeasFamily && (
+              <p className="text-[11px] text-amber-600 font-medium">Select a family to lock the base unit and enable unit-compatible packaging.</p>
+            )}
           </div>
-          {/* ── Phase 2: Structured Packaging (Optional) ────────────────────── */}
-          <details className="group border border-neutral-200 rounded-lg bg-neutral-50 shadow-sm">
-            <summary className="flex items-center justify-between px-3 py-2.5 cursor-pointer select-none list-none">
-              <span className="text-xs font-semibold text-neutral-700 uppercase tracking-wider">
-                Structured Packaging
-              </span>
-              <span className="text-[10px] text-neutral-400 font-medium group-open:hidden">Optional — for precise costing</span>
-              <span className="text-[10px] text-brand-600 font-medium hidden group-open:inline">Hide</span>
-            </summary>
-            <div className="px-3 pb-3 pt-1 space-y-3">
-              <p className="text-[11px] text-neutral-500 leading-relaxed">
-                Fill these fields to enable pack-based recipe costing. Leave blank to keep legacy behaviour.
-              </p>
 
-              {/* Row 1: Purchase UOM + Pack Qty */}
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Purchase UOM</label>
-                  <select
-                    value={newItem.purchaseUom}
-                    onChange={e => setNewItem({ ...newItem, purchaseUom: e.target.value })}
-                    className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
-                  >
-                    <option value="">— not set —</option>
-                    <option>case</option>
-                    <option>bag</option>
-                    <option>box</option>
-                    <option>bottle</option>
-                    <option>can</option>
-                    <option>pack</option>
-                    <option>ea</option>
-                  </select>
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Pack Qty</label>
-                  <input
-                    type="number" min="0" step="1"
-                    value={newItem.packQty}
-                    onChange={e => setNewItem({ ...newItem, packQty: e.target.value })}
-                    className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
-                    placeholder="e.g. 12"
-                  />
-                  <p className="text-[10px] text-neutral-400">Inner units per purchase pack</p>
-                </div>
-              </div>
+          {/* ── Section 3: Structured Packaging ───────────────────────────────── */}
+          <div className="space-y-3 border border-neutral-200 rounded-lg p-3 bg-neutral-50">
+            <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider block">Structured Packaging</label>
+            <p className="text-[11px] text-neutral-500">Define the purchase pack hierarchy. The system calculates base-unit qty automatically.</p>
 
-              {/* Row 2: Inner Unit Type + Inner Unit Size + Inner Unit UOM */}
-              <div className="grid grid-cols-3 gap-3">
-                <div className="space-y-1">
-                  <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Inner Type</label>
-                  <select
-                    value={newItem.innerUnitType}
-                    onChange={e => setNewItem({ ...newItem, innerUnitType: e.target.value })}
-                    className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
-                  >
-                    <option value="">— not set —</option>
-                    <option>can</option>
-                    <option>bottle</option>
-                    <option>bag</option>
-                    <option>ea</option>
-                    <option>portion</option>
-                  </select>
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Inner Size</label>
-                  <input
-                    type="number" min="0" step="any"
-                    value={newItem.innerUnitSize}
-                    onChange={e => setNewItem({ ...newItem, innerUnitSize: e.target.value })}
-                    className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
-                    placeholder="e.g. 330"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Inner UOM</label>
-                  <select
-                    value={newItem.innerUnitUom}
-                    onChange={e => setNewItem({ ...newItem, innerUnitUom: e.target.value })}
-                    className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
-                  >
-                    <option value="">— not set —</option>
-                    <option value="ml">ml</option>
-                    <option value="l">l</option>
-                    <option value="g">g</option>
-                    <option value="kg">kg</option>
-                    <option value="oz">oz</option>
-                    <option value="lb">lb</option>
-                    <option value="fl oz">fl oz</option>
-                    <option value="ea">ea</option>
-                  </select>
-                </div>
-              </div>
-
-              {/* Row 3: Base UOM */}
+            {/* Purchase Unit + Inner Pack Count */}
+            <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
-                <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Base UOM (Costing)</label>
+                <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Purchase Unit Label</label>
+                <select value={newPurchUnitLabel} onChange={e => setNewPurchUnitLabel(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white">
+                  {['Case', 'Bag', 'Box', 'Bottle', 'Can', 'Jug', 'Pack', 'Each', 'Barrel', 'Pail'].map(l => <option key={l}>{l}</option>)}
+                </select>
+              </div>
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Inner Pack Count</label>
+                <input type="number" min="0" step="1" value={newInnerPackCount} onChange={e => setNewInnerPackCount(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="e.g. 6" />
+                <p className="text-[10px] text-neutral-400">Number of inner units per {newPurchUnitLabel || 'purchase unit'}</p>
+              </div>
+            </div>
+
+            {/* Inner Unit Label + Inner Qty + Inner Measurement Unit */}
+            <div className="grid grid-cols-3 gap-3">
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Inner Unit Label</label>
+                <select value={newInnerUnitLabel} onChange={e => setNewInnerUnitLabel(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white">
+                  <option value="">— not set —</option>
+                  {['Bag', 'Can', 'Bottle', 'Jug', 'Pouch', 'Portion', 'Each'].map(l => <option key={l}>{l}</option>)}
+                </select>
+              </div>
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Inner Size</label>
+                <input type="number" min="0" step="any" value={newInnerQty} onChange={e => setNewInnerQty(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="e.g. 3" />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Measurement Unit</label>
                 <select
-                  value={newItem.baseUomNew}
-                  onChange={e => setNewItem({ ...newItem, baseUomNew: e.target.value })}
+                  value={newInnerMeasUnit}
+                  onChange={e => setNewInnerMeasUnit(e.target.value)}
                   className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
                 >
-                  <option value="">— same as Base Unit above —</option>
-                  <option value="ml">ml</option>
-                  <option value="l">l</option>
-                  <option value="g">g</option>
-                  <option value="kg">kg</option>
-                  <option value="oz">oz</option>
-                  <option value="lb">lb</option>
-                  <option value="fl oz">fl oz</option>
-                  <option value="ea">ea</option>
+                  <option value="">— select —</option>
+                  {(newMeasFamily ? getFamilyAllowedInnerUnits(newMeasFamily) : ['g','kg','lb','oz','ml','l','fl oz','ea','hr','min']).map(u => (
+                    <option key={u} value={u}>{u}</option>
+                  ))}
                 </select>
-                <p className="text-[10px] text-neutral-400">
-                  Preferred unit for recipe costing. Overrides Base Unit above when set.
-                  Backfills Base Unit only if Base Unit is currently blank.
-                </p>
               </div>
-
-              {/* Row 4: Allowed Recipe UOMs */}
-              <div className="space-y-1">
-                <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Allowed Recipe UOMs</label>
-                <input
-                  type="text"
-                  value={newItem.allowedRecipeUoms}
-                  onChange={e => setNewItem({ ...newItem, allowedRecipeUoms: e.target.value })}
-                  className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
-                  placeholder="ml, l, fl oz  (comma-separated, optional)"
-                />
-                <p className="text-[10px] text-neutral-400">
-                  If set, recipe builder shows a soft warning when a different unit is used. Does not block saving.
-                </p>
-              </div>
-
-              {/* Live preview of pack cost computation */}
-              {newItem.packQty && newItem.innerUnitSize && newItem.innerUnitUom && newItem.cost && (() => {
-                try {
-                  const totalQty = Number(newItem.packQty) * Number(newItem.innerUnitSize);
-                  const cost = parseFloat(newItem.cost as string);
-                  if (!isNaN(totalQty) && totalQty > 0 && !isNaN(cost) && cost > 0) {
-                    const estimatedPerUnit = cost / totalQty;
-                    return (
-                      <div className="bg-brand-50 border border-brand-100 rounded-lg px-3 py-2 text-[11px] text-brand-700 font-medium">
-                        Estimated: ${estimatedPerUnit.toFixed(4)} / {newItem.innerUnitUom || 'unit'} at recipe time
-                      </div>
-                    );
-                  }
-                } catch { return null; }
-                return null;
-              })()}
             </div>
-          </details>
 
-          {/* Supplier */}
-          <div className="space-y-1.5">
-            <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Preferred Supplier</label>
-            <input list="supplier-options" type="text" value={newItem.supplier} onChange={e => setNewItem({ ...newItem, supplier: e.target.value })} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="Select or type new supplier..." />
-            <datalist id="supplier-options">
-              {suppliersData.map(s => <option key={s.id} value={s.name} />)}
-            </datalist>
-          </div>
-          <div className="grid grid-cols-3 gap-4">
-            <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Current Stock</label>
-              <input type="number" step="1" value={newItem.inStock} onChange={e => setNewItem({ ...newItem, inStock: e.target.value })} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="0" />
-            </div>
-            <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Par Level</label>
-              <input type="number" step="1" value={newItem.parLevel} onChange={e => setNewItem({ ...newItem, parLevel: e.target.value })} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="0" />
-            </div>
-            {(() => {
-              const pu = newItem.purchaseUnits.find((u: any) => u.isPrimary) || newItem.purchaseUnits[0];
-              const hasValidPrimary = pu && pu.name && parseFloat(pu.conversion) > 0;
-
-              return (
-                <div className="space-y-1.5 focus-within:z-10">
-                  <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">
-                    {hasValidPrimary ? `Cost (per ${pu.name})` : 'Cost / Base Unit'}
-                  </label>
-                  <input type="number" step="0.1" value={newItem.cost} onChange={e => setNewItem({ ...newItem, cost: e.target.value })} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="$0.00" />
-                  {hasValidPrimary && newItem.cost && !isNaN(parseFloat(newItem.cost)) && (
-                    <p className="text-[10px] text-brand-600 font-medium mt-1">
-                      Automatically yields core base cost: ${(parseFloat(newItem.cost) / parseFloat(pu.conversion)).toFixed(2)} / {newItem.unit || 'base'}
+            {/* Incompatibility warning */}
+            {newInnerMeasUnit && newMeasFamily && (() => {
+              const allowed = getFamilyAllowedInnerUnits(newMeasFamily);
+              if (!allowed.includes(newInnerMeasUnit)) {
+                return (
+                  <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-lg p-2.5">
+                    <AlertTriangle className="h-4 w-4 text-red-500 flex-shrink-0 mt-0.5" />
+                    <p className="text-[11px] text-red-700 font-medium">
+                      <strong>{newInnerMeasUnit}</strong> is not compatible with the <strong>{newMeasFamily}</strong> family.
+                      Allowed units: {getFamilyAllowedInnerUnits(newMeasFamily).join(', ')}.
                     </p>
-                  )}
+                  </div>
+                );
+              }
+              return null;
+            })()}
+
+            {/* Live calculation preview */}
+            {(() => {
+              const ipc = parseFloat(newInnerPackCount);
+              const iqty = parseFloat(newInnerQty);
+              if (!newMeasFamily || isNaN(ipc) || isNaN(iqty) || !newInnerMeasUnit) return null;
+              const baseQty = calcBaseQtyPerPurchaseUnit(newMeasFamily, ipc, iqty, newInnerMeasUnit);
+              const lockedBase = deriveLockedBaseUnit(newMeasFamily);
+              const allowed = getFamilyAllowedInnerUnits(newMeasFamily);
+              if (baseQty === null || !allowed.includes(newInnerMeasUnit)) return null;
+              const innerLabel = newInnerUnitLabel || newInnerMeasUnit;
+              const totalInner = ipc * iqty;
+              return (
+                <div className="bg-brand-50 border border-brand-200 rounded-lg px-3 py-2.5 space-y-1">
+                  <p className="text-[11px] font-bold text-brand-800 tracking-wide uppercase">Auto Calculation</p>
+                  <p className="text-[13px] font-semibold text-brand-900">
+                    1 {newPurchUnitLabel} = {ipc} {innerLabel}{ipc !== 1 ? 's' : ''} × {iqty} {newInnerMeasUnit}
+                    {newInnerMeasUnit !== lockedBase ? (
+                      <span> = {totalInner} {newInnerMeasUnit} = <strong>{baseQty.toFixed(2)} {lockedBase}</strong></span>
+                    ) : (
+                      <span> = <strong>{baseQty.toFixed(2)} {lockedBase}</strong></span>
+                    )}
+                  </p>
+                  <p className="text-[10px] text-brand-600">Calculated Base Qty per Purchase Unit: <strong>{baseQty.toFixed(4)} {lockedBase}</strong></p>
                 </div>
               );
             })()}
           </div>
+
+          {/* ── Section 4: Supplier & Cost ────────────────────────────────────── */}
+          <div className="space-y-3 border border-neutral-200 rounded-lg p-3 bg-neutral-50">
+            <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider block">Supplier &amp; Cost</label>
+            <div className="space-y-1.5">
+              <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Preferred Supplier</label>
+              <input list="new-supplier-options" type="text" value={newSupplier} onChange={e => setNewSupplier(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="Select or type supplier name..." />
+              <datalist id="new-supplier-options">
+                {suppliersData.map((s: any) => <option key={s.id} value={s.name} />)}
+              </datalist>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Cost per {newPurchUnitLabel || 'Purchase Unit'} ($)</label>
+                <input type="number" step="0.01" min="0" value={newCostInput} onChange={e => setNewCostInput(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="$0.00" />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Cost per Base Unit (auto)</label>
+                <div className="w-full p-2 border border-neutral-100 bg-white rounded text-sm text-neutral-500 font-mono">
+                  {(() => {
+                    const ipc = parseFloat(newInnerPackCount);
+                    const iqty = parseFloat(newInnerQty);
+                    const cost = parseFloat(newCostInput);
+                    if (!newMeasFamily || isNaN(ipc) || isNaN(iqty) || !newInnerMeasUnit || isNaN(cost) || cost <= 0) return '—';
+                    const baseQty = calcBaseQtyPerPurchaseUnit(newMeasFamily, ipc, iqty, newInnerMeasUnit);
+                    if (!baseQty || baseQty <= 0) return '—';
+                    const lockedBase = deriveLockedBaseUnit(newMeasFamily);
+                    return `$${(cost / baseQty).toFixed(5)} / ${lockedBase}`;
+                  })()}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* ── Section 5: Stock ──────────────────────────────────────────────── */}
+          <div className="space-y-3 border border-neutral-200 rounded-lg p-3 bg-neutral-50">
+            <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider block">Stock Levels</label>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Current Stock <span className="text-red-500">*</span></label>
+                <input type="number" step="any" value={newInStock} onChange={e => setNewInStock(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="0" />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Par Level <span className="text-red-500">*</span></label>
+                <input type="number" step="any" value={addItemParLevel} onChange={e => setAddItemParLevel(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="0" />
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">Stock Count Unit:</label>
+              <div className="flex rounded-md overflow-hidden border border-neutral-200">
+                {['base', 'purchase'].map(u => (
+                  <button key={u} type="button" onClick={() => setNewStockCountUnit(u)}
+                    className={`px-3 py-1 text-[11px] font-semibold transition-colors ${newStockCountUnit === u ? 'bg-brand-600 text-white' : 'bg-white text-neutral-600 hover:bg-neutral-50'}`}>
+                    {u === 'base' ? `Base (${newMeasFamily ? deriveLockedBaseUnit(newMeasFamily) : '—'})` : `Purchase (${newPurchUnitLabel || 'Unit'})`}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
         </div>
       </Drawer>
+
 
       {/* Import Drawer */}
       <Drawer

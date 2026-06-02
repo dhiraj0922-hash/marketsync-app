@@ -39,6 +39,7 @@ import {
   loadSaleItems,
   updateSaleItemStock,
   deductInventoryItemStock,
+  adjustInventoryItemStock,
   loadProductionMovements,
   upsertRecipe,
   syncLinkedFgCost,
@@ -52,6 +53,7 @@ import {
 } from "@/lib/units";
 import { FgImportModal } from "@/components/FgImportModal";
 import { findInventoryItem, warnInventoryIdentity, auditInventoryIdentity } from "@/lib/utils";
+import { useAuth } from "@/components/AuthProvider";
 
 // ─── Classification helpers ───────────────────────────────────────────────────
 //
@@ -253,6 +255,7 @@ function RecipeBadge({
 
 
 export default function FinishedGoods() {
+  const { user } = useAuth();
   const router = useRouter();
   const [recipes, setRecipes]               = useState<any[]>([]);
   const [inventoryData, setInventoryData]   = useState<any[]>([]);
@@ -274,6 +277,10 @@ export default function FinishedGoods() {
   const [historyDateTo, setHistoryDateTo]             = useState("");
   const [historySearch, setHistorySearch]             = useState("");
   const [expandedEvents, setExpandedEvents]           = useState<Set<string>>(new Set());
+  const [voidBatchModal, setVoidBatchModal]           = useState<any | null>(null);
+  const [voidReason, setVoidReason]                   = useState("");
+  const [voidError, setVoidError]                     = useState<string | null>(null);
+  const [isVoidingBatch, setIsVoidingBatch]           = useState(false);
 
   const [selectedFG, setSelectedFG]             = useState<any>(null);
   const [produceBatches, setProduceBatches]     = useState<number>(1);
@@ -497,6 +504,15 @@ export default function FinishedGoods() {
       })),
     });
   }, [currentProductionLocationId, debouncedSubstituteQuery, inventoryData, substituteInventoryOptions]);
+
+  const refreshProductionMovements = async () => {
+    const rows = await loadProductionMovements({
+      dateFrom: historyDateFrom || undefined,
+      dateTo:   historyDateTo   || undefined,
+    });
+    setProductionMovements(rows);
+    return rows;
+  };
 
   // ── Lazy-load production movements when history tab is active ────────────
   useEffect(() => {
@@ -854,6 +870,21 @@ export default function FinishedGoods() {
     ? getProductionConstraints(selectedFG, produceBatches)
     : null;
 
+  const isProductionVoidMovement = (movementType: string) =>
+    movementType === "production_void_return_ingredient" ||
+    movementType === "production_void_remove_finished_good";
+
+  const resolveInventoryRowForMovement = (line: ProductionMovementRow) => {
+    const movementItemId = String(line.item_id ?? "");
+    return inventoryData.find((item: any) => {
+      const matchesId =
+        String(item.id) === movementItemId ||
+        String(item.itemId ?? item.item_id ?? "") === movementItemId;
+      const matchesLocation = !line.location_id || item.locationId === line.location_id;
+      return matchesId && matchesLocation;
+    });
+  };
+
   // (findRecipeForFg and executeProduction are defined below)
   // Branched on fg._source for stock write:
   //   'hq_sale_items' → updateSaleItemStock() (writes hq_sale_items.instock)
@@ -1143,6 +1174,132 @@ export default function FinishedGoods() {
     setSubstitutes(new Map());   // clear substitutes for next production run
     setSubstituteModal(null);
     alert(alertMsg);
+  };
+
+  const confirmVoidBatch = async () => {
+    if (!voidBatchModal || isVoidingBatch) return;
+    const reason = voidReason.trim();
+    if (!reason) {
+      setVoidError("A correction reason is required.");
+      return;
+    }
+
+    const event = voidBatchModal;
+    const alreadyVoided = event.lines.some((line: ProductionMovementRow) =>
+      isProductionVoidMovement(line.movement_type)
+    );
+    if (alreadyVoided) {
+      setVoidError("This production batch has already been voided.");
+      return;
+    }
+
+    const consLines = event.lines.filter((line: ProductionMovementRow) =>
+      line.movement_type === "production_consumption"
+    );
+    const outLine = event.lines.find((line: ProductionMovementRow) =>
+      line.movement_type === "production_in"
+    );
+
+    if (!outLine) {
+      setVoidError("This batch has no production output movement to reverse.");
+      return;
+    }
+
+    const voidedBy = user?.email ?? user?.name ?? user?.id ?? "Unknown user";
+    const voidedAt = new Date().toISOString();
+    setIsVoidingBatch(true);
+    setVoidError(null);
+
+    try {
+      for (const line of consLines) {
+        const isLabourLine = (line.notes ?? "").toUpperCase().includes("LABOUR") ||
+          (line.notes ?? "").toUpperCase().includes("LABOR");
+        if (isLabourLine) {
+          await logMovement({
+            locationId:    line.location_id ?? "LOC-HQ",
+            itemId:        String(line.item_id ?? ""),
+            movementType:  "production_void_return_ingredient",
+            quantity:      line.quantity,
+            unitCost:      line.unit_cost,
+            referenceType: "production",
+            referenceId:   event.refId,
+            notes:         `VOID ${event.refId}: labour cost reversal only. Reason: ${reason}. Voided by ${voidedBy} at ${voidedAt}. Original movement ${line.id}.`,
+          });
+          continue;
+        }
+
+        const row = resolveInventoryRowForMovement(line);
+        if (!row) {
+          throw new Error(`Could not find inventory row to return ingredient movement ${line.item_id}.`);
+        }
+        const stockRes = await adjustInventoryItemStock(String(row.id), line.quantity);
+        if (!stockRes.success) {
+          throw new Error(stockRes.error?.message ?? `Could not return stock for ${row.name}.`);
+        }
+        setInventoryData(prev => prev.map((item: any) =>
+          String(item.id) === String(row.id)
+            ? { ...item, inStock: stockRes.newStock ?? item.inStock }
+            : item
+        ));
+        await logMovement({
+          locationId:    line.location_id ?? row.locationId ?? "LOC-HQ",
+          itemId:        String(line.item_id ?? row.itemId ?? row.id),
+          movementType:  "production_void_return_ingredient",
+          quantity:      line.quantity,
+          unitCost:      line.unit_cost,
+          referenceType: "production",
+          referenceId:   event.refId,
+          notes:         `VOID ${event.refId}: returned ingredient stock. Reason: ${reason}. Voided by ${voidedBy} at ${voidedAt}. Original movement ${line.id}.`,
+        });
+      }
+
+      const isHqSaleItemOutput = (outLine.notes ?? "").includes("[hq_sale_items]");
+      if (isHqSaleItemOutput) {
+        const stockRes = await updateSaleItemStock(String(outLine.item_id), -outLine.quantity);
+        if (!stockRes.success) {
+          throw new Error(stockRes.error?.message ?? "Could not remove finished good stock.");
+        }
+        setSaleItems(prev => prev.map((item: any) =>
+          String(item.id) === String(outLine.item_id)
+            ? { ...item, instock: stockRes.newStock ?? item.instock, inStock: stockRes.newStock ?? item.inStock }
+            : item
+        ));
+      } else {
+        const row = resolveInventoryRowForMovement(outLine);
+        if (!row) {
+          throw new Error(`Could not find produced inventory row ${outLine.item_id}.`);
+        }
+        const stockRes = await adjustInventoryItemStock(String(row.id), -outLine.quantity);
+        if (!stockRes.success) {
+          throw new Error(stockRes.error?.message ?? `Could not remove produced stock for ${row.name}.`);
+        }
+        setInventoryData(prev => prev.map((item: any) =>
+          String(item.id) === String(row.id)
+            ? { ...item, inStock: stockRes.newStock ?? item.inStock }
+            : item
+        ));
+      }
+
+      await logMovement({
+        locationId:    outLine.location_id ?? "LOC-HQ",
+        itemId:        String(outLine.item_id ?? ""),
+        movementType:  "production_void_remove_finished_good",
+        quantity:      outLine.quantity,
+        unitCost:      outLine.unit_cost,
+        referenceType: "production",
+        referenceId:   event.refId,
+        notes:         `VOID ${event.refId}: removed finished good output. Reason: ${reason}. Voided by ${voidedBy} at ${voidedAt}. Original movement ${outLine.id}.`,
+      });
+
+      await refreshProductionMovements();
+      setVoidBatchModal(null);
+      setVoidReason("");
+      alert(`Production batch ${event.refId} was voided and reversal movements were logged.`);
+    } catch (err: any) {
+      setVoidError(err?.message ?? "Unable to void production batch.");
+    } finally {
+      setIsVoidingBatch(false);
+    }
   };
 
   const openAutoFulfillModule = (e: any, fg: any) => {
@@ -2186,6 +2343,8 @@ export default function FinishedGoods() {
           ingredientCost: number;
           labourCost:     number;
           totalCost:      number;
+          isVoided:       boolean;
+          voidNotes:      string[];
           lines:          ProductionMovementRow[];
         };
 
@@ -2204,11 +2363,19 @@ export default function FinishedGoods() {
               ingredientCost: 0,
               labourCost:     0,
               totalCost:      0,
+              isVoided:       false,
+              voidNotes:      [],
               lines:          [],
             });
           }
           const ev = eventMap.get(refId)!;
           ev.lines.push(row);
+
+          if (isProductionVoidMovement(row.movement_type)) {
+            ev.isVoided = true;
+            if (row.notes) ev.voidNotes.push(row.notes);
+            continue;
+          }
 
           if (row.movement_type === "production_in") {
             ev.fgName     = (row.notes ?? "").replace(/^Production output:.*? batches of /, "").split("[")[0].trim() || ev.fgName;
@@ -2245,10 +2412,11 @@ export default function FinishedGoods() {
           : events;
 
         // Summary totals
-        const totalEvents       = filteredEvents.length;
-        const totalIngredient   = filteredEvents.reduce((s, e) => s + e.ingredientCost, 0);
-        const totalLabour       = filteredEvents.reduce((s, e) => s + e.labourCost,     0);
-        const totalProduction   = filteredEvents.reduce((s, e) => s + e.totalCost,      0);
+        const activeEvents      = filteredEvents.filter(e => !e.isVoided);
+        const totalEvents       = activeEvents.length;
+        const totalIngredient   = activeEvents.reduce((s, e) => s + e.ingredientCost, 0);
+        const totalLabour       = activeEvents.reduce((s, e) => s + e.labourCost,     0);
+        const totalProduction   = activeEvents.reduce((s, e) => s + e.totalCost,      0);
 
         const fmtDate = (iso: string) => {
           try { return new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit" }); }
@@ -2381,10 +2549,17 @@ export default function FinishedGoods() {
                             </span>
 
                             {/* FG name + ref */}
-                            <div className="flex-1 min-w-0">
-                              <p className="font-semibold text-neutral-900 truncate">{ev.fgName}</p>
-                              <p className="text-[10px] text-neutral-400 font-mono">{ev.refId}</p>
-                            </div>
+	                            <div className="flex-1 min-w-0">
+	                              <div className="flex items-center gap-2">
+	                                <p className={`font-semibold truncate ${ev.isVoided ? "text-neutral-500 line-through" : "text-neutral-900"}`}>{ev.fgName}</p>
+	                                {ev.isVoided && (
+	                                  <span className="shrink-0 rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[9px] font-bold uppercase text-red-700">
+	                                    Voided
+	                                  </span>
+	                                )}
+	                              </div>
+	                              <p className="text-[10px] text-neutral-400 font-mono">{ev.refId}</p>
+	                            </div>
 
                             {/* Date */}
                             <div className="text-xs text-neutral-500 shrink-0 sm:text-right">
@@ -2401,7 +2576,7 @@ export default function FinishedGoods() {
                             </div>
 
                             {/* Cost pills */}
-                            <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+	                            <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
                               {ev.ingredientCost > 0 && (
                                 <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-neutral-100 text-neutral-700 border border-neutral-200">
                                   Ing ${ev.ingredientCost.toFixed(2)}
@@ -2412,16 +2587,30 @@ export default function FinishedGoods() {
                                   Labour ${ev.labourCost.toFixed(2)}
                                 </span>
                               )}
-                              <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-brand-50 text-brand-700 border border-brand-200">
-                                Total ${ev.totalCost.toFixed(2)}
-                              </span>
+	                              <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-brand-50 text-brand-700 border border-brand-200">
+	                                Total ${ev.totalCost.toFixed(2)}
+	                              </span>
                               {costPerUnit > 0 && (
                                 <span className="text-[10px] text-neutral-400 tabular-nums">
                                   ${costPerUnit.toFixed(3)}/{yieldUnit || "unit"}
                                 </span>
                               )}
-                            </div>
-                          </div>
+	                            </div>
+	                            {!ev.isVoided && (
+	                              <button
+	                                type="button"
+	                                onClick={(clickEvent) => {
+	                                  clickEvent.stopPropagation();
+	                                  setVoidBatchModal(ev);
+	                                  setVoidReason("");
+	                                  setVoidError(null);
+	                                }}
+	                                className="shrink-0 rounded-md border border-red-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-red-700 shadow-sm transition-colors hover:bg-red-50"
+	                              >
+	                                Void Batch
+	                              </button>
+	                            )}
+	                          </div>
                         </CardContent>
                       </button>
 
@@ -2488,6 +2677,12 @@ export default function FinishedGoods() {
                           {outLine?.notes && (
                             <p className="mt-2 text-[10px] text-neutral-400 italic truncate">{outLine.notes}</p>
                           )}
+                          {ev.isVoided && ev.voidNotes.length > 0 && (
+                            <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-800">
+                              <div className="font-bold uppercase tracking-wider text-[10px]">Void audit</div>
+                              <p className="mt-1">{ev.voidNotes[ev.voidNotes.length - 1]}</p>
+                            </div>
+                          )}
                         </div>
                       )}
                     </Card>
@@ -2498,6 +2693,69 @@ export default function FinishedGoods() {
           </div>
         );
       })()}
+      {voidBatchModal && (
+        <div
+          className="fixed inset-0 z-[220] flex items-center justify-center bg-black/45 p-4 backdrop-blur-[2px]"
+          onClick={() => !isVoidingBatch && setVoidBatchModal(null)}
+        >
+          <div
+            className="w-full max-w-lg overflow-hidden rounded-xl border border-red-200 bg-white shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="border-b border-red-100 bg-red-50 p-4">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-600" />
+                <div>
+                  <h3 className="text-sm font-bold text-red-900">Void Batch</h3>
+                  <p className="mt-1 text-xs leading-5 text-red-800">
+                    This will reverse all inventory movements from production batch{" "}
+                    <span className="font-mono font-bold">{voidBatchModal.refId}</span>. Ingredient quantities will be returned to inventory, produced finished goods will be removed from stock, and new reversal ledger entries will be created. Historical movement rows will not be deleted.
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div className="space-y-4 p-4">
+              <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-3 text-xs text-neutral-700">
+                <div className="font-semibold text-neutral-900">{voidBatchModal.fgName}</div>
+                <div className="mt-1">
+                  Produced: {voidBatchModal.yieldQty} • Ingredient cost: ${Number(voidBatchModal.ingredientCost ?? 0).toFixed(2)} • Labour: ${Number(voidBatchModal.labourCost ?? 0).toFixed(2)}
+                </div>
+              </div>
+              <label className="block space-y-1">
+                <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500">Correction reason</span>
+                <textarea
+                  value={voidReason}
+                  onChange={(e) => { setVoidReason(e.target.value); setVoidError(null); }}
+                  placeholder="Example: Wrong onion sauce quantity entered; reversing before corrected batch."
+                  className="min-h-[96px] w-full rounded-lg border border-neutral-200 p-3 text-sm text-neutral-900 outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                  disabled={isVoidingBatch}
+                />
+              </label>
+              {voidError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  {voidError}
+                </div>
+              )}
+            </div>
+            <div className="flex justify-end gap-2 border-t border-neutral-100 bg-neutral-50 p-4">
+              <button
+                onClick={() => setVoidBatchModal(null)}
+                disabled={isVoidingBatch}
+                className="rounded-lg border border-neutral-200 bg-white px-4 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50 disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmVoidBatch}
+                disabled={isVoidingBatch}
+                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-60"
+              >
+                {isVoidingBatch ? "Voiding..." : "Confirm Void Batch"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       </div>
     </div>
   );
