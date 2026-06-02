@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
@@ -36,6 +36,43 @@ import { useAuth } from "@/components/AuthProvider";
 import { isHqAdmin, resolveLocationId } from "@/lib/roles";
 
 const HQ_LOCATION_ID = "LOC-HQ";
+
+const normalizeInventoryDisplayKey = (value: any) =>
+  String(value ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+
+const getInventoryDisplayKey = (item: any) => {
+  const itemId = String(item?.itemId ?? item?.item_id ?? "").trim();
+  if (itemId && itemId !== String(item?.id ?? "")) return `item:${itemId}`;
+  return [
+    "fallback",
+    normalizeInventoryDisplayKey(item?.name),
+    normalizeInventoryDisplayKey(item?.baseUnit ?? item?.baseunit ?? item?.unit),
+    normalizeInventoryDisplayKey(item?.supplierId ?? item?.supplierid ?? ""),
+    normalizeInventoryDisplayKey(item?.cost ?? ""),
+  ].join("|");
+};
+
+const getCatalogSupplierText = (item: any) =>
+  String(item?.preferredSupplierName ?? item?.supplierName ?? item?.supplier ?? item?.supplierId ?? "");
+
+const rankCatalogMatch = (item: any, query: string) => {
+  const q = normalizeInventoryDisplayKey(query);
+  if (!q) return 0;
+  const name = normalizeInventoryDisplayKey(item?.name);
+  const supplier = normalizeInventoryDisplayKey(getCatalogSupplierText(item));
+  const category = normalizeInventoryDisplayKey(item?.category);
+  const unit = normalizeInventoryDisplayKey(item?.unit ?? item?.baseUnit);
+
+  if (name === q) return 100;
+  if (name.startsWith(q)) return 90;
+  if (name.includes(q)) return 70;
+  if (supplier.startsWith(q)) return 45;
+  if (supplier.includes(q)) return 40;
+  if (category.startsWith(q)) return 35;
+  if (category.includes(q)) return 30;
+  if (unit === q || unit.includes(q)) return 20;
+  return -1;
+};
 
 export default function Orders() {
   const { user } = useAuth();
@@ -158,6 +195,8 @@ export default function Orders() {
   const [draftItems, setDraftItems] = useState<any[]>([]);
   const [notes, setNotes] = useState("");
   const [isCatalogOpen, setIsCatalogOpen] = useState(false);
+  const [catalogSearchQuery, setCatalogSearchQuery] = useState("");
+  const [debouncedCatalogSearchQuery, setDebouncedCatalogSearchQuery] = useState("");
   const [isSavingOrder, setIsSavingOrder] = useState(false);
   const [orderSaveError, setOrderSaveError] = useState<string | null>(null);
   const [toast, setToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
@@ -201,6 +240,81 @@ export default function Orders() {
     const s = suppliersData.find(s => s.id === id);
     return s ? s.name : "Unknown Vendor";
   };
+
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      setDebouncedCatalogSearchQuery(catalogSearchQuery);
+    }, 180);
+    return () => window.clearTimeout(handle);
+  }, [catalogSearchQuery]);
+
+  useEffect(() => {
+    if (!isCatalogOpen) {
+      setCatalogSearchQuery("");
+      setDebouncedCatalogSearchQuery("");
+    }
+  }, [isCatalogOpen]);
+
+  const supplierCatalogItems = useMemo(() => {
+    if (!selectedSupplier?.id) return [];
+    const supplierRows = inventoryData.filter(
+      (item: any) => Number(item.supplierId) === Number(selectedSupplier.id)
+    );
+    const groups = new Map<string, any[]>();
+    for (const item of supplierRows) {
+      const key = getInventoryDisplayKey(item);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(item);
+    }
+
+    const groupedItems = Array.from(groups.entries()).map(([displayKey, rows]) => {
+      const representative =
+        rows.find((row: any) => Number(row.inStock ?? 0) > 0) ??
+        rows.find((row: any) => row.locationId !== HQ_LOCATION_ID) ??
+        rows[0];
+      const locationIds = Array.from(new Set(rows.map((row: any) => row.locationId).filter(Boolean)));
+      return {
+        ...representative,
+        displayKey,
+        sharedLocationCount: locationIds.length,
+        sharedLocationIds: locationIds,
+      };
+    });
+
+    const seen = new Set<string>();
+    const duplicateDisplayKeys = new Set<string>();
+    for (const item of groupedItems) {
+      if (seen.has(item.displayKey)) duplicateDisplayKeys.add(item.displayKey);
+      seen.add(item.displayKey);
+    }
+    if (process.env.NODE_ENV === "development" && duplicateDisplayKeys.size > 0) {
+      console.warn("[Orders] Duplicate catalog display keys before rendering", Array.from(duplicateDisplayKeys));
+    }
+
+    return groupedItems;
+  }, [inventoryData, selectedSupplier?.id]);
+
+  const catalogSearchResults = useMemo(() => {
+    const q = debouncedCatalogSearchQuery.trim();
+    const rankedItems = q
+      ? supplierCatalogItems
+          .map((item: any, index: number) => ({
+            item,
+            index,
+            rank: rankCatalogMatch(item, q),
+          }))
+          .filter((match) => match.rank >= 0)
+          .sort((a, b) => b.rank - a.rank || a.index - b.index)
+          .map((match) => match.item)
+      : supplierCatalogItems;
+    return {
+      items: rankedItems.slice(0, 100),
+      total: rankedItems.length,
+    };
+  }, [debouncedCatalogSearchQuery, supplierCatalogItems]);
+
+  const filteredCatalogItems = catalogSearchResults.items;
+  const hasMoreCatalogResults = catalogSearchResults.total > filteredCatalogItems.length;
 
   const filteredOrders = orders.filter(order => {
     if (filterStatus !== "All" && order.status !== filterStatus) return false;
@@ -265,11 +379,16 @@ export default function Orders() {
     console.log("Catalog item add clicked", item);
 
     setDraftItems(prev => {
-      const existing = prev.find(row => row.id === item.id);
+      const itemDisplayKey = item.displayKey ?? getInventoryDisplayKey(item);
+      const existing = prev.find(row =>
+        row.id === item.id ||
+        row.displayKey === itemDisplayKey ||
+        (row.itemId && item.itemId && String(row.itemId) === String(item.itemId))
+      );
       let nextItems;
       if (existing) {
         nextItems = prev.map(row =>
-          row.id === item.id
+          row.id === existing.id
             ? { ...row, qty: Number(row.qty || 0) + 1 }
             : row
         );
@@ -278,6 +397,7 @@ export default function Orders() {
           ...prev,
           {
             ...item,
+            displayKey: itemDisplayKey,
             qty: 1,
             expectedPrice: item.cost || item.unitCost || item.price || 0
           }
@@ -1195,20 +1315,41 @@ export default function Orders() {
                    <X className="h-5 w-5" />
                  </button>
                </div>
+               <div className="border-b border-neutral-100 p-3">
+                 <div className="relative">
+                   <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-400" />
+                   <input
+                     autoFocus
+                     type="text"
+                     placeholder="Search catalog items..."
+                     value={catalogSearchQuery}
+                     onChange={(e) => setCatalogSearchQuery(e.target.value)}
+                     className="w-full rounded-lg border border-neutral-200 bg-white py-2 pl-9 pr-3 text-sm text-neutral-900 outline-none transition focus:border-brand-400 focus:ring-2 focus:ring-brand-100"
+                   />
+                 </div>
+               </div>
                <div className="flex-1 overflow-y-auto p-2">
-                  {inventoryData.filter(i => Number(i.supplierId) === Number(selectedSupplier?.id)).length === 0 ? (
+                  {filteredCatalogItems.length === 0 ? (
                     <div className="p-8 text-center text-sm text-neutral-500">
-                      No items found in your inventory mapped to this supplier.
+                      No catalog items found for this supplier.
                     </div>
                   ) : (
                     <div className="space-y-1">
-                      {inventoryData.filter(i => Number(i.supplierId) === Number(selectedSupplier?.id)).map(item => {
-                         const cartItem = draftItems.find(i => i.id === item.id);
+                      {filteredCatalogItems.map(item => {
+                         const itemDisplayKey = item.displayKey ?? getInventoryDisplayKey(item);
+                         const cartItem = draftItems.find(i =>
+                           i.id === item.id ||
+                           i.displayKey === itemDisplayKey ||
+                           (i.itemId && item.itemId && String(i.itemId) === String(item.itemId))
+                         );
                          return (
                            <div key={`cat-${item.id}`} className="flex items-center justify-between p-3 hover:bg-brand-50 rounded-lg group transition-colors">
                              <div>
                                 <div className="text-sm font-semibold text-neutral-900 group-hover:text-brand-700 transition-colors">{item.name}</div>
-                                <div className="text-[10px] text-neutral-500">{item.category} • {item.inStock} {item.unit} in stock</div>
+                                <div className="text-[10px] text-neutral-500">
+                                  {item.category} • {item.inStock} {item.unit} in stock
+                                  {item.sharedLocationCount > 1 ? ` • Shared across ${item.sharedLocationCount} locations` : ""}
+                                </div>
                              </div>
                              {cartItem ? (
                                <div className="flex items-center gap-1.5">
@@ -1233,6 +1374,11 @@ export default function Orders() {
                            </div>
                          );
                       })}
+                      {hasMoreCatalogResults && (
+                        <div className="px-3 py-2 text-center text-[11px] font-medium text-neutral-400">
+                          Showing top results. Keep typing to narrow.
+                        </div>
+                      )}
                     </div>
                   )}
                </div>
