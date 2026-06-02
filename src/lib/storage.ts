@@ -243,7 +243,21 @@ export async function loadInventory(locationId?: string | null) {
 
 export async function saveInventory(data: any[]) {
   const cleanData = data.map(mapInventoryToDB);
-  const { error } = await supabase.from('inventory_items').upsert(cleanData, { onConflict: 'id' });
+  const originalRows = cleanData;
+  const uniqueMap = new Map<string, any>();
+  for (const row of originalRows) {
+    if (row.id) {
+      uniqueMap.set(String(row.id), row);
+    }
+  }
+  const dedupedRows = Array.from(uniqueMap.values());
+
+  console.warn("Deduped inventory updates", {
+    before: originalRows.length,
+    after: dedupedRows.length
+  });
+
+  const { error } = await supabase.from('inventory_items').upsert(dedupedRows, { onConflict: 'id' });
   if (error) return { success: false, error };
   return { success: true };
 }
@@ -646,6 +660,7 @@ export async function copyInventoryItemsToLocations(
       'Authorization': `Bearer ${session.access_token}`,
     },
     body: JSON.stringify({
+      sourceLocationId,
       selectedItemIds: sourceRowIds,
       targetLocationIds,
       copyPar: options.copyParLevels,
@@ -3692,9 +3707,22 @@ export async function upsertFgCountSessionWithLines(params: {
 
   if (lineRows.length === 0) return { success: true };
 
+  const originalLines = lineRows;
+  const uniqueLinesMap = new Map<string, any>();
+  for (const row of originalLines) {
+    const key = `${row.session_id}::${row.item_id}`;
+    uniqueLinesMap.set(key, row);
+  }
+  const dedupedLines = Array.from(uniqueLinesMap.values());
+
+  console.warn("Deduped inventory updates", {
+    before: originalLines.length,
+    after: dedupedLines.length
+  });
+
   const { error: lineError } = await supabase
     .from('fg_count_lines')
-    .upsert(lineRows, { onConflict: 'session_id,item_id' });
+    .upsert(dedupedLines, { onConflict: 'session_id,item_id' });
 
   if (lineError) return { success: false, error: lineError };
   return { success: true };
@@ -4654,13 +4682,26 @@ export async function applyPhysicalCount(
   countedBy: string | null,
   notes:     string | null
 ): Promise<CountApplyResult> {
+  const originalRows = entries;
+  const uniqueEntriesMap = new Map<string, CountApplyEntry>();
+  for (const entry of originalRows) {
+    const key = `${entry.locationId}::${entry.itemId}`;
+    uniqueEntriesMap.set(key, entry);
+  }
+  const dedupedRows = Array.from(uniqueEntriesMap.values());
+
+  console.warn("Deduped inventory updates", {
+    before: originalRows.length,
+    after: dedupedRows.length
+  });
+
   let succeeded = 0;
   let failed    = 0;
   const errors: string[] = [];
 
   const now = new Date().toISOString();
 
-  for (const entry of entries) {
+  for (const entry of dedupedRows) {
     // 1. Update location_inventory_items:
     //    current_stock  = physical_count (the reconciled value)
     //    physical_count = null           (clear — audit history lives in location_inventory_count_logs)

@@ -130,14 +130,20 @@ export async function POST(req: NextRequest) {
 
   const role = String(profile.role ?? "").trim().toLowerCase();
   const locationId = String(profile.location_id ?? "").trim();
+  const body = await req.json().catch(() => ({}));
+  const sourceLocationId = String(body.sourceLocationId ?? "").trim();
+
+  if (sourceLocationId !== LONDON_TEMPLATE_LOCATION_ID) {
+    return jsonError(`This copy workflow only supports London / ${LONDON_TEMPLATE_LOCATION_ID} as the source location.`, 403);
+  }
+
   const authorized =
-    role === "hq_admin" ||
+    (role === "hq_admin" && sourceLocationId === LONDON_TEMPLATE_LOCATION_ID) ||
     ((role === "location_manager" || role === "location manager") && locationId === LONDON_TEMPLATE_LOCATION_ID);
   if (!authorized) {
     return jsonError("Only HQ admins or London / LOC-1091 location managers can copy London template inventory.", 403);
   }
 
-  const body = await req.json().catch(() => ({}));
   const selectedItemIds = Array.from(new Set((body.selectedItemIds ?? body.sourceRowIds ?? []).map(String).filter(Boolean)));
   const requestedTargetIds = Array.from(new Set((body.targetLocationIds ?? []).map(String).filter(Boolean)));
   const copyPar = body.copyPar !== false;
