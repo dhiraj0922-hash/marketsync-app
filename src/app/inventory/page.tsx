@@ -16,6 +16,21 @@ import { SupplierCombobox } from "@/components/InventoryEditDrawer";
 
 const LONDON_TEMPLATE_LOCATION_ID = "LOC-1091";
 
+const normalizeInventoryDisplayKey = (value: any) =>
+  String(value ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+
+const getInventoryDisplayKey = (item: any) => {
+  const itemId = String(item?.itemId ?? item?.item_id ?? "").trim();
+  if (itemId && itemId !== String(item?.id ?? "")) return `item:${itemId}`;
+  return [
+    "fallback",
+    normalizeInventoryDisplayKey(item?.name),
+    normalizeInventoryDisplayKey(item?.baseUnit ?? item?.baseunit ?? item?.unit),
+    normalizeInventoryDisplayKey(item?.supplierId ?? item?.supplierid ?? ""),
+    normalizeInventoryDisplayKey(item?.cost ?? ""),
+  ].join("|");
+};
+
 const isValidInventoryCopyTargetLocation = (loc: any) => {
   const id = String(loc?.id ?? "").trim();
   const name = String(loc?.name ?? "").trim();
@@ -370,7 +385,51 @@ export default function Inventory() {
   console.log(`[Diagnostic] Extracted ${uniqueCategories.length} categories from Inventory.`);
   console.log(`[Diagnostic] Extracted ${uniqueSuppliers.length} suppliers from Inventory.`);
 
-  const filteredInventory = inventoryData.filter(item => {
+  const effectiveInventoryLocationId = isHqAdmin(user)
+    ? activeLocation?.id ?? null
+    : resolveLocationId(user);
+  const isAllLocationsInventoryView = isHqAdmin(user) && !effectiveInventoryLocationId;
+
+  const displayInventory = useMemo(() => {
+    if (!isAllLocationsInventoryView && effectiveInventoryLocationId) {
+      return inventoryData.filter((item: any) => item.locationId === effectiveInventoryLocationId);
+    }
+
+    const groups = new Map<string, any[]>();
+    for (const item of inventoryData) {
+      const key = getInventoryDisplayKey(item);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(item);
+    }
+
+    const groupedRows = Array.from(groups.entries()).map(([displayKey, groupRows]) => {
+      const representative =
+        groupRows.find((row: any) => row.locationId === LONDON_TEMPLATE_LOCATION_ID) ??
+        groupRows.find((row: any) => row.locationId !== "LOC-HQ") ??
+        groupRows[0];
+      const locationIds = Array.from(new Set(groupRows.map((row: any) => row.locationId).filter(Boolean)));
+      return {
+        ...representative,
+        displayKey,
+        sharedLocationCount: locationIds.length,
+        sharedLocationIds: locationIds,
+      };
+    });
+
+    const seen = new Set<string>();
+    const duplicateDisplayKeys = new Set<string>();
+    for (const row of groupedRows) {
+      if (seen.has(row.displayKey)) duplicateDisplayKeys.add(row.displayKey);
+      seen.add(row.displayKey);
+    }
+    if (process.env.NODE_ENV === "development" && duplicateDisplayKeys.size > 0) {
+      console.warn("[Inventory] Duplicate display keys before rendering", Array.from(duplicateDisplayKeys));
+    }
+
+    return groupedRows;
+  }, [activeLocation?.id, effectiveInventoryLocationId, inventoryData, isAllLocationsInventoryView]);
+
+  const filteredInventory = displayInventory.filter(item => {
     // Divide-by-zero guard: when parLevel = 0, stockRatio = NaN which makes
     // ALL status checks false, causing 'Healthy' to be assigned but the item
     // may not match a saved filterStatus. Clamp to a safe ratio.
@@ -435,6 +494,14 @@ export default function Inventory() {
     return 0;
   });
 
+  if (process.env.NODE_ENV === "development") {
+    const renderKeys = filteredInventory.map((item: any) => item.displayKey ?? getInventoryDisplayKey(item));
+    const duplicateRenderKeys = renderKeys.filter((key, idx) => renderKeys.indexOf(key) !== idx);
+    if (duplicateRenderKeys.length > 0) {
+      console.warn("[Inventory] Render list contains duplicate display keys", Array.from(new Set(duplicateRenderKeys)));
+    }
+  }
+
   // ── UI pagination slice ────────────────────────────────────────────────────
   // filteredInventory retains the full filtered+sorted array for checkbox
   // "select all" and count displays; only the rendered rows are paged.
@@ -447,7 +514,7 @@ export default function Inventory() {
   const displayStart = filteredInventory.length === 0 ? 0 : pageStart + 1;
   const displayEnd   = pageEnd;
 
-  const activeSkuCount = inventoryData.length;
+  const activeSkuCount = displayInventory.length;
   // ── Inventory Value — use item.cost (per-base-unit cost) ──────────────────
   // IMPORTANT: Do NOT use preferredCost here.
   //   preferredCost = purchase_options.unit_price = PACK/CASE price.
@@ -455,7 +522,7 @@ export default function Inventory() {
   //   Multiplying inStock (in base units) by the pack price inflates value by the
   //   pack conversion factor (10x–40x depending on pack size).
   //   item.cost is always the per-base-unit cost (set via handleEditSave → baseCost).
-  const inventoryValue = inventoryData.reduce((sum: number, item: any) => {
+  const inventoryValue = displayInventory.reduce((sum: number, item: any) => {
     const stock = Number(item.inStock);
     const cost  = Number(item.cost);   // base-unit cost — always correct denominator
     if (!Number.isFinite(stock) || stock < 0) return sum;
@@ -464,7 +531,7 @@ export default function Inventory() {
   }, 0);
   // Debug: surface the top contributors so bad data is immediately visible
   if (process.env.NODE_ENV !== 'production') {
-    const top5 = [...inventoryData]
+    const top5 = [...displayInventory]
       .map((i: any) => ({
         name: i.name, loc: i.locationId,
         inStock: Number(i.inStock) || 0,
@@ -475,18 +542,18 @@ export default function Inventory() {
       .sort((a: any, b: any) => b.lineValue - a.lineValue)
       .slice(0, 5);
     console.group('[InventoryValueAudit]');
-    console.log(`Total: $${inventoryValue.toFixed(2)} across ${inventoryData.length} rows`);
+    console.log(`Total: $${inventoryValue.toFixed(2)} across ${displayInventory.length} displayed rows`);
     console.log('Top 5 highest value rows (cost = base unit cost):');
     console.table(top5);
     console.groupEnd();
   }
-  const lowStockCount = inventoryData.filter(item => {
+  const lowStockCount = displayInventory.filter(item => {
     const par = Number(item.parLevel) || 0;
     if (par <= 0) return false;
     const ratio = (Number(item.inStock) || 0) / par;
     return ratio >= 0.3 && ratio <= 0.7;
   }).length;
-  const criticalStockCount = inventoryData.filter(item => {
+  const criticalStockCount = displayInventory.filter(item => {
     const par = Number(item.parLevel) || 0;
     if (par <= 0) return false;
     return ((Number(item.inStock) || 0) / par) < 0.3;
@@ -2404,8 +2471,8 @@ export default function Inventory() {
                           {item.itemType === 'Finished Good' && <Badge variant="success" className="border-none bg-emerald-500/15 px-1 py-0 text-[9px] text-emerald-300">FG</Badge>}
                         </div>
                         {/* HQ-only: Shared Product badge — shown when ≥ 2 rows share this item_id */}
-                        {isHqAdmin(user) && item.itemId && (linkedCountByItemId.get(item.itemId) ?? 0) > 1 && (() => {
-                          const count = linkedCountByItemId.get(item.itemId)!;
+                        {isHqAdmin(user) && item.itemId && ((item.sharedLocationCount ?? linkedCountByItemId.get(item.itemId) ?? 0) > 1) && (() => {
+                          const count = item.sharedLocationCount ?? linkedCountByItemId.get(item.itemId)!;
                           return (
                             <button
                               onClick={(e) => { e.stopPropagation(); setSharedLinkedDrawerItem(item); }}
