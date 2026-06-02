@@ -262,9 +262,30 @@ export default function Orders() {
 
   const handleAddItem = (item: any) => {
     if (editorState.readOnly) return;
-    if (!draftItems.find(i => i.id === item.id)) {
-      setDraftItems([...draftItems, { ...item, qty: item.parLevel - item.inStock > 0 ? item.parLevel - item.inStock : 1, expectedPrice: item.cost }]);
-    }
+    console.log("Catalog item add clicked", item);
+
+    setDraftItems(prev => {
+      const existing = prev.find(row => row.id === item.id);
+      let nextItems;
+      if (existing) {
+        nextItems = prev.map(row =>
+          row.id === item.id
+            ? { ...row, qty: Number(row.qty || 0) + 1 }
+            : row
+        );
+      } else {
+        nextItems = [
+          ...prev,
+          {
+            ...item,
+            qty: 1,
+            expectedPrice: item.cost || item.unitCost || item.price || 0
+          }
+        ];
+      }
+      console.log("PO cart after add", nextItems);
+      return nextItems;
+    });
   };
 
   const currentTotal = draftItems.reduce((sum, item) => sum + (item.expectedPrice * item.qty), 0);
@@ -1160,6 +1181,64 @@ export default function Orders() {
           )}
 
         </div>
+
+        {/* Catalog Search Modal - rendered inside the portal hierarchy to avoid focus block and overlay stacking fighting */}
+        {isCatalogOpen && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/45 backdrop-blur-[2px]" onClick={(e) => { e.stopPropagation(); setIsCatalogOpen(false); }}>
+             <div className="bg-white rounded-xl shadow-2xl border border-neutral-200 w-[500px] max-h-[80vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200" onClick={(e) => e.stopPropagation()}>
+               <div className="flex justify-between items-center p-4 border-b border-neutral-100 bg-neutral-50/50">
+                 <div>
+                   <h3 className="text-sm font-bold text-neutral-900">Inventory Catalog</h3>
+                   <p className="text-xs text-neutral-500">Available items matching {selectedSupplier?.name}</p>
+                 </div>
+                 <button onClick={(e) => { e.stopPropagation(); setIsCatalogOpen(false); }} className="text-neutral-400 hover:text-neutral-700">
+                   <X className="h-5 w-5" />
+                 </button>
+               </div>
+               <div className="flex-1 overflow-y-auto p-2">
+                  {inventoryData.filter(i => Number(i.supplierId) === Number(selectedSupplier?.id)).length === 0 ? (
+                    <div className="p-8 text-center text-sm text-neutral-500">
+                      No items found in your inventory mapped to this supplier.
+                    </div>
+                  ) : (
+                    <div className="space-y-1">
+                      {inventoryData.filter(i => Number(i.supplierId) === Number(selectedSupplier?.id)).map(item => {
+                         const cartItem = draftItems.find(i => i.id === item.id);
+                         return (
+                           <div key={`cat-${item.id}`} className="flex items-center justify-between p-3 hover:bg-brand-50 rounded-lg group transition-colors">
+                             <div>
+                                <div className="text-sm font-semibold text-neutral-900 group-hover:text-brand-700 transition-colors">{item.name}</div>
+                                <div className="text-[10px] text-neutral-500">{item.category} • {item.inStock} {item.unit} in stock</div>
+                             </div>
+                             {cartItem ? (
+                               <div className="flex items-center gap-1.5">
+                                 <span className="text-xs font-semibold text-success-700 bg-success-50 px-2.5 py-1 rounded border border-success-200">
+                                   Added ({cartItem.qty})
+                                 </span>
+                                 <button 
+                                   onClick={(e) => { e.stopPropagation(); handleAddItem(item); }}
+                                   className="text-xs font-semibold bg-brand-50 border border-brand-200 text-brand-700 px-2.5 py-1 rounded hover:bg-brand-100 transition-colors"
+                                 >
+                                   +1
+                                 </button>
+                               </div>
+                             ) : (
+                               <button 
+                                 onClick={(e) => { e.stopPropagation(); handleAddItem(item); }}
+                                 className="text-xs font-medium bg-white border border-neutral-200 px-3 py-1.5 rounded-md hover:bg-neutral-50 shadow-sm transition-all"
+                               >
+                                 Add
+                               </button>
+                             )}
+                           </div>
+                         );
+                      })}
+                    </div>
+                  )}
+               </div>
+             </div>
+          </div>
+        )}
       </Drawer>
 
       {/* Receive PO Drawer */}
@@ -1310,46 +1389,6 @@ export default function Orders() {
         </div>
       </Modal>
 
-      {/* Catalog Search Modal */}
-      {isCatalogOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm">
-           <div className="bg-white rounded-xl shadow-xl border border-neutral-200 w-[500px] max-h-[80vh] flex flex-col overflow-hidden">
-             <div className="flex justify-between items-center p-4 border-b border-neutral-100 bg-neutral-50/50">
-               <div>
-                 <h3 className="text-sm font-bold text-neutral-900">Inventory Catalog</h3>
-                 <p className="text-xs text-neutral-500">Available items matching {selectedSupplier?.name}</p>
-               </div>
-               <button onClick={() => setIsCatalogOpen(false)} className="text-neutral-400 hover:text-neutral-700">
-                 <X className="h-5 w-5" />
-               </button>
-             </div>
-             <div className="flex-1 overflow-y-auto p-2">
-                {inventoryData.filter(i => i.supplierId === selectedSupplier?.id).length === 0 ? (
-                  <div className="p-8 text-center text-sm text-neutral-500">
-                    No items found in your inventory mapped to this supplier.
-                  </div>
-                ) : (
-                  <div className="space-y-1">
-                    {inventoryData.filter(i => i.supplierId === selectedSupplier?.id).map(item => (
-                       <div key={`cat-${item.id}`} className="flex items-center justify-between p-3 hover:bg-brand-50 rounded-lg group transition-colors">
-                         <div>
-                            <div className="text-sm font-semibold text-neutral-900 group-hover:text-brand-700 transition-colors">{item.name}</div>
-                            <div className="text-[10px] text-neutral-500">{item.category} • {item.inStock} {item.unit} in stock</div>
-                         </div>
-                         <button 
-                           onClick={() => { handleAddItem(item); setIsCatalogOpen(false); }}
-                           className="text-xs font-medium bg-white border border-neutral-200 px-3 py-1.5 rounded-md hover:bg-neutral-50 shadow-sm transition-all"
-                         >
-                           Add
-                         </button>
-                       </div>
-                    ))}
-                  </div>
-                )}
-             </div>
-           </div>
-        </div>
-      )}
     </div>
   );
 }
