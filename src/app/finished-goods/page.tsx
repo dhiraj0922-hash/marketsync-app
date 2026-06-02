@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -128,6 +128,40 @@ const getSafeItemType = (item: any): string =>
 const isPreparationItem = (item: any): boolean =>
   getSafeItemType(item) === "Preparation";
 
+const normalizeInventoryDisplayKey = (value: any) =>
+  String(value ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+
+const getInventoryDisplayKey = (item: any) => {
+  const itemId = String(item?.itemId ?? item?.item_id ?? "").trim();
+  if (itemId && itemId !== String(item?.id ?? "")) return `item:${itemId}`;
+  return [
+    "fallback",
+    normalizeInventoryDisplayKey(item?.name),
+    normalizeInventoryDisplayKey(item?.baseUnit ?? item?.baseunit ?? item?.unit),
+    normalizeInventoryDisplayKey(item?.supplierId ?? item?.supplierid ?? ""),
+    normalizeInventoryDisplayKey(item?.cost ?? ""),
+  ].join("|");
+};
+
+const getSupplierSearchText = (item: any) =>
+  String(item?.preferredSupplierName ?? item?.supplierName ?? item?.supplier ?? item?.supplierId ?? "");
+
+const rankSubstituteMatch = (item: any, query: string) => {
+  const q = normalizeInventoryDisplayKey(query);
+  if (!q) return 0;
+  const name = normalizeInventoryDisplayKey(item?.name);
+  const supplier = normalizeInventoryDisplayKey(getSupplierSearchText(item));
+  const unit = normalizeInventoryDisplayKey(item?.unit ?? item?.baseUnit);
+
+  if (name === q) return 100;
+  if (name.startsWith(q)) return 90;
+  if (name.includes(q)) return 70;
+  if (supplier.startsWith(q)) return 50;
+  if (supplier.includes(q)) return 40;
+  if (unit === q || unit.includes(q)) return 25;
+  return -1;
+};
+
 const stockIqDarkShellCss = `
   body .flex.bg-neutral-50.text-neutral-900.min-h-screen {
     background: #070707 !important;
@@ -251,6 +285,7 @@ export default function FinishedGoods() {
   const [substitutes, setSubstitutes] = useState<Map<number, any>>(new Map());
   // Which ingredient's substitute picker is open
   const [substituteModal, setSubstituteModal] = useState<{ ingIdx: number; query: string } | null>(null);
+  const [debouncedSubstituteQuery, setDebouncedSubstituteQuery] = useState("");
 
   // ── "Update recipe" permanent-substitute confirmation dialog ─────────────
   type RecipeUpdateTarget = {
@@ -360,6 +395,66 @@ export default function FinishedGoods() {
     }
     fetchData();
   }, []);
+
+  useEffect(() => {
+    const query = substituteModal?.query ?? "";
+    const handle = window.setTimeout(() => {
+      setDebouncedSubstituteQuery(query);
+    }, 180);
+    return () => window.clearTimeout(handle);
+  }, [substituteModal?.query]);
+
+  const currentProductionLocationId =
+    selectedFG?.locationId && selectedFG.locationId !== "LOC-HQ"
+      ? String(selectedFG.locationId)
+      : null;
+
+  const substituteInventoryOptions = useMemo(() => {
+    const rawCandidates = inventoryData.filter((item: any) => {
+      const itemType = getSafeItemType(item);
+      return itemType !== "Finished Good" && itemType !== "Preparation";
+    });
+
+    const groups = new Map<string, any[]>();
+    for (const item of rawCandidates) {
+      const key = getInventoryDisplayKey(item);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(item);
+    }
+
+    const groupedOptions = Array.from(groups.entries()).map(([displayKey, rows]) => {
+      const activeLocationRow = currentProductionLocationId
+        ? rows.find((row: any) => row.locationId === currentProductionLocationId)
+        : null;
+      const representative =
+        activeLocationRow ??
+        rows.find((row: any) => row.locationId !== "LOC-HQ") ??
+        rows[0];
+      const locationIds = Array.from(new Set(rows.map((row: any) => row.locationId).filter(Boolean)));
+
+      return {
+        ...representative,
+        displayKey,
+        sharedLocationCount: locationIds.length,
+        sharedLocationIds: locationIds,
+        isAvailableInProductionLocation: currentProductionLocationId
+          ? Boolean(activeLocationRow)
+          : true,
+      };
+    });
+
+    const seen = new Set<string>();
+    const duplicateDisplayKeys = new Set<string>();
+    for (const option of groupedOptions) {
+      if (seen.has(option.displayKey)) duplicateDisplayKeys.add(option.displayKey);
+      seen.add(option.displayKey);
+    }
+    if (process.env.NODE_ENV === "development" && duplicateDisplayKeys.size > 0) {
+      console.warn("[Production] Duplicate substitute display keys before rendering", Array.from(duplicateDisplayKeys));
+    }
+
+    return groupedOptions;
+  }, [currentProductionLocationId, inventoryData]);
 
   // ── Lazy-load production movements when history tab is active ────────────
   useEffect(() => {
@@ -1664,29 +1759,34 @@ export default function FinishedGoods() {
 
                   // ── Standard ingredient row ────────────────────────────────
 
-                  // Candidate substitutes: all raw-type inventory items
-                  const candidatesAll = inventoryData.filter((i: any) => {
-                    const itemType = getSafeItemType(i);
-                    return itemType !== "Finished Good" && itemType !== "Preparation";
-                  });
                   // Prioritise: same unit AND same category as original ingredient's item
                   const effectiveOriginal = findInventoryItem(
                     inventoryData,
                     recipe?.ingredients?.[ingIdx]?.inventoryId?.toString()
                   );
-                  const sameGroup = candidatesAll.filter((i: any) =>
+                  const sameGroup = substituteInventoryOptions.filter((i: any) =>
                     i.id.toString() !== effectiveOriginal?.id?.toString() &&
                     (i.unit === effectiveOriginal?.unit || i.category === effectiveOriginal?.category)
                   );
-                  const rest = candidatesAll.filter((i: any) =>
+                  const rest = substituteInventoryOptions.filter((i: any) =>
                     !sameGroup.some((s: any) => s.id === i.id) &&
                     i.id.toString() !== effectiveOriginal?.id?.toString()
                   );
                   const candidates = [...sameGroup, ...rest];
-                  const q = (substituteModal?.query ?? "").toLowerCase();
-                  const filtered = q
-                    ? candidates.filter((i: any) => i.name.toLowerCase().includes(q))
+                  const q = debouncedSubstituteQuery.trim();
+                  const rankedCandidates = q
+                    ? candidates
+                        .map((item: any, index: number) => ({
+                          item,
+                          index,
+                          rank: rankSubstituteMatch(item, q),
+                        }))
+                        .filter((match) => match.rank >= 0)
+                        .sort((a, b) => b.rank - a.rank || a.index - b.index)
+                        .map((match) => match.item)
                     : candidates;
+                  const filtered = rankedCandidates.slice(0, 50);
+                  const hasMoreSubstituteResults = rankedCandidates.length > filtered.length;
 
                   return (
                     <TableRow
@@ -1781,7 +1881,14 @@ export default function FinishedGoods() {
                                   }}
                                   className="flex items-center justify-between px-2 py-1.5 rounded hover:bg-brand-50 text-left transition-colors"
                                 >
-                                  <span className="text-xs font-medium text-neutral-800 truncate">{item.name}</span>
+                                  <span className="min-w-0">
+                                    <span className="block truncate text-xs font-medium text-neutral-800">{item.name}</span>
+                                    {item.isAvailableInProductionLocation === false && (
+                                      <span className="block text-[9px] font-medium text-amber-600">
+                                        Not available in this location
+                                      </span>
+                                    )}
+                                  </span>
                                   <span className={`text-[10px] ml-2 shrink-0 ${
                                     item.inStock <= 0 ? "text-red-500" : "text-green-600"
                                   }`}>
@@ -1789,6 +1896,11 @@ export default function FinishedGoods() {
                                   </span>
                                 </button>
                               ))}
+                              {hasMoreSubstituteResults && (
+                                <span className="px-1 py-1 text-center text-[10px] font-medium text-neutral-400">
+                                  Showing 50 results. Keep typing to narrow.
+                                </span>
+                              )}
                             </div>
                           </div>
                         )}
