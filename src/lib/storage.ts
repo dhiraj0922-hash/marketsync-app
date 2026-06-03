@@ -106,7 +106,9 @@ export function convertYieldToBaseUnit(
 // MEASUREMENT FAMILY HELPERS
 //
 // These pure functions drive the Add/Edit Inventory Item UI:
-//   - deriveLockedBaseUnit       → the canonical storage unit for a family
+//   - deriveLockedBaseUnit       → the DEFAULT (family minimum) storage unit
+//   - getAllowedBaseUnits        → all selectable base units for a family
+//   - resolveStorageBaseUnit     → user choice if valid, else family default
 //   - getFamilyAllowedInnerUnits → which inner measurement units are valid
 //   - calcBaseQtyPerPurchaseUnit → total base-unit qty in one purchase unit
 //   - inferMeasurementFamily     → auto-detect family from an existing baseUnit
@@ -115,7 +117,10 @@ export function convertYieldToBaseUnit(
 export type MeasurementFamily =
   | 'weight' | 'volume' | 'count' | 'labour' | 'preparation' | 'finished_good';
 
-/** The locked internal base unit for each measurement family. */
+/**
+ * The default (smallest / most precise) internal base unit for each family.
+ * Kept as the locked fallback when no explicit selection is saved.
+ */
 export function deriveLockedBaseUnit(family: string): string {
   switch (family) {
     case 'weight':       return 'g';
@@ -126,6 +131,47 @@ export function deriveLockedBaseUnit(family: string): string {
     case 'finished_good':return 'ea';
     default:             return '';
   }
+}
+
+/**
+ * All valid base unit choices within a measurement family.
+ * The first element is the recommended / most-precise default.
+ * These are the options shown in the "Base Unit" dropdown in the Edit drawer.
+ */
+export function getAllowedBaseUnits(family: string): string[] {
+  switch (family) {
+    case 'weight':       return ['g', 'kg', 'lb', 'oz'];
+    case 'volume':       return ['ml', 'l', 'fl oz'];
+    case 'count':        return ['ea', 'pack', 'case', 'box', 'bag'];
+    case 'labour':       return ['hr'];   // min stays as inner-unit only
+    case 'preparation':  return ['g', 'kg', 'ml', 'l', 'ea'];
+    case 'finished_good':return ['ea', 'batch', 'portion', 'tray'];
+    default:             return [];
+  }
+}
+
+/**
+ * Return the effective base unit for an item given its measurement family and
+ * the user's explicit selection (if any).
+ *
+ * Rule:
+ *   - If `selectedBaseUnit` is non-empty AND is in the allowed list for the
+ *     family → use it.
+ *   - Otherwise fall back to `deriveLockedBaseUnit(family)` (the default).
+ *
+ * This is the single source of truth for "what unit is stock, par, and
+ * per-base-unit cost expressed in?" at save time.
+ */
+export function resolveStorageBaseUnit(
+  family: string,
+  selectedBaseUnit: string | null | undefined,
+): string {
+  const candidate = selectedBaseUnit?.trim();
+  if (candidate) {
+    const allowed = getAllowedBaseUnits(family);
+    if (allowed.includes(candidate)) return candidate;
+  }
+  return deriveLockedBaseUnit(family);
 }
 
 /** Measurement units that are valid for the inner pack (innerMeasurementUnit). */
@@ -149,18 +195,20 @@ export function getFamilyAllowedInnerUnits(family: string): string[] {
 /**
  * Compute the total base-unit quantity contained in one purchase unit.
  *
- * Examples:
- *   weight, innerPackCount=6, innerQty=3, innerMeasurementUnit='lb'
- *     → 6 × 3 lb × 453.59237 g/lb = 8164.66 g
+ * @param family              Measurement family of the item
+ * @param innerPackCount      How many inner units are in one purchase unit
+ * @param innerQty            Quantity per inner unit
+ * @param innerMeasurementUnit The unit of `innerQty`
+ * @param explicitBaseUnit    (Optional) user-selected base unit. When provided
+ *                             and valid for the family, overrides the family default.
  *
+ * Examples (base unit = L):
+ *   volume, innerPackCount=1, innerQty=16, innerMeasurementUnit='l', explicitBaseUnit='l'
+ *     → 1 × 16 l → already l → 16 L
+ *
+ * Examples (base unit = ml, legacy default):
  *   volume, innerPackCount=1, innerQty=16, innerMeasurementUnit='l'
  *     → 1 × 16 l × 1000 ml/l = 16000 ml
- *
- *   count, innerPackCount=1, innerQty=1, innerMeasurementUnit='ea'
- *     → 1 ea
- *
- *   labour, innerPackCount=1, innerQty=1, innerMeasurementUnit='hr'
- *     → 1 hr
  *
  * Returns null when the conversion is impossible (incompatible units).
  */
@@ -169,25 +217,26 @@ export function calcBaseQtyPerPurchaseUnit(
   innerPackCount: number,
   innerQty: number,
   innerMeasurementUnit: string,
+  explicitBaseUnit?: string | null,
 ): number | null {
   if (innerPackCount <= 0 || innerQty <= 0) return null;
 
-  const lockedBase = deriveLockedBaseUnit(family);
-  if (!lockedBase) return null;
+  const base = resolveStorageBaseUnit(family, explicitBaseUnit);
+  if (!base) return null;
 
   const totalInner = innerPackCount * innerQty;
 
   // Count / labour / finished_good: no dimensional conversion needed
-  if (['ea', 'hr'].includes(lockedBase)) {
-    if (innerMeasurementUnit === lockedBase || innerMeasurementUnit === 'min') {
+  if (['ea', 'hr'].includes(base)) {
+    if (innerMeasurementUnit === base || innerMeasurementUnit === 'min') {
       if (innerMeasurementUnit === 'min') return totalInner / 60; // min → hr
       return totalInner;
     }
     return null;
   }
 
-  // Weight (g) or Volume (ml): use convertUnit
-  const converted = convertUnit(totalInner, innerMeasurementUnit, lockedBase);
+  // Weight (g/kg/lb/oz) or Volume (ml/l/fl oz): use convertUnit
+  const converted = convertUnit(totalInner, innerMeasurementUnit, base);
   return converted; // null if units are incompatible
 }
 
@@ -497,6 +546,72 @@ export async function adjustInventoryItemStock(
   }
 
   return { success: true, newStock };
+}
+
+/**
+ * Set one inventory_items.instock value to an exact target and write a matching
+ * stock_correction movement. This is intentionally an exact set, not a delta
+ * conversion helper, so operators can recover from impossible stock values.
+ */
+export async function setInventoryStockToTarget(params: {
+  itemId: string;
+  targetBaseQty: number;
+  reason: string;
+  locationId?: string | null;
+  movementItemId?: string | null;
+  unit?: string | null;
+  unitCost?: number | null;
+}): Promise<{ success: boolean; previousStock?: number; targetStock?: number; delta?: number; error?: any }> {
+  const { data: current, error: fetchErr } = await supabase
+    .from('inventory_items')
+    .select('id, instock, location_id, item_id, unit, baseunit, cost')
+    .eq('id', params.itemId)
+    .single();
+
+  if (fetchErr || !current) {
+    console.error('[setInventoryStockToTarget] fetch error', fetchErr);
+    return { success: false, error: fetchErr ?? { message: 'Inventory item not found' } };
+  }
+
+  const previousStock = Number(current.instock ?? 0);
+  const targetStock = Number(params.targetBaseQty);
+  if (!Number.isFinite(targetStock) || targetStock < 0) {
+    return { success: false, error: { message: 'Target stock must be a number 0 or greater.' } };
+  }
+
+  const delta = targetStock - previousStock;
+  const { error: updateErr } = await supabase
+    .from('inventory_items')
+    .update({ instock: targetStock })
+    .eq('id', params.itemId);
+
+  if (updateErr) {
+    console.error('[setInventoryStockToTarget] update error', updateErr);
+    return { success: false, error: updateErr };
+  }
+
+  const movementErr = await logMovement({
+    locationId:    params.locationId ?? current.location_id ?? 'LOC-HQ',
+    itemId:        String(params.movementItemId ?? current.item_id ?? current.id),
+    movementType:  'stock_correction',
+    quantity:      Math.abs(delta),
+    unitCost:      params.unitCost ?? current.cost ?? null,
+    referenceType: 'stock_correction',
+    referenceId:   `stock-correction:${current.id}:${Date.now()}`,
+    notes:         `Stock Correction | previous_stock=${previousStock} | target_stock=${targetStock} | quantity_delta=${delta} | unit=${params.unit ?? current.baseunit ?? current.unit ?? ''} | reason=${params.reason}`,
+  });
+
+  if (movementErr) {
+    return {
+      success: false,
+      previousStock,
+      targetStock,
+      delta,
+      error: movementErr,
+    };
+  }
+
+  return { success: true, previousStock, targetStock, delta };
 }
 
 /**

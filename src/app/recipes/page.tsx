@@ -17,10 +17,12 @@ import {
   resolveEffectiveBaseUom,
   computeBaseUnitCostFromPack,
   computeIngredientLineCost,
+  calculateIngredientLineCost,
   auditItemUnitAmbiguity,
+  type CostAuditRecord,
 } from "@/lib/units";
 
-import { Plus, Search, SplitSquareVertical, Calculator, Trash2, Sparkles, Pencil, Link } from "lucide-react";
+import { Plus, Search, SplitSquareVertical, Calculator, Trash2, Sparkles, Pencil, Link, AlertTriangle, ChevronDown, Save } from "lucide-react";
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
 import { AIRecipeImport } from "@/components/AIRecipeImport";
 import { useAuth } from "@/components/AuthProvider";
@@ -1100,6 +1102,7 @@ function RecipesPageContent() {
                   let lineCost = 0;
                   let hasError = false;
                   let costErrorMsg = "";
+                  let costAudit: CostAuditRecord | null = null;
 
                   const targetId = ing.inventoryId || ing.fgId;
 
@@ -1118,9 +1121,15 @@ function RecipesPageContent() {
                   if (invItem) {
                      try {
                         // ── SINGLE COSTING ENTRYPOINT ───────────────────────────────
-                        const lineResult = computeIngredientLineCost(ing.qty, ing.unit, invItem);
+                        // Use the named wrapper so call-site matches the user-required API shape.
+                        const lineResult = calculateIngredientLineCost({
+                          item:       invItem,
+                          recipeQty:  ing.qty,
+                          recipeUnit: ing.unit,
+                        });
                         if (lineResult.ok) {
-                          lineCost = lineResult.cost;
+                          lineCost  = lineResult.cost;
+                          costAudit = lineResult.costAudit;
                         } else {
                           hasError     = true;
                           costErrorMsg = lineResult.error;
@@ -1146,132 +1155,201 @@ function RecipesPageContent() {
                   const isPrepNode = invItem && (invItem.itemType === 'Preparation' || invItem.itemType === 'Finished Good');
 
                   return (
-                    <div key={idx} className={`p-3 rounded-lg border flex items-center gap-4 shadow-sm bg-white ${hasError ? 'border-danger-300' : 'border-neutral-200'}`}>
-                      <div className="w-1/3">
-                        <div className="flex items-center gap-1.5 mb-0.5 flex-wrap">
-                           <p className="text-sm font-bold text-neutral-900 truncate">{mappedName}</p>
-                           {isPrepNode ? (
-                              <Badge variant="warning" className="text-[9px] px-1.5 py-0 border-none bg-orange-100 text-orange-700">PREP</Badge>
-                           ) : (
-                              <Badge variant="neutral" className="text-[9px] px-1.5 py-0 border-none bg-neutral-100 text-neutral-600">INV</Badge>
-                           )}
-                           {invItem && (
-                             <button
-                               type="button"
-                               onClick={e => { e.stopPropagation(); setInvEditItem(invItem); }}
-                               title="Quick-edit this inventory item"
-                               className="p-0.5 text-neutral-300 hover:text-violet-600 hover:bg-violet-50 rounded transition-colors"
+                    <div key={idx} className="rounded-lg border shadow-sm bg-white overflow-hidden">
+                      {/* ── Blocking incompatibility banner ──────────────────────────────── */}
+                      {hasError && (
+                        <div className="flex items-start gap-2 px-3 py-2 bg-red-50 border-b border-red-200">
+                          <AlertTriangle className="h-4 w-4 text-red-500 flex-shrink-0 mt-0.5" />
+                          <p className="text-[11px] font-semibold text-red-700">
+                            Unit conversion missing or incompatible. Cost cannot be trusted.
+                            <span className="font-normal ml-1 text-red-600">{costErrorMsg}</span>
+                          </p>
+                        </div>
+                      )}
+
+                      {/* ── Main ingredient row ───────────────────────────────────────────── */}
+                      <div className={`p-3 flex items-center gap-4 ${hasError ? 'border-danger-300' : ''}`}>
+                        <div className="w-1/3">
+                          <div className="flex items-center gap-1.5 mb-0.5 flex-wrap">
+                             <p className="text-sm font-bold text-neutral-900 truncate">{mappedName}</p>
+                             {isPrepNode ? (
+                                <Badge variant="warning" className="text-[9px] px-1.5 py-0 border-none bg-orange-100 text-orange-700">PREP</Badge>
+                             ) : (
+                                <Badge variant="neutral" className="text-[9px] px-1.5 py-0 border-none bg-neutral-100 text-neutral-600">INV</Badge>
+                             )}
+                             {invItem && (
+                               <button
+                                 type="button"
+                                 onClick={e => { e.stopPropagation(); setInvEditItem(invItem); }}
+                                 title="Quick-edit this inventory item"
+                                 className="p-0.5 text-neutral-300 hover:text-violet-600 hover:bg-violet-50 rounded transition-colors"
+                               >
+                                 <Pencil className="h-3 w-3" />
+                               </button>
+                             )}
+                          </div>
+                          <p className="text-[10px] text-neutral-400 uppercase tracking-wider font-semibold mt-0.5">
+                            Native Constraint: <span className="text-brand-600">{mappedUnit}</span>
+                          </p>
+                        </div>
+                        
+                        <div className="flex-1 grid grid-cols-2 gap-2">
+                          <input 
+                            type="number"
+                            value={ing.qty}
+                            onChange={e => updateIngredient(idx, 'qty', Number(e.target.value))}
+                            className="w-full p-1.5 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
+                          />
+                          {(() => {
+                             const allowedUoms: string[] = Array.isArray(invItem?.allowedRecipeUoms)
+                               ? invItem.allowedRecipeUoms.filter(Boolean)
+                               : [];
+                             const isUomMismatch = allowedUoms.length > 0 && !allowedUoms.includes(ing.unit);
+                             const uomLabel: Record<string, string> = {
+                               g: "Grams (g)", kg: "Kilograms (kg)", mg: "Milligrams (mg)",
+                               oz: "Ounces (oz)", lb: "Pounds (lb)",
+                               ml: "Milliliters (ml)", l: "Liters (l)",
+                               tsp: "Teaspoon (tsp)", tbsp: "Tablespoon (tbsp)",
+                               cup: "Cup", "fl oz": "Fl. Oz.",
+                               ea: "Each (ea)", each: "Each (each)", pcs: "Pieces (pcs)", piece: "Piece",
+                               pack: "Pack", box: "Box", bag: "Bag", can: "Can / Tin",
+                               bottle: "Bottle", bunch: "Bunch", clove: "Clove",
+                               sprig: "Sprig", slice: "Slice", knob: "Knob",
+                             };
+                             return (
+                               <select
+                                 value={ing.unit}
+                                 onChange={e => updateIngredient(idx, 'unit', e.target.value)}
+                                 className={`w-full p-1.5 border rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white transition-colors ${
+                                   isUomMismatch
+                                     ? "border-warning-400 ring-1 ring-warning-300 bg-warning-50"
+                                     : "border-neutral-200"
+                                 }`}
+                                 title={isUomMismatch
+                                   ? `\u26a0 "${ing.unit}" is outside recommended units: ${allowedUoms.join(", ")}`
+                                   : undefined}
+                               >
+                                 {allowedUoms.length > 0 && (
+                                   <optgroup label={`\u2605 Recommended for this item`}>
+                                     {allowedUoms.map(u => (
+                                       <option key={u} value={u}>{uomLabel[u] ?? u}</option>
+                                     ))}
+                                   </optgroup>
+                                 )}
+                                 <optgroup label={allowedUoms.length > 0 ? "All Units \u2014 Weight" : "Weight"}>
+                                   <option value="g">Grams (g)</option>
+                                   <option value="kg">Kilograms (kg)</option>
+                                   <option value="mg">Milligrams (mg)</option>
+                                   <option value="oz">Ounces (oz)</option>
+                                   <option value="lb">Pounds (lb)</option>
+                                 </optgroup>
+                                 <optgroup label={allowedUoms.length > 0 ? "All Units \u2014 Volume" : "Volume"}>
+                                   <option value="ml">Milliliters (ml)</option>
+                                   <option value="l">Liters (l)</option>
+                                   <option value="tsp">Teaspoon (tsp)</option>
+                                   <option value="tbsp">Tablespoon (tbsp)</option>
+                                   <option value="cup">Cup</option>
+                                   <option value="fl oz">Fl. Oz.</option>
+                                 </optgroup>
+                                 <optgroup label="Count / Each">
+                                   <option value="ea">Each (ea)</option>
+                                   <option value="each">Each (each)</option>
+                                   <option value="pcs">Pieces (pcs)</option>
+                                   <option value="piece">Piece</option>
+                                 </optgroup>
+                                 <optgroup label="Packaging">
+                                   <option value="pack">Pack</option>
+                                   <option value="box">Box</option>
+                                   <option value="bag">Bag</option>
+                                   <option value="can">Can / Tin</option>
+                                   <option value="bottle">Bottle</option>
+                                   <option value="bunch">Bunch</option>
+                                   <option value="clove">Clove</option>
+                                   <option value="sprig">Sprig</option>
+                                   <option value="slice">Slice</option>
+                                   <option value="knob">Knob</option>
+                                 </optgroup>
+                               </select>
+                             );
+                          })()}
+                        </div>
+                        
+                        <div className="w-20 text-right shrink-0">
+                           {hasError ? (
+                             <Badge
+                               variant="danger"
+                               className="text-[10px] px-1.5 py-0 border-none cursor-help"
+                               title={costErrorMsg}
                              >
-                               <Pencil className="h-3 w-3" />
-                             </button>
+                               Unit Error
+                             </Badge>
+                           ) : (
+                             <span className="text-sm font-semibold text-neutral-600">${lineCost.toFixed(2)}</span>
                            )}
                         </div>
-                        <p className="text-[10px] text-neutral-400 uppercase tracking-wider font-semibold mt-0.5">
-                          Native Constraint: <span className="text-brand-600">{mappedUnit}</span>
-                        </p>
-                      </div>
-                      
-                      <div className="flex-1 grid grid-cols-2 gap-2">
-                        <input 
-                          type="number"
-                          value={ing.qty}
-                          onChange={e => updateIngredient(idx, 'qty', Number(e.target.value))}
-                          className="w-full p-1.5 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
-                        />
-                        {(() => {
-                           const allowedUoms: string[] = Array.isArray(invItem?.allowedRecipeUoms)
-                             ? invItem.allowedRecipeUoms.filter(Boolean)
-                             : [];
-                           const isUomMismatch = allowedUoms.length > 0 && !allowedUoms.includes(ing.unit);
-                           const uomLabel: Record<string, string> = {
-                             g: "Grams (g)", kg: "Kilograms (kg)", mg: "Milligrams (mg)",
-                             oz: "Ounces (oz)", lb: "Pounds (lb)",
-                             ml: "Milliliters (ml)", l: "Liters (l)",
-                             tsp: "Teaspoon (tsp)", tbsp: "Tablespoon (tbsp)",
-                             cup: "Cup", "fl oz": "Fl. Oz.",
-                             ea: "Each (ea)", each: "Each (each)", pcs: "Pieces (pcs)", piece: "Piece",
-                             pack: "Pack", box: "Box", bag: "Bag", can: "Can / Tin",
-                             bottle: "Bottle", bunch: "Bunch", clove: "Clove",
-                             sprig: "Sprig", slice: "Slice", knob: "Knob",
-                           };
-                           return (
-                             <select
-                               value={ing.unit}
-                               onChange={e => updateIngredient(idx, 'unit', e.target.value)}
-                               className={`w-full p-1.5 border rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white transition-colors ${
-                                 isUomMismatch
-                                   ? "border-warning-400 ring-1 ring-warning-300 bg-warning-50"
-                                   : "border-neutral-200"
-                               }`}
-                               title={isUomMismatch
-                                 ? `\u26a0 "${ing.unit}" is outside recommended units: ${allowedUoms.join(", ")}`
-                                 : undefined}
-                             >
-                               {allowedUoms.length > 0 && (
-                                 <optgroup label={`\u2605 Recommended for this item`}>
-                                   {allowedUoms.map(u => (
-                                     <option key={u} value={u}>{uomLabel[u] ?? u}</option>
-                                   ))}
-                                 </optgroup>
-                               )}
-                               <optgroup label={allowedUoms.length > 0 ? "All Units \u2014 Weight" : "Weight"}>
-                                 <option value="g">Grams (g)</option>
-                                 <option value="kg">Kilograms (kg)</option>
-                                 <option value="mg">Milligrams (mg)</option>
-                                 <option value="oz">Ounces (oz)</option>
-                                 <option value="lb">Pounds (lb)</option>
-                               </optgroup>
-                               <optgroup label={allowedUoms.length > 0 ? "All Units \u2014 Volume" : "Volume"}>
-                                 <option value="ml">Milliliters (ml)</option>
-                                 <option value="l">Liters (l)</option>
-                                 <option value="tsp">Teaspoon (tsp)</option>
-                                 <option value="tbsp">Tablespoon (tbsp)</option>
-                                 <option value="cup">Cup</option>
-                                 <option value="fl oz">Fl. Oz.</option>
-                               </optgroup>
-                               <optgroup label="Count / Each">
-                                 <option value="ea">Each (ea)</option>
-                                 <option value="each">Each (each)</option>
-                                 <option value="pcs">Pieces (pcs)</option>
-                                 <option value="piece">Piece</option>
-                               </optgroup>
-                               <optgroup label="Packaging">
-                                 <option value="pack">Pack</option>
-                                 <option value="box">Box</option>
-                                 <option value="bag">Bag</option>
-                                 <option value="can">Can / Tin</option>
-                                 <option value="bottle">Bottle</option>
-                                 <option value="bunch">Bunch</option>
-                                 <option value="clove">Clove</option>
-                                 <option value="sprig">Sprig</option>
-                                 <option value="slice">Slice</option>
-                                 <option value="knob">Knob</option>
-                               </optgroup>
-                             </select>
-                           );
-                        })()}
-                      </div>
-                      
-                      <div className="w-20 text-right shrink-0">
-                         {hasError ? (
-                           <Badge
-                             variant="danger"
-                             className="text-[10px] px-1.5 py-0 border-none cursor-help"
-                             title={costErrorMsg}
-                           >
-                             Unit Error
-                           </Badge>
-                         ) : (
-                           <span className="text-sm font-semibold text-neutral-600">${lineCost.toFixed(2)}</span>
-                         )}
+
+                        <button 
+                          onClick={() => removeIngredient(idx)}
+                          className="text-neutral-400 hover:text-danger-600 p-1.5 rounded hover:bg-danger-50 transition-colors"
+                        >
+                           <Trash2 className="h-4 w-4" />
+                        </button>
                       </div>
 
-                      <button 
-                        onClick={() => removeIngredient(idx)}
-                        className="text-neutral-400 hover:text-danger-600 p-1.5 rounded hover:bg-danger-50 transition-colors"
-                      >
-                         <Trash2 className="h-4 w-4" />
-                      </button>
+                      {/* ── Cost Audit Panel ──────────────────────────────────────────────── */}
+                      {costAudit && (
+                        <details className="border-t border-neutral-100 group">
+                          <summary className="flex items-center gap-1.5 px-3 py-1.5 cursor-pointer text-[10px] font-semibold text-neutral-400 hover:text-brand-600 hover:bg-neutral-50 select-none list-none transition-colors">
+                            <ChevronDown className="h-3 w-3 transition-transform group-open:rotate-180" />
+                            Cost Audit
+                            <span className="ml-auto text-[10px] font-mono text-neutral-500">
+                              Path {costAudit.costPath} · {costAudit.baseUnit}
+                            </span>
+                          </summary>
+                          <div className="px-3 pb-3 pt-1 bg-neutral-50">
+                            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
+                              <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                <span className="text-neutral-500">Item</span>
+                                <span className="font-semibold text-neutral-800 truncate max-w-[120px]">{costAudit.itemName}</span>
+                              </div>
+                              <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                <span className="text-neutral-500">Family</span>
+                                <span className="font-semibold text-brand-700">{costAudit.measurementFamily || '—'}</span>
+                              </div>
+                              <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                <span className="text-neutral-500">Purchase Unit</span>
+                                <span className="font-semibold text-neutral-800">{costAudit.purchaseUnit || '—'}</span>
+                              </div>
+                              <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                <span className="text-neutral-500">Purchase Cost</span>
+                                <span className="font-semibold text-neutral-800">${costAudit.purchaseCost.toFixed(4)}</span>
+                              </div>
+                              <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                <span className="text-neutral-500">Base Qty/PurchUnit</span>
+                                <span className="font-semibold text-neutral-800">
+                                  {costAudit.baseQtyPerPurchUnit != null ? `${costAudit.baseQtyPerPurchUnit.toFixed(4)} ${costAudit.baseUnit}` : '—'}
+                                </span>
+                              </div>
+                              <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                <span className="text-neutral-500">Cost / Base Unit</span>
+                                <span className="font-semibold text-emerald-700">${costAudit.costPerBaseUnit.toFixed(6)}/{costAudit.baseUnit}</span>
+                              </div>
+                              <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                <span className="text-neutral-500">Recipe Qty</span>
+                                <span className="font-semibold text-neutral-800">{costAudit.recipeQty} {costAudit.recipeUnit}</span>
+                              </div>
+                              <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                <span className="text-neutral-500">Normalized Qty</span>
+                                <span className="font-semibold text-neutral-800">{costAudit.normalizedRecipeQty.toFixed(4)} {costAudit.baseUnit}</span>
+                              </div>
+                              <div className="col-span-2 flex justify-between pt-1 mt-0.5 border-t border-neutral-200">
+                                <span className="font-bold text-neutral-700">Calculated Line Cost</span>
+                                <span className="font-bold text-emerald-700">${costAudit.calculatedCost.toFixed(6)}</span>
+                              </div>
+                            </div>
+                          </div>
+                        </details>
+                      )}
                     </div>
                   );
                })}

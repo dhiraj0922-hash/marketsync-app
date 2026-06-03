@@ -48,8 +48,10 @@ import {
 } from "@/lib/storage";
 import {
   computeIngredientLineCost,
+  calculateIngredientLineCost,
   convertQuantity,
   resolveEffectiveBaseUom,
+  type CostAuditRecord,
 } from "@/lib/units";
 import { FgImportModal } from "@/components/FgImportModal";
 import { findInventoryItem, warnInventoryIdentity, auditInventoryIdentity } from "@/lib/utils";
@@ -789,24 +791,25 @@ export default function FinishedGoods() {
       let short            = false;
       let possibleCount    = 0;
       let conversionError  = '';
-      let itemCost         = 0;   // cost per base unit
+      let itemCost         = 0;    // cost per base unit
+      let lineCostAudit: CostAuditRecord | null = null;
 
       if (rawItem) {
         // ── Route through the canonical costing engine ────────────────────────
-        // This is the ONLY place production constraints compute cost/qty.
-        // computeIngredientLineCost handles: unit canonicalization,
-        // qty conversion into item base unit, three-path cost chain.
-        const lineResult = computeIngredientLineCost(
-          ing.qty,
-          ing.unit,
-          rawItem,
-        );
+        // Use calculateIngredientLineCost (named wrapper) so the API shape matches
+        // the recipe builder — same function, same math, same result.
+        const lineResult = calculateIngredientLineCost({
+          item:       rawItem,
+          recipeQty:  ing.qty,
+          recipeUnit: ing.unit,
+        });
 
         if (lineResult.ok) {
           // normalizedQty is in the item's base unit — use for stock comparison
           const normalizedQtyPerBatch = lineResult.normalizedQty;
           requiredTotal = normalizedQtyPerBatch * batches;
           itemCost      = lineResult.costPerBaseUnit;
+          lineCostAudit = lineResult.costAudit;
 
           if (!isLabour) {
             short = requiredTotal > inStock;
@@ -852,8 +855,10 @@ export default function FinishedGoods() {
         error: conversionError,
         ingIdx,
         isLabour,
-        itemCost,  // cost per base unit (not raw item.cost)
+        itemCost,       // cost per base unit (not raw item.cost)
+        costAudit: lineCostAudit,  // full 10-field breakdown from costing engine
       };
+
     });
 
     return {
@@ -2005,11 +2010,22 @@ export default function FinishedGoods() {
                   }
 
                   return (
+                    <>
                     <TableRow
                       key={`ing-${idx}`}
                       className={`hover:bg-neutral-50/50 ${ing.isShort ? "bg-red-50/30" : ""}`}
                     >
                       <TableCell>
+                        {/* ── Blocking incompatibility banner ─────────────────── */}
+                        {ing.error && (
+                          <div className="flex items-start gap-1.5 mb-1.5 p-1.5 bg-red-50 border border-red-200 rounded text-[10px]">
+                            <AlertTriangle className="h-3 w-3 text-red-500 flex-shrink-0 mt-0.5" />
+                            <span className="font-semibold text-red-700">
+                              Unit conversion missing or incompatible. Cost cannot be trusted.{' '}
+                              <span className="font-normal text-red-600">{ing.error}</span>
+                            </span>
+                          </div>
+                        )}
                         <div className="font-medium text-sm text-neutral-900">
                           {ing.effectiveName ?? ing.name}
                         </div>
@@ -2180,8 +2196,67 @@ export default function FinishedGoods() {
                         </div>
                       </TableCell>
                     </TableRow>
+
+                    {/* ── Cost Audit Panel (sub-row below the ingredient) ───────────── */}
+                    {ing.costAudit && (
+                      <TableRow key={`audit-${idx}`} className="border-0 p-0">
+                        <TableCell colSpan={4} className="py-0 px-0">
+                          <details className="group">
+                            <summary className="flex items-center gap-1.5 px-4 py-1 cursor-pointer text-[10px] font-semibold text-neutral-400 hover:text-brand-600 hover:bg-neutral-50 select-none list-none transition-colors border-t border-neutral-100">
+                              <ChevronDown className="h-3 w-3 transition-transform group-open:rotate-180" />
+                              Cost Audit — {ing.costAudit.itemName}
+                              <span className="ml-auto font-mono text-neutral-500">
+                                Path {ing.costAudit.costPath} · {ing.costAudit.baseUnit}
+                              </span>
+                            </summary>
+                            <div className="px-4 pb-3 pt-1 bg-neutral-50/70">
+                              <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-1 text-[11px]">
+                                <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                  <span className="text-neutral-500">Family</span>
+                                  <span className="font-semibold text-brand-700">{ing.costAudit.measurementFamily || '—'}</span>
+                                </div>
+                                <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                  <span className="text-neutral-500">Purchase Unit</span>
+                                  <span className="font-semibold text-neutral-800">{ing.costAudit.purchaseUnit || '—'}</span>
+                                </div>
+                                <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                  <span className="text-neutral-500">Purchase Cost</span>
+                                  <span className="font-semibold text-neutral-800">${ing.costAudit.purchaseCost.toFixed(4)}</span>
+                                </div>
+                                <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                  <span className="text-neutral-500">Base Qty/PurchUnit</span>
+                                  <span className="font-semibold text-neutral-800">
+                                    {ing.costAudit.baseQtyPerPurchUnit != null
+                                      ? `${ing.costAudit.baseQtyPerPurchUnit.toFixed(4)} ${ing.costAudit.baseUnit}`
+                                      : '—'}
+                                  </span>
+                                </div>
+                                <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                  <span className="text-neutral-500">Cost / {ing.costAudit.baseUnit}</span>
+                                  <span className="font-semibold text-emerald-700">${ing.costAudit.costPerBaseUnit.toFixed(6)}</span>
+                                </div>
+                                <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                  <span className="text-neutral-500">Recipe Qty</span>
+                                  <span className="font-semibold text-neutral-800">{ing.costAudit.recipeQty} {ing.costAudit.recipeUnit}</span>
+                                </div>
+                                <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                  <span className="text-neutral-500">Normalized Qty</span>
+                                  <span className="font-semibold text-neutral-800">{ing.costAudit.normalizedRecipeQty.toFixed(4)} {ing.costAudit.baseUnit}</span>
+                                </div>
+                                <div className="col-span-2 sm:col-span-3 flex justify-between pt-1 mt-0.5 border-t border-neutral-200">
+                                  <span className="font-bold text-neutral-700">Calculated Line Cost (1 batch)</span>
+                                  <span className="font-bold text-emerald-700">${ing.costAudit.calculatedCost.toFixed(6)}</span>
+                                </div>
+                              </div>
+                            </div>
+                          </details>
+                        </TableCell>
+                      </TableRow>
+                    )}
+                    </>
                   );
-                })}
+                 })}
+
                 {(!activeConstraints ||
                   activeConstraints.ingredientsCheck.length === 0) && (
                   <TableRow>

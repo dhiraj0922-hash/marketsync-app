@@ -10,11 +10,88 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
 import { Search, Plus, Upload, MoreHorizontal, ShoppingCart, History, Save, Trash2, ArrowDown, ArrowUp, AlertTriangle, X, Download, Loader2, Link2, ChevronDown, ChevronRight, GitMerge, MapPin, Copy } from "lucide-react";
-import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId, logMovement, deleteInventoryItem, deleteSaleItemByNameOrId, insertPurchaseOptions, loadPurchaseOptions, savePurchaseOptions, deletePurchaseOption, updateInventoryRowItemId, allocateInventoryToLocations, loadLocations, copyInventoryItemsToLocations, type CopyInventoryItemsToLocationsResult, deriveLockedBaseUnit, getFamilyAllowedInnerUnits, calcBaseQtyPerPurchaseUnit, inferMeasurementFamily } from "@/lib/storage";
+import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId, logMovement, deleteInventoryItem, deleteSaleItemByNameOrId, insertPurchaseOptions, loadPurchaseOptions, savePurchaseOptions, deletePurchaseOption, updateInventoryRowItemId, allocateInventoryToLocations, loadLocations, copyInventoryItemsToLocations, type CopyInventoryItemsToLocationsResult, deriveLockedBaseUnit, getAllowedBaseUnits, resolveStorageBaseUnit, getFamilyAllowedInnerUnits, calcBaseQtyPerPurchaseUnit, inferMeasurementFamily, setInventoryStockToTarget, loadRecipes, loadProductionMovements } from "@/lib/storage";
+import { convertQuantity } from "@/lib/units";
+import { supabase } from "@/lib/supabase";
+
 import { normalizeInventoryName } from "@/lib/inventoryIdentity";
 import { SupplierCombobox } from "@/components/InventoryEditDrawer";
 
 const LONDON_TEMPLATE_LOCATION_ID = "LOC-1091";
+
+const normalizeDuplicateAuditText = (value: any) =>
+  String(value ?? "")
+    .toLowerCase()
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/["'`]/g, "")
+    .replace(/\b(oz|ounces?)\b/g, "ounce")
+    .replace(/\b(lb|lbs|pounds?)\b/g, "pound")
+    .replace(/\b(kg|kilograms?)\b/g, "kilogram")
+    .replace(/\b(gr|g|grams?)\b/g, "gram")
+    .replace(/\b(ea|each|pieces?)\b/g, "each")
+    .replace(/\b(l|lt|litres?|liters?)\b/g, "liter")
+    .replace(/\b(ml|millilitres?|milliliters?)\b/g, "milliliter")
+    .replace(/\b(import|imported|vendor|supplier|copy|duplicate|dupe)\b/g, " ")
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const normalizeDuplicateAuditUnit = (value: any) => {
+  const normalized = normalizeDuplicateAuditText(value);
+  const aliases: Record<string, string> = {
+    oz: "ounce",
+    ounce: "ounce",
+    ounces: "ounce",
+    lb: "pound",
+    lbs: "pound",
+    pound: "pound",
+    kg: "kilogram",
+    kilogram: "kilogram",
+    kilograms: "kilogram",
+    gr: "gram",
+    g: "gram",
+    gram: "gram",
+    grams: "gram",
+    ea: "each",
+    each: "each",
+    piece: "each",
+    pieces: "each",
+    l: "liter",
+    lt: "liter",
+    litre: "liter",
+    litres: "liter",
+    liter: "liter",
+    liters: "liter",
+    ml: "milliliter",
+    millilitre: "milliliter",
+    millilitres: "milliliter",
+    milliliter: "milliliter",
+    milliliters: "milliliter",
+  };
+  return aliases[normalized] ?? normalized;
+};
+
+const getDuplicateAuditShortId = (value: any) => {
+  const text = String(value ?? "");
+  return text ? `#${text.slice(0, 6)}` : "—";
+};
+
+const similarDuplicateAuditNames = (a: string, b: string) => {
+  if (!a || !b || a === b) return false;
+  const aTokens = new Set(a.split(" ").filter(token => token.length > 2));
+  const bTokens = new Set(b.split(" ").filter(token => token.length > 2));
+  if (aTokens.size === 0 || bTokens.size === 0) return false;
+  let intersection = 0;
+  aTokens.forEach(token => { if (bTokens.has(token)) intersection += 1; });
+  const score = intersection / Math.max(aTokens.size, bTokens.size);
+  return score >= 0.75 || a.includes(b) || b.includes(a);
+};
+
+const duplicateAuditCsvEscape = (value: any) => {
+  const text = String(value ?? "");
+  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+};
 
 const normalizeInventoryDisplayKey = (value: any) =>
   String(value ?? "").trim().toLowerCase().replace(/\s+/g, " ");
@@ -77,6 +154,11 @@ export default function Inventory() {
   const [adjQty, setAdjQty] = useState("");
   const [adjUnit, setAdjUnit] = useState("");
   const [adjNotes, setAdjNotes] = useState("");
+  const [stockCorrectionQty, setStockCorrectionQty] = useState("");
+  const [stockCorrectionUnit, setStockCorrectionUnit] = useState("");
+  const [stockCorrectionReason, setStockCorrectionReason] = useState("");
+  const [stockCorrectionConfirm, setStockCorrectionConfirm] = useState("");
+  const [isApplyingStockCorrection, setIsApplyingStockCorrection] = useState(false);
 
   const [newParLevel, setNewParLevel] = useState("");
   const [parNotes, setParNotes] = useState("");
@@ -178,6 +260,17 @@ export default function Inventory() {
   const [editInnerUnitUom, setEditInnerUnitUom] = useState("");
   const [editBaseUomNew, setEditBaseUomNew] = useState("");
   const [editAllowedUoms, setEditAllowedUoms] = useState("");
+  // ── Selectable base unit (Phase 2 — editable by HQ/admin) ────────────────
+  const [editUserBaseUnit, setEditUserBaseUnit] = useState("");     // user-chosen base unit for edit drawer
+  const [newUserBaseUnit, setNewUserBaseUnit]   = useState("");     // user-chosen base unit for add drawer
+  // Conversion modal: shown when user changes base unit on an existing item
+  const [baseUnitConvertModal, setBaseUnitConvertModal] = useState<{
+    oldUnit: string; newUnit: string;
+    oldStock: number; newStock: number;
+    oldPar: number;   newPar: number;
+    oldCostPerBase: number; newCostPerBase: number;
+    oldPackConversion: number | null; newPackConversion: number | null;
+  } | null>(null);
 
   // Edit drawer: purchase_options state
   const [editPurchaseOptions, setEditPurchaseOptions] = useState<any[]>([]);
@@ -229,12 +322,21 @@ export default function Inventory() {
   const [copyInventoryUpdateExisting, setCopyInventoryUpdateExisting] = useState(false);
   const [copyInventoryLoading, setCopyInventoryLoading] = useState(false);
   const [copyInventoryResult, setCopyInventoryResult] = useState<CopyInventoryItemsToLocationsResult | null>(null);
+  const [isDuplicateAuditOpen, setIsDuplicateAuditOpen] = useState(false);
+  const [duplicateAuditSearch, setDuplicateAuditSearch] = useState("");
+  const [duplicateAuditFilter, setDuplicateAuditFilter] = useState("all");
+  const [expandedDuplicateAuditGroups, setExpandedDuplicateAuditGroups] = useState<Record<string, boolean>>({});
+  const [purchaseOptionsData, setPurchaseOptionsData] = useState<any[]>([]);
+  const [recipesData, setRecipesData] = useState<any[]>([]);
+  const [ordersData, setOrdersData] = useState<any[]>([]);
+  const [productionMovementsData, setProductionMovementsData] = useState<any[]>([]);
+  const [movementAuditRows, setMovementAuditRows] = useState<any[]>([]);
 
   useEffect(() => {
     async function fetchData() {
       setIsLoading(true);
       try {
-        const [inv, act, cats, batches, sups, allPurchOpts, locs] = await Promise.all([
+        const [inv, act, cats, batches, sups, allPurchOpts, locs, recipes, orders, prodMovements, movementRowsResult] = await Promise.all([
           loadInventory(),
           loadInventoryActivity(),
           loadCategories('inventory'),
@@ -242,8 +344,20 @@ export default function Inventory() {
           loadSuppliers(),
           loadPurchaseOptions(),   // bulk-load all rows up-front for startup merge
           loadLocations(),         // needed for allocation location picker
+          loadRecipes(),
+          loadOrders(),
+          loadProductionMovements(),
+          supabase
+            .from('inventory_movements')
+            .select('item_id, movement_type, reference_type, reference_id')
+            .range(0, 49999),
         ]);
         setAllLocations(locs);
+        setPurchaseOptionsData(Array.isArray(allPurchOpts) ? allPurchOpts : []);
+        setRecipesData(Array.isArray(recipes) ? recipes : []);
+        setOrdersData(Array.isArray(orders) ? orders : []);
+        setProductionMovementsData(Array.isArray(prodMovements) ? prodMovements : []);
+        setMovementAuditRows(Array.isArray((movementRowsResult as any)?.data) ? (movementRowsResult as any).data : []);
         // Scope to current user's location
         const userLocationId: string = resolveLocationId(user);
 
@@ -453,6 +567,357 @@ export default function Inventory() {
     return groupedRows;
   }, [activeLocation?.id, effectiveInventoryLocationId, inventoryData, isAllLocationsInventoryView]);
 
+  const duplicateAudit = useMemo(() => {
+    const purchaseOptionsByItem = new Map<string, any[]>();
+    for (const option of purchaseOptionsData) {
+      const key = String(option?.inventoryItemId ?? "");
+      if (!key) continue;
+      if (!purchaseOptionsByItem.has(key)) purchaseOptionsByItem.set(key, []);
+      purchaseOptionsByItem.get(key)!.push(option);
+    }
+
+    const aliasesForItem = (item: any) => [
+      String(item.id ?? ""),
+      String(item.itemId ?? item.item_id ?? ""),
+    ].filter(Boolean);
+
+    const recipeUsageCount = (item: any) => {
+      const aliases = new Set(aliasesForItem(item));
+      return recipesData.reduce((count, recipe: any) => {
+        const used = (recipe.ingredients ?? []).some((ing: any) => aliases.has(String(ing.inventoryId ?? "")));
+        return count + (used ? 1 : 0);
+      }, 0);
+    };
+
+    const fgRecipeUsageCount = (item: any) => {
+      const aliases = new Set(aliasesForItem(item));
+      return recipesData.reduce((count, recipe: any) => {
+        const outputIds = [recipe.outputItemId, recipe.output_item_id, recipe.fgId, recipe.fgid].map((id: any) => String(id ?? ""));
+        return count + (outputIds.some(id => aliases.has(id)) ? 1 : 0);
+      }, 0);
+    };
+
+    const movementCount = (item: any) => {
+      const aliases = new Set(aliasesForItem(item));
+      return movementAuditRows.filter((row: any) => aliases.has(String(row.item_id ?? ""))).length;
+    };
+
+    const productionUsageCount = (item: any) => {
+      const aliases = new Set(aliasesForItem(item));
+      return productionMovementsData.filter((row: any) => aliases.has(String(row.item_id ?? ""))).length;
+    };
+
+    const poUsageCount = (item: any) => {
+      const aliases = new Set(aliasesForItem(item));
+      return ordersData.reduce((count, order: any) => {
+        const used = (order.lineItems ?? []).some((line: any) => aliases.has(String(line.id ?? line.itemId ?? "")));
+        return count + (used ? 1 : 0);
+      }, 0);
+    };
+
+    const enrichedItems = inventoryData.map((item: any) => {
+      const options = purchaseOptionsByItem.get(String(item.id)) ?? [];
+      const preferred = options.find((option: any) => option.isPreferred) ?? options[0] ?? null;
+      const supplier = preferred?.supplierName ?? item.preferredSupplierName ?? getSupplierName(item.supplierId);
+      const purchaseUnitLabel = preferred?.purchaseUom ?? item.purchaseUom ?? item.purchaseUnits?.find((u: any) => u.isPrimary)?.name ?? item.purchaseUnits?.[0]?.name ?? "";
+      const baseQtyPerPurchaseUnit = Number(item.packQty ?? item.purchaseUnits?.find((u: any) => u.isPrimary)?.conversion ?? item.purchaseUnits?.[0]?.conversion ?? preferred?.packQty ?? 1);
+      const purchaseCost = Number(preferred?.unitPrice ?? item.purchaseCost ?? item.preferredCost ?? item.cost ?? 0);
+      const costPerBaseUnit = baseQtyPerPurchaseUnit > 0 ? purchaseCost / baseQtyPerPurchaseUnit : Number(item.cost ?? 0);
+      const measurementFamily = item.measurementFamily ?? item.measurement_family ?? inferMeasurementFamily(item.baseUnit ?? item.unit);
+      const hasBaseUnit = Boolean(item.baseUnit ?? item.baseunit ?? item.unit);
+      const hasStructuredPackaging = Boolean(
+        item.packQty ||
+        item.purchaseUom ||
+        item.purchaseUnits?.length ||
+        item.innerUnitSize ||
+        item.innerUnitUom ||
+        preferred?.packQty ||
+        preferred?.purchaseUom
+      );
+      const unitSetupStatus = !hasBaseUnit || !measurementFamily
+        ? "Needs Unit Setup"
+        : baseQtyPerPurchaseUnit <= 0 || !Number.isFinite(baseQtyPerPurchaseUnit)
+          ? "Unit Conflict"
+          : hasStructuredPackaging
+            ? "Unit Ready"
+            : "Needs Unit Setup";
+      const usage = {
+        recipeUsageCount: recipeUsageCount(item),
+        finishedGoodsRecipeUsageCount: fgRecipeUsageCount(item),
+        purchaseOptionCount: options.length,
+        movementLedgerCount: movementCount(item),
+        productionUsageCount: productionUsageCount(item),
+        poUsageCount: poUsageCount(item),
+      };
+      return {
+        ...item,
+        audit: {
+          normalizedName: normalizeDuplicateAuditText(item.name),
+          supplier,
+          normalizedSupplier: normalizeDuplicateAuditText(supplier),
+          normalizedCategory: normalizeDuplicateAuditText(item.category),
+          normalizedBaseUnit: normalizeDuplicateAuditUnit(item.baseUnit ?? item.baseunit ?? item.unit),
+          purchaseUnitLabel,
+          normalizedPurchaseUnit: normalizeDuplicateAuditUnit(purchaseUnitLabel),
+          measurementFamily,
+          purchaseCost,
+          baseQtyPerPurchaseUnit,
+          costPerBaseUnit,
+          unitSetupStatus,
+          hasCompleteUnitSetup: unitSetupStatus === "Unit Ready",
+          usage,
+          isActive: item.isActive ?? item.active ?? item.enabled ?? true,
+          createdAt: item.createdAt ?? item.created_at ?? "",
+          updatedAt: item.updatedAt ?? item.updated_at ?? "",
+        },
+      };
+    });
+
+    const makeGroup = (type: "exact" | "unit variation" | "possible", key: string, items: any[]) => {
+      const scoreDetails = (row: any) => {
+        const usage = row.audit.usage;
+        return {
+          recipeUsage: usage.recipeUsageCount > 0,
+          finishedGoodsOrProductionUsage: usage.finishedGoodsRecipeUsageCount > 0 || usage.productionUsageCount > 0,
+          movementHistory: usage.movementLedgerCount > 0,
+          hasStock: Number(row.inStock ?? 0) > 0,
+          purchaseOptions: usage.purchaseOptionCount > 0,
+          completeUnitSetup: row.audit.hasCompleteUnitSetup,
+          validCostPerBaseUnit: Number(row.audit.costPerBaseUnit ?? 0) > 0,
+          active: row.audit.isActive,
+          updatedAt: row.audit.updatedAt ? new Date(row.audit.updatedAt).getTime() : 0,
+          createdAt: row.audit.createdAt ? new Date(row.audit.createdAt).getTime() : 0,
+        };
+      };
+      const sorted = [...items].sort((a: any, b: any) => {
+        const aScore = scoreDetails(a);
+        const bScore = scoreDetails(b);
+        const priority = [
+          "recipeUsage",
+          "finishedGoodsOrProductionUsage",
+          "movementHistory",
+          "hasStock",
+          "purchaseOptions",
+          "completeUnitSetup",
+          "validCostPerBaseUnit",
+          "active",
+        ] as const;
+        for (const key of priority) {
+          if (aScore[key] !== bScore[key]) return Number(bScore[key]) - Number(aScore[key]);
+        }
+        if (aScore.updatedAt !== bScore.updatedAt) return bScore.updatedAt - aScore.updatedAt;
+        return bScore.createdAt - aScore.createdAt;
+      });
+      const master = sorted[0];
+      const masterDetails = master ? scoreDetails(master) : null;
+      const reasonParts = masterDetails ? [
+        masterDetails.recipeUsage ? "recipe usage" : "",
+        masterDetails.finishedGoodsOrProductionUsage ? "finished goods or production usage" : "",
+        masterDetails.movementHistory ? "movement history" : "",
+        masterDetails.hasStock ? "current stock" : "",
+        masterDetails.purchaseOptions ? "purchase options" : "",
+        masterDetails.completeUnitSetup ? "complete unit setup" : "",
+        masterDetails.validCostPerBaseUnit ? "valid cost per base unit" : "",
+        masterDetails.active ? "active status" : "",
+      ].filter(Boolean) : [];
+      const groupReason = type === "exact"
+        ? "Same normalized name, supplier, base unit, purchase unit, and category."
+        : type === "unit variation"
+          ? "Same normalized name, supplier, and category, but unit setup differs."
+          : "Similar normalized names with same supplier/category and similar cost.";
+      const hasRecipeUsage = sorted.some((item: any) => item.audit.usage.recipeUsageCount > 0);
+      const hasMovementOrProduction = sorted.some((item: any) => item.audit.usage.movementLedgerCount > 0 || item.audit.usage.productionUsageCount > 0 || item.audit.usage.finishedGoodsRecipeUsageCount > 0);
+      const hasUnitConflict = sorted.some((item: any) => item.audit.unitSetupStatus === "Unit Conflict");
+      const safetyStatus = type === "exact" && !hasRecipeUsage && !hasMovementOrProduction && !hasUnitConflict
+        ? "likely safe later"
+        : type === "possible" || hasUnitConflict
+          ? "do not auto-merge"
+          : "manual review needed";
+      return {
+        id: `${type}:${key}`,
+        groupKey: key,
+        duplicateType: type,
+        itemCount: items.length,
+        supplier: sorted[0]?.audit?.supplier ?? "",
+        category: sorted[0]?.category ?? "",
+        groupReason,
+        recommendedMasterId: master?.id ?? "",
+        recommendedMasterReason: reasonParts.length
+          ? `Recommended master because it has ${reasonParts.join(", ")}.`
+          : "Recommended master by latest available row metadata.",
+        items: sorted,
+        safetyStatus,
+        safeToMergeLater: safetyStatus === "likely safe later",
+      };
+    };
+
+    const exactBuckets = new Map<string, any[]>();
+    const unitBuckets = new Map<string, any[]>();
+    for (const item of enrichedItems) {
+      const exactKey = [
+        item.audit.normalizedName,
+        item.audit.normalizedSupplier,
+        item.audit.normalizedBaseUnit,
+        item.audit.normalizedPurchaseUnit,
+        item.audit.normalizedCategory,
+      ].join("|");
+      const unitKey = [
+        item.audit.normalizedName,
+        item.audit.normalizedSupplier,
+        item.audit.normalizedCategory,
+      ].join("|");
+      if (!exactBuckets.has(exactKey)) exactBuckets.set(exactKey, []);
+      if (!unitBuckets.has(unitKey)) unitBuckets.set(unitKey, []);
+      exactBuckets.get(exactKey)!.push(item);
+      unitBuckets.get(unitKey)!.push(item);
+    }
+
+    const exactGroups = Array.from(exactBuckets.entries())
+      .filter(([, items]) => items.length > 1)
+      .map(([key, items]) => makeGroup("exact", key, items));
+
+    const unitVariationGroups = Array.from(unitBuckets.entries())
+      .filter(([, items]) => {
+        if (items.length <= 1) return false;
+        const unitCombos = new Set(items.map((item: any) => `${item.audit.normalizedBaseUnit}|${item.audit.normalizedPurchaseUnit}`));
+        return unitCombos.size > 1;
+      })
+      .map(([key, items]) => makeGroup("unit variation", key, items));
+
+    const possibleGroups: any[] = [];
+    const possibleSeen = new Set<string>();
+    const possibleBuckets = new Map<string, any[]>();
+    for (const item of enrichedItems) {
+      const key = `${item.audit.normalizedSupplier}|${item.audit.normalizedCategory}`;
+      if (!possibleBuckets.has(key)) possibleBuckets.set(key, []);
+      possibleBuckets.get(key)!.push(item);
+    }
+    for (const [bucketKey, items] of possibleBuckets.entries()) {
+      for (let i = 0; i < items.length; i++) {
+        const matches = [items[i]];
+        for (let j = i + 1; j < items.length; j++) {
+          const similarName = similarDuplicateAuditNames(items[i].audit.normalizedName, items[j].audit.normalizedName);
+          const similarCost = Math.abs(Number(items[i].audit.costPerBaseUnit ?? 0) - Number(items[j].audit.costPerBaseUnit ?? 0)) <= Math.max(0.01, Number(items[i].audit.costPerBaseUnit ?? 0) * 0.1);
+          if (similarName && similarCost) matches.push(items[j]);
+        }
+        if (matches.length > 1) {
+          const ids = matches.map((item: any) => String(item.id)).sort().join("|");
+          if (!possibleSeen.has(ids)) {
+            possibleSeen.add(ids);
+            possibleGroups.push(makeGroup("possible", `${bucketKey}|possible|${matches[0].audit.normalizedName}`, matches));
+          }
+        }
+      }
+    }
+
+    const groups = [...exactGroups, ...unitVariationGroups, ...possibleGroups];
+    const duplicateItemIds = new Set(groups.flatMap(group => group.items.map((item: any) => String(item.id))));
+    const summary = {
+      totalInventoryItems: inventoryData.length,
+      duplicateGroupsFound: groups.length,
+      exactDuplicateGroups: exactGroups.length,
+      unitVariationGroups: unitVariationGroups.length,
+      possibleDuplicateGroups: possibleGroups.length,
+      itemsInsideDuplicateGroups: duplicateItemIds.size,
+      itemsSafeToMergeLater: groups.filter(group => group.safeToMergeLater).reduce((sum, group) => sum + Math.max(0, group.itemCount - 1), 0),
+      itemsNeedingManualReview: groups.filter(group => !group.safeToMergeLater).reduce((sum, group) => sum + group.itemCount, 0),
+    };
+
+    return { groups, summary };
+  }, [inventoryData, movementAuditRows, ordersData, productionMovementsData, purchaseOptionsData, recipesData, suppliersData]);
+
+  useEffect(() => {
+    if (!isDuplicateAuditOpen || process.env.NODE_ENV !== "development") return;
+    console.table(duplicateAudit.groups.map((group: any) => ({
+      type: group.duplicateType,
+      groupKey: group.groupKey,
+      count: group.itemCount,
+      safetyStatus: group.safetyStatus,
+      recommendedMasterId: group.recommendedMasterId,
+      recommendedMasterReason: group.recommendedMasterReason,
+      itemIds: group.items.map((item: any) => item.id).join(", "),
+      itemNames: group.items.map((item: any) => item.name).join(" | "),
+    })));
+  }, [duplicateAudit, isDuplicateAuditOpen]);
+
+  const filteredDuplicateAuditGroups = useMemo(() => {
+    const query = normalizeDuplicateAuditText(duplicateAuditSearch);
+    return duplicateAudit.groups.filter((group: any) => {
+      const passesFilter =
+        duplicateAuditFilter === "all" ||
+        (duplicateAuditFilter === "exact" && group.duplicateType === "exact") ||
+        (duplicateAuditFilter === "unit" && group.duplicateType === "unit variation") ||
+        (duplicateAuditFilter === "possible" && group.duplicateType === "possible") ||
+        (duplicateAuditFilter === "recipe" && group.items.some((item: any) => item.audit.usage.recipeUsageCount > 0)) ||
+        (duplicateAuditFilter === "stock" && group.items.some((item: any) => Number(item.inStock ?? 0) > 0)) ||
+        (duplicateAuditFilter === "unit-setup" && group.items.some((item: any) => item.audit.unitSetupStatus !== "Unit Ready")) ||
+        (duplicateAuditFilter === "manual-review" && group.safetyStatus !== "likely safe later");
+      if (!passesFilter) return false;
+      if (!query) return true;
+      return group.groupKey.includes(query) ||
+      normalizeDuplicateAuditText(group.supplier).includes(query) ||
+      normalizeDuplicateAuditText(group.category).includes(query) ||
+      group.items.some((item: any) =>
+        normalizeDuplicateAuditText(item.name).includes(query) ||
+        normalizeDuplicateAuditText(item.audit.supplier).includes(query) ||
+        normalizeDuplicateAuditText(item.category).includes(query) ||
+        String(item.id).toLowerCase().includes(query) ||
+        String(item.itemId ?? "").toLowerCase().includes(query)
+      );
+    });
+  }, [duplicateAudit.groups, duplicateAuditFilter, duplicateAuditSearch]);
+
+  const exportDuplicateAuditCsv = () => {
+    const headers = [
+      "duplicate_type", "group_key", "group_reason", "safety_status", "recommended_master_id", "recommended_master_reason", "item_count", "item_id", "item_name",
+      "supplier", "category", "base_unit", "measurement_family", "purchase_unit_label",
+      "purchase_cost", "base_qty_per_purchase_unit", "cost_per_base_unit", "current_stock", "par_level",
+      "active", "unit_setup_status", "created_at", "updated_at", "recipe_usage_count", "finished_goods_recipe_usage_count",
+      "purchase_option_count", "movement_ledger_count", "production_usage_count", "po_usage_count",
+    ];
+    const rows = filteredDuplicateAuditGroups.flatMap((group: any) =>
+      group.items.map((item: any) => [
+        group.duplicateType,
+        group.groupKey,
+        group.groupReason,
+        group.safetyStatus,
+        group.recommendedMasterId,
+        group.recommendedMasterReason,
+        group.itemCount,
+        item.id,
+        item.name,
+        item.audit.supplier,
+        item.category,
+        item.baseUnit ?? item.unit,
+        item.audit.measurementFamily,
+        item.audit.purchaseUnitLabel,
+        item.audit.purchaseCost,
+        item.audit.baseQtyPerPurchaseUnit,
+        item.audit.costPerBaseUnit,
+        item.inStock,
+        item.parLevel,
+        item.audit.isActive,
+        item.audit.unitSetupStatus,
+        item.audit.createdAt,
+        item.audit.updatedAt,
+        item.audit.usage.recipeUsageCount,
+        item.audit.usage.finishedGoodsRecipeUsageCount,
+        item.audit.usage.purchaseOptionCount,
+        item.audit.usage.movementLedgerCount,
+        item.audit.usage.productionUsageCount,
+        item.audit.usage.poUsageCount,
+      ])
+    );
+    const csv = [headers, ...rows].map(row => row.map(duplicateAuditCsvEscape).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `inventory-duplicate-audit-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
   const filteredInventory = displayInventory.filter(item => {
     // Divide-by-zero guard: when parLevel = 0, stockRatio = NaN which makes
     // ALL status checks false, causing 'Healthy' to be assigned but the item
@@ -634,6 +1099,12 @@ export default function Inventory() {
     // ── New: Measurement family (auto-infer if not yet set) ──────────────────
     const family = item.measurementFamily ?? inferMeasurementFamily(item.baseUnit || item.unit);
     setEditMeasFamily(family);
+    // ── User-chosen base unit (reads baseUomNew first, falls back to family default) ──
+    setEditUserBaseUnit(
+      family
+        ? resolveStorageBaseUnit(family, item.baseUomNew || item.baseUnit)
+        : (item.baseUomNew || item.baseUnit || item.unit || '')
+    );
     // ── New: Structured packaging (map from legacy fields if present) ─────────
     setEditPurchUnitLabel(item.purchaseUom ?? "Case");
     // packQty = inner pack count (how many inner units per purchase unit)
@@ -657,6 +1128,7 @@ export default function Inventory() {
     setEditAllowedUoms(
       Array.isArray(item.allowedRecipeUoms) ? item.allowedRecipeUoms.join(", ") : ""
     );
+
     setOpenMenuId(null);
     setIsEditDrawerOpen(true);
     setAddingPurchOpt(false);
@@ -669,7 +1141,57 @@ export default function Inventory() {
       .finally(() => setIsLoadingPurchOpts(false));
   };
 
+  // ── Base Unit Change Handler (Edit drawer) ────────────────────────────────
+  // Called when the user selects a different base unit from the dropdown.
+  // If the item already has stock/cost data, shows a confirmation modal with
+  // a before/after conversion preview. Cross-family conversions are blocked.
+  const handleBaseUnitChange = (newUnit: string) => {
+    const oldUnit = editUserBaseUnit;
+    if (!oldUnit || oldUnit === newUnit) {
+      setEditUserBaseUnit(newUnit);
+      return;
+    }
+
+    // Check dimensional compatibility
+    const testConv = convertQuantity(1, oldUnit, newUnit);
+    if (!testConv.ok) {
+      alert(`Cannot convert "${oldUnit}" → "${newUnit}": incompatible measurement families.\n\nPlease choose a base unit within the same family.`);
+      return;
+    }
+
+    const factor       = testConv.qty!;  // 1 oldUnit expressed in newUnit
+    const oldStock     = Number(editItem?.inStock   ?? 0);
+    const oldPar       = Number(editItem?.parLevel  ?? 0);
+    const oldCostBase  = Number(editItem?.cost      ?? 0); // cost per OLD base unit
+
+    // Recompute pack conversion with new base unit
+    const ipc  = parseFloat(editInnerPackCount);
+    const iqty = parseFloat(editInnerQty);
+    const oldPackConv = (editMeasFamily && !isNaN(ipc) && !isNaN(iqty) && editInnerMeasUnit)
+      ? calcBaseQtyPerPurchaseUnit(editMeasFamily, ipc, iqty, editInnerMeasUnit, oldUnit)
+      : null;
+    const newPackConv = (editMeasFamily && !isNaN(ipc) && !isNaN(iqty) && editInnerMeasUnit)
+      ? calcBaseQtyPerPurchaseUnit(editMeasFamily, ipc, iqty, editInnerMeasUnit, newUnit)
+      : null;
+
+    const round6 = (n: number) => Math.round(n * 1_000_000) / 1_000_000;
+
+    setBaseUnitConvertModal({
+      oldUnit, newUnit,
+      oldStock,                        newStock:       round6(oldStock    * factor),
+      oldPar,                          newPar:         round6(oldPar      * factor),
+      oldCostPerBase: oldCostBase,     newCostPerBase: round6(oldCostBase > 0 ? oldCostBase / factor : 0),
+      oldPackConversion: oldPackConv,  newPackConversion: newPackConv,
+    });
+  };
+
+  // ── Base Unit Change Handler (Add drawer) ─────────────────────────────────
+  const handleNewBaseUnitChange = (newUnit: string) => {
+    setNewUserBaseUnit(newUnit);
+  };
+
   // ── Save Edit ─────────────────────────────────────────────────────────────
+
   const handleEditSave = async () => {
     if (!editItem) return;
     if (!editItem.name?.trim()) { alert("Item name is required."); return; }
@@ -681,12 +1203,16 @@ export default function Inventory() {
       // ── New: compute base qty from structured packaging ──────────────────────
       const ipc   = parseFloat(editInnerPackCount);
       const iqty  = parseFloat(editInnerQty);
+      // Pass editUserBaseUnit as the explicit base unit so calcBaseQtyPerPurchaseUnit
+      // uses L (not ml) when the user has selected L as the base unit.
       const baseQtyPerPurchUnit = (editMeasFamily && !isNaN(ipc) && !isNaN(iqty) && editInnerMeasUnit)
-        ? calcBaseQtyPerPurchaseUnit(editMeasFamily, ipc, iqty, editInnerMeasUnit)
+        ? calcBaseQtyPerPurchaseUnit(editMeasFamily, ipc, iqty, editInnerMeasUnit, editUserBaseUnit)
         : null;
 
-      // ── Locked base unit from family; fall back to legacy editBaseUnit ────────
-      const lockedBase = editMeasFamily ? deriveLockedBaseUnit(editMeasFamily) : (editBaseUnit || editItem.unit || "");
+      // ── Effective base unit: user-selected, then family default, then legacy ──
+      const lockedBase = editUserBaseUnit ||
+        (editMeasFamily ? deriveLockedBaseUnit(editMeasFamily) : '') ||
+        editBaseUnit || editItem.unit || '';
 
       // ── Cost computation ──────────────────────────────────────────────────────
       const parsedPurchaseCost = parseFloat(editCostInput || editPurchaseCost);
@@ -946,6 +1472,10 @@ export default function Inventory() {
       setAdjUnit(item.baseUnit || item.unit);
     }
     setAdjNotes("");
+    setStockCorrectionQty("");
+    setStockCorrectionUnit(item.baseUnit || item.unit);
+    setStockCorrectionReason("");
+    setStockCorrectionConfirm("");
     // parLevel can be null for legacy items — guard before calling toString()
     setNewParLevel(numToInput(item.parLevel));
     setParNotes("");
@@ -958,6 +1488,107 @@ export default function Inventory() {
         : ""
     );
     setIsDrawerOpen(true);
+  };
+
+  const getStockCorrectionUnitOptions = (item: any) => {
+    const baseUnit = item?.baseUnit || item?.unit || "base";
+    const options = [{ name: baseUnit, conversion: 1, isBase: true }];
+    const purchaseUnits = Array.isArray(item?.purchaseUnits) ? item.purchaseUnits : [];
+    for (const unit of purchaseUnits) {
+      const conversion = Number(unit?.conversion);
+      const name = String(unit?.name ?? "").trim();
+      if (!name || !Number.isFinite(conversion) || conversion <= 0) continue;
+      if (options.some(option => option.name === name)) continue;
+      options.push({ name, conversion, isBase: false });
+    }
+    return options;
+  };
+
+  const getStockCorrectionPreview = (item: any) => {
+    const qty = Number(stockCorrectionQty);
+    const unitOption = getStockCorrectionUnitOptions(item).find(option => option.name === stockCorrectionUnit)
+      ?? getStockCorrectionUnitOptions(item)[0];
+    const currentBaseQty = Number(item?.inStock ?? 0);
+    const targetBaseQty = Number.isFinite(qty) && qty >= 0 ? qty * Number(unitOption?.conversion ?? 1) : null;
+    const delta = targetBaseQty === null ? null : targetBaseQty - currentBaseQty;
+    const par = Number(item?.parLevel ?? 0);
+    const isHuge =
+      delta !== null &&
+      (Math.abs(delta) > 10000 || (par > 0 && Math.abs(delta) > par * 10));
+    return {
+      unitOption,
+      currentBaseQty,
+      targetBaseQty,
+      delta,
+      isHuge,
+    };
+  };
+
+  const applyStockCorrection = async () => {
+    if (!selectedItem) return;
+    const preview = getStockCorrectionPreview(selectedItem);
+    if (preview.targetBaseQty === null || !Number.isFinite(preview.targetBaseQty) || preview.targetBaseQty < 0) {
+      alert("Enter a valid correct stock quantity 0 or greater.");
+      return;
+    }
+    if (!stockCorrectionReason.trim()) {
+      alert("Reason / notes are required for stock correction.");
+      return;
+    }
+    if (preview.isHuge && stockCorrectionConfirm.trim() !== "CONFIRM") {
+      alert("Large correction detected. Type CONFIRM to apply this correction.");
+      return;
+    }
+
+    setIsApplyingStockCorrection(true);
+    try {
+      const baseUnit = selectedItem.baseUnit || selectedItem.unit;
+      const res = await setInventoryStockToTarget({
+        itemId: String(selectedItem.id),
+        targetBaseQty: preview.targetBaseQty,
+        reason: stockCorrectionReason.trim(),
+        locationId: selectedItem.locationId ?? resolveLocationId(user),
+        movementItemId: selectedItem.itemId ?? selectedItem.id,
+        unit: baseUnit,
+        unitCost: selectedItem.cost ?? null,
+      });
+      if (!res.success) throw new Error(res.error?.message ?? "Stock correction failed.");
+
+      const updatedItem = {
+        ...selectedItem,
+        inStock: preview.targetBaseQty,
+        updatedAt: Date.now(),
+      };
+      setSelectedItem(updatedItem);
+      setInventoryData(prev => prev.map((item: any) => item.id === selectedItem.id ? updatedItem : item));
+
+      const now = new Date();
+      const activityEntry = {
+        id: `stock-correction-${Date.now()}`,
+        date: now.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        time: now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+        type: 'Stock Correction',
+        qty: `${preview.delta && preview.delta > 0 ? '+' : ''}${preview.delta ?? 0} ${baseUnit}`,
+        baseTransacted: preview.delta ?? 0,
+        previousStock: preview.currentBaseQty,
+        targetStock: preview.targetBaseQty,
+        notes: `From: ${preview.currentBaseQty} ${baseUnit} | To: ${preview.targetBaseQty} ${baseUnit} | Adjustment: ${preview.delta ?? 0} ${baseUnit} | Reason: ${stockCorrectionReason.trim()}`,
+        user: user?.email ?? 'HQ',
+      };
+      const existing = activityData[selectedItem.id] || [];
+      const newActivityData = { ...activityData, [selectedItem.id]: [activityEntry, ...existing] };
+      setActivityData(newActivityData);
+      await saveInventoryActivity(newActivityData);
+
+      setStockCorrectionQty("");
+      setStockCorrectionReason("");
+      setStockCorrectionConfirm("");
+      alert("Stock correction applied.");
+    } catch (err: any) {
+      alert(`Stock correction failed: ${err?.message ?? String(err)}`);
+    } finally {
+      setIsApplyingStockCorrection(false);
+    }
   };
 
   const saveAdjustment = async () => {
@@ -1096,10 +1727,11 @@ export default function Inventory() {
     if (!corrReason) { alert('Reason is required.'); return; }
     const { log, logIdx } = correctionModal;
 
-    const origNumStr = String(log.qty ?? '0').replace(/[^0-9.\-]/g, '');
-    const origNum = parseFloat(origNumStr) || 0;
-    const isAdd = log.type === 'Add';
-    const signedOriginal = isAdd ? Math.abs(origNum) : -Math.abs(origNum);
+    if (!Number.isFinite(Number(log.baseTransacted))) {
+      alert("This old movement cannot be safely voided. Use Set Stock to Correct Count instead.");
+      return;
+    }
+    const signedOriginal = Number(log.baseTransacted);
     const reversal = -signedOriginal;
 
     setIsCorrSaving(true);
@@ -1296,8 +1928,9 @@ export default function Inventory() {
     // ── Structured packaging → base qty ───────────────────────────────────────
     const ipc  = parseFloat(newInnerPackCount);
     const iqty = parseFloat(newInnerQty);
+    // Pass newUserBaseUnit so the user's chosen base (e.g. 'l') is used, not the family default ('ml')
     const baseQtyPerPurchUnit = (newMeasFamily && !isNaN(ipc) && !isNaN(iqty) && newInnerMeasUnit)
-      ? calcBaseQtyPerPurchaseUnit(newMeasFamily, ipc, iqty, newInnerMeasUnit)
+      ? calcBaseQtyPerPurchaseUnit(newMeasFamily, ipc, iqty, newInnerMeasUnit, newUserBaseUnit)
       : null;
 
     // ── Validate unit compatibility ────────────────────────────────────────────
@@ -1306,8 +1939,8 @@ export default function Inventory() {
       return;
     }
 
-    // ── Locked base unit ──────────────────────────────────────────────────────
-    const lockedBase = deriveLockedBaseUnit(newMeasFamily);
+    // ── Effective base unit: user-selected, then family default ───────────────
+    const lockedBase = resolveStorageBaseUnit(newMeasFamily, newUserBaseUnit);
 
     // ── Cost computation ──────────────────────────────────────────────────────
     const parsedPurchaseCost = parseFloat(newCostInput || newItem.cost as string);
@@ -1368,6 +2001,7 @@ export default function Inventory() {
     setNewMeasFamily(""); setNewPurchUnitLabel("Case");
     setNewInnerPackCount(""); setNewInnerUnitLabel("");
     setNewInnerQty(""); setNewInnerMeasUnit("");
+    setNewUserBaseUnit("");
     setNewSupplier(""); setNewCostInput("");
     setNewInStock(""); setAddItemParLevel(""); setNewMinOnHand("");
     setNewStockCountUnit("base");
@@ -2199,8 +2833,14 @@ export default function Inventory() {
     ? parseFloat(corrNewQty) - _corrOrigNum
     : null;
   const _voidReversal = correctionModal
-    ? (correctionModal.log.type === 'Add' ? -Math.abs(_corrOrigNum) : Math.abs(_corrOrigNum))
+    ? (Number.isFinite(Number(correctionModal.log.baseTransacted)) ? -Number(correctionModal.log.baseTransacted) : 0)
     : 0;
+  const _voidCanSafelyReverse = correctionModal?.mode === 'void'
+    ? Number.isFinite(Number(correctionModal.log.baseTransacted))
+    : true;
+  const _voidExpectedStock = selectedItem && correctionModal?.mode === 'void'
+    ? Number(selectedItem.inStock ?? 0) + _voidReversal
+    : null;
 
   return (
 
@@ -2257,6 +2897,14 @@ export default function Inventory() {
           >
             <History className="h-3.5 w-3.5" />
             <span className="hidden xs:inline sm:inline">History</span>
+          </button>
+          <button
+            onClick={() => setIsDuplicateAuditOpen(true)}
+            className="flex items-center justify-center gap-1.5 rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs font-medium text-amber-200 shadow-sm transition-colors hover:bg-amber-500/15 sm:text-sm"
+          >
+            <GitMerge className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Duplicate Audit</span>
+            <span className="sm:hidden">Audit</span>
           </button>
           <button
             onClick={() => {
@@ -2750,7 +3398,7 @@ export default function Inventory() {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+	            <div className="grid grid-cols-2 gap-4">
               <div className="bg-neutral-50 border border-neutral-200 rounded-xl p-4">
                 <p className="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Current Stock</p>
                 <div className="mt-1 flex items-end gap-2">
@@ -2763,12 +3411,102 @@ export default function Inventory() {
                 <div className="mt-1">
                   <span className="text-3xl font-bold text-neutral-900">${(selectedItem.inStock * selectedItem.cost).toFixed(2)}</span>
                 </div>
-              </div>
-            </div>
+	              </div>
+	            </div>
 
-            <div>
-              <h3 className="text-sm font-bold text-neutral-900 mb-3 uppercase tracking-wider flex items-center justify-between border-b border-neutral-100 pb-2">
-                <span className="flex items-center gap-2"><ArrowUp className="h-4 w-4 text-brand-600" /> Stock Adjustment</span>
+            {(() => {
+              const preview = getStockCorrectionPreview(selectedItem);
+              const baseUnit = selectedItem.baseUnit || selectedItem.unit;
+              const unitOptions = getStockCorrectionUnitOptions(selectedItem);
+              return (
+                <div>
+                  <h3 className="text-sm font-bold text-neutral-900 mb-3 uppercase tracking-wider flex items-center justify-between border-b border-neutral-100 pb-2">
+                    <span className="flex items-center gap-2"><Save className="h-4 w-4 text-brand-600" /> Set Stock to Correct Count</span>
+                    <span className="text-[10px] text-neutral-400 font-medium uppercase">Exact count correction</span>
+                  </h3>
+                  <div className="bg-white border border-neutral-200 rounded-lg p-4 space-y-4 shadow-sm">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-semibold text-neutral-900">Correct Stock Quantity</label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          value={stockCorrectionQty}
+                          onChange={(e) => {
+                            setStockCorrectionQty(e.target.value);
+                            setStockCorrectionConfirm("");
+                          }}
+                          className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
+                          placeholder="e.g. 0"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-semibold text-neutral-900">Unit</label>
+                        <select
+                          value={stockCorrectionUnit || baseUnit}
+                          onChange={(e) => {
+                            setStockCorrectionUnit(e.target.value);
+                            setStockCorrectionConfirm("");
+                          }}
+                          className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
+                        >
+                          {unitOptions.map(option => (
+                            <option key={option.name} value={option.name}>
+                              {option.isBase ? option.name : `${option.name} (x${option.conversion} ${baseUnit})`}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-semibold text-neutral-900">Reason / Notes <span className="text-red-500">*</span></label>
+                      <input
+                        type="text"
+                        value={stockCorrectionReason}
+                        onChange={(e) => setStockCorrectionReason(e.target.value)}
+                        className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
+                        placeholder="Required: why this count is being corrected"
+                      />
+                    </div>
+                    <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-3 text-xs text-neutral-700 space-y-1">
+                      <div>Current stock: <strong>{preview.currentBaseQty} {baseUnit}</strong></div>
+                      <div>Correct stock: <strong>{preview.targetBaseQty ?? "—"} {baseUnit}</strong></div>
+                      <div>Adjustment to post: <strong className={(preview.delta ?? 0) < 0 ? "text-red-700" : "text-green-700"}>{preview.delta ?? "—"} {baseUnit}</strong></div>
+                      <div>Final stock after correction: <strong>{preview.targetBaseQty ?? "—"} {baseUnit}</strong></div>
+                    </div>
+                    {preview.isHuge && (
+                      <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 space-y-2">
+                        <div className="font-bold">Large correction detected</div>
+                        <p>Type CONFIRM to apply this exact stock correction.</p>
+                        <input
+                          value={stockCorrectionConfirm}
+                          onChange={(e) => setStockCorrectionConfirm(e.target.value)}
+                          className="w-full py-2 px-3 border border-amber-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-amber-400 bg-white"
+                          placeholder="CONFIRM"
+                        />
+                      </div>
+                    )}
+                    <button
+                      disabled={
+                        isApplyingStockCorrection ||
+                        preview.targetBaseQty === null ||
+                        !stockCorrectionReason.trim() ||
+                        (preview.isHuge && stockCorrectionConfirm.trim() !== "CONFIRM")
+                      }
+                      onClick={applyStockCorrection}
+                      className="w-full py-2 bg-brand-600 text-white rounded text-sm font-semibold hover:bg-brand-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    >
+                      <Save className="h-4 w-4" /> {isApplyingStockCorrection ? "Applying..." : "Apply Stock Correction"}
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
+
+	            <div>
+	              <h3 className="text-sm font-bold text-neutral-900 mb-3 uppercase tracking-wider flex items-center justify-between border-b border-neutral-100 pb-2">
+	                <span className="flex items-center gap-2"><ArrowUp className="h-4 w-4 text-brand-600" /> Stock Adjustment</span>
                 <span className="text-[10px] text-neutral-400 font-medium uppercase">{userRole} access granted</span>
               </h3>
               <div className="bg-white border border-neutral-200 rounded-lg p-4 space-y-4 shadow-sm">
@@ -2878,7 +3616,7 @@ export default function Inventory() {
                     <div className="flex gap-4 items-end">
                       <div className="space-y-1.5 flex-1">
                         <label className="text-xs font-semibold text-neutral-900">New Par Benchmark ({selectedItem.unit})</label>
-                        <input type="number" min="0" step="0.1" value={addItemParLevel} onChange={(e) => setAddItemParLevel(e.target.value)} className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white" placeholder={selectedItem.parLevel.toString()} />
+	                        <input type="number" min="0" step="0.1" value={newParLevel} onChange={(e) => setNewParLevel(e.target.value)} className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white" placeholder={selectedItem.parLevel.toString()} />
                       </div>
                     </div>
                     <div className="space-y-1.5">
@@ -2901,8 +3639,10 @@ export default function Inventory() {
                 {(!activityData[selectedItem.id] || activityData[selectedItem.id].length === 0) ? (
                   <p className="text-xs text-neutral-500 italic">No historical adjustments logged for this item yet.</p>
                 ) : (
-                  activityData[selectedItem.id].map((log: any, idx: number) => (
-                    <div key={log.id ?? idx} className={`flex items-start justify-between rounded-lg p-3 border ${log.voided ? 'bg-red-50 border-red-100 opacity-60' : log.corrected ? 'bg-amber-50 border-amber-100 opacity-75' : 'bg-neutral-50 border-neutral-100'}`}>
+	                  activityData[selectedItem.id].map((log: any, idx: number) => {
+                      const canSafelyVoid = Number.isFinite(Number(log.baseTransacted)) && !log.corrected;
+                      return (
+	                    <div key={log.id ?? idx} className={`flex items-start justify-between rounded-lg p-3 border ${log.voided ? 'bg-red-50 border-red-100 opacity-60' : log.corrected ? 'bg-amber-50 border-amber-100 opacity-75' : 'bg-neutral-50 border-neutral-100'}`}>
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${
@@ -2953,24 +3693,27 @@ export default function Inventory() {
                                 title="Correct this entry"
                               >✎ Correct</button>
                             )}
-                            {!log.voided && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setCorrectionModal({ log, logIdx: idx, mode: 'void' });
-                                  setCorrReason('');
-                                  setCorrNewQty('');
-                                }}
-                                className="px-2 py-0.5 text-[10px] font-semibold rounded border border-red-300 text-red-600 hover:bg-red-50 transition-colors"
-                                title="Void / reverse this entry"
-                              >⊘ Void</button>
-                            )}
+	                            {!log.voided && (
+	                              <button
+	                                type="button"
+	                                onClick={() => {
+                                      if (!canSafelyVoid) return;
+	                                  setCorrectionModal({ log, logIdx: idx, mode: 'void' });
+	                                  setCorrReason('');
+	                                  setCorrNewQty('');
+	                                }}
+	                                disabled={!canSafelyVoid}
+	                                className="px-2 py-0.5 text-[10px] font-semibold rounded border border-red-300 text-red-600 hover:bg-red-50 transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+	                                title={canSafelyVoid ? "Void / reverse this exact base-unit entry" : "This old movement cannot be safely voided. Use Set Stock to Correct Count instead."}
+	                              >⊘ Void</button>
+	                            )}
                           </div>
                         )}
                       </div>
-                    </div>
-                  ))
-                )}
+	                    </div>
+                      );
+                    })
+	                )}
               </div>
             </div>
           </div>
@@ -3053,9 +3796,17 @@ export default function Inventory() {
 
               {correctionModal.mode === 'void' && (
                 <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3">
-                  <p className="text-xs text-red-700 font-semibold">
-                    Will create a <strong>{_voidReversal > 0 ? `+${_voidReversal}` : _voidReversal}</strong> reversal movement and mark original as Voided.
-                  </p>
+                  {_voidCanSafelyReverse ? (
+                    <div className="space-y-1 text-xs text-red-700">
+                      <p>Original movement: <strong>{Number(correctionModal.log.baseTransacted) > 0 ? '+' : ''}{Number(correctionModal.log.baseTransacted)} {selectedItem?.baseUnit || selectedItem?.unit}</strong></p>
+                      <p>Reversal movement: <strong>{_voidReversal > 0 ? `+${_voidReversal}` : _voidReversal} {selectedItem?.baseUnit || selectedItem?.unit}</strong></p>
+                      <p>Expected stock after void: <strong>{_voidExpectedStock} {selectedItem?.baseUnit || selectedItem?.unit}</strong></p>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-red-700 font-semibold">
+                      This old movement cannot be safely voided because it lacks a reliable base-unit quantity. Use Set Stock to Correct Count instead.
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -3074,7 +3825,7 @@ export default function Inventory() {
               >Cancel</button>
               <button
                 type="button"
-                disabled={isCorrSaving || !corrReason}
+                disabled={isCorrSaving || !corrReason || (correctionModal.mode === 'void' && !_voidCanSafelyReverse)}
                 onClick={correctionModal.mode === 'void' ? commitVoid : commitCorrection}
                 className={`flex-1 px-4 py-2 text-sm font-bold rounded-lg text-white transition-colors flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed ${
                   correctionModal.mode === 'void' ? 'bg-red-600 hover:bg-red-700' : 'bg-violet-700 hover:bg-violet-800'
@@ -3161,21 +3912,21 @@ export default function Inventory() {
 
             {/* ── Measurement Family ──────────────────────────────────────── */}
             <div className="space-y-2 border border-neutral-200 rounded-lg p-3 bg-neutral-50">
-              <div className="flex items-center justify-between">
-                <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Measurement Family</label>
-                {editMeasFamily && (
-                  <div className="flex items-center gap-1.5 bg-brand-50 border border-brand-200 rounded-md px-2 py-1">
-                    <span className="text-[10px] text-neutral-500 font-medium">Locked Base Unit:</span>
-                    <span className="text-xs font-bold text-brand-700">{deriveLockedBaseUnit(editMeasFamily)}</span>
-                  </div>
-                )}
-              </div>
+              <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Measurement Family</label>
               <div className="flex flex-wrap gap-2">
                 {(['weight', 'volume', 'count', 'labour', 'preparation', 'finished_good'] as const).map(fam => (
                   <button
                     key={fam}
                     type="button"
-                    onClick={() => { setEditMeasFamily(fam); setEditInnerMeasUnit(''); }}
+                    onClick={() => {
+                      setEditMeasFamily(fam);
+                      setEditInnerMeasUnit('');
+                      // Suggest the family default base unit, but keep user's choice if still compatible
+                      const allowed = getAllowedBaseUnits(fam);
+                      if (!allowed.includes(editUserBaseUnit)) {
+                        setEditUserBaseUnit(allowed[0] || '');
+                      }
+                    }}
                     className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-all ${
                       editMeasFamily === fam
                         ? 'bg-brand-600 text-white border-brand-600 shadow-sm'
@@ -3188,6 +3939,28 @@ export default function Inventory() {
               </div>
               {!editMeasFamily && (
                 <p className="text-[11px] text-amber-600">Auto-inferred from base unit. Select to override.</p>
+              )}
+              {/* ── Base Unit selector (replaces the old locked badge) ──────── */}
+              {editMeasFamily && (
+                <div className="pt-1 space-y-1">
+                  <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">
+                    Base Unit <span className="text-neutral-400 font-normal normal-case">(stock, cost, and recipe calculations stored in this unit)</span>
+                  </label>
+                  <div className="flex gap-2 items-center">
+                    <select
+                      value={editUserBaseUnit}
+                      onChange={e => handleBaseUnitChange(e.target.value)}
+                      className="flex-1 p-2 border border-brand-300 rounded text-sm font-semibold focus:outline-none focus:ring-1 focus:ring-brand-500 bg-brand-50 text-brand-800"
+                    >
+                      {getAllowedBaseUnits(editMeasFamily).map(u => (
+                        <option key={u} value={u}>{u}</option>
+                      ))}
+                    </select>
+                    <span className="text-[10px] text-neutral-500 leading-tight max-w-[120px]">
+                      Changing unit will convert existing stock, par &amp; cost.
+                    </span>
+                  </div>
+                </div>
               )}
             </div>
 
@@ -3257,8 +4030,8 @@ export default function Inventory() {
                 const ipc = parseFloat(editInnerPackCount);
                 const iqty = parseFloat(editInnerQty);
                 if (!editMeasFamily || isNaN(ipc) || isNaN(iqty) || !editInnerMeasUnit) return null;
-                const baseQty = calcBaseQtyPerPurchaseUnit(editMeasFamily, ipc, iqty, editInnerMeasUnit);
-                const lockedBase = deriveLockedBaseUnit(editMeasFamily);
+                const effectiveBase = editUserBaseUnit || deriveLockedBaseUnit(editMeasFamily);
+                const baseQty = calcBaseQtyPerPurchaseUnit(editMeasFamily, ipc, iqty, editInnerMeasUnit, effectiveBase);
                 const allowed = getFamilyAllowedInnerUnits(editMeasFamily);
                 if (baseQty === null || !allowed.includes(editInnerMeasUnit)) return null;
                 const innerLabel = editInnerUnitLabel || editInnerMeasUnit;
@@ -3268,13 +4041,13 @@ export default function Inventory() {
                     <p className="text-[11px] font-bold text-brand-800 tracking-wide uppercase">Auto Calculation</p>
                     <p className="text-[13px] font-semibold text-brand-900">
                       1 {editPurchUnitLabel} = {ipc} {innerLabel}{ipc !== 1 ? 's' : ''} × {iqty} {editInnerMeasUnit}
-                      {editInnerMeasUnit !== lockedBase ? (
-                        <span> = {totalInner} {editInnerMeasUnit} = <strong>{baseQty.toFixed(2)} {lockedBase}</strong></span>
+                      {editInnerMeasUnit !== effectiveBase ? (
+                        <span> = {totalInner} {editInnerMeasUnit} = <strong>{baseQty.toFixed(2)} {effectiveBase}</strong></span>
                       ) : (
-                        <span> = <strong>{baseQty.toFixed(2)} {lockedBase}</strong></span>
+                        <span> = <strong>{baseQty.toFixed(2)} {effectiveBase}</strong></span>
                       )}
                     </p>
-                    <p className="text-[10px] text-brand-600">Calculated Base Qty per Purchase Unit: <strong>{baseQty.toFixed(4)} {lockedBase}</strong></p>
+                    <p className="text-[10px] text-brand-600">Calculated Base Qty per Purchase Unit: <strong>{baseQty.toFixed(4)} {effectiveBase}</strong></p>
                   </div>
                 );
               })()}
@@ -3293,10 +4066,10 @@ export default function Inventory() {
                       const iqty = parseFloat(editInnerQty);
                       const cost = parseFloat(editCostInput);
                       if (!editMeasFamily || isNaN(ipc) || isNaN(iqty) || !editInnerMeasUnit || isNaN(cost) || cost <= 0) return '—';
-                      const baseQty = calcBaseQtyPerPurchaseUnit(editMeasFamily, ipc, iqty, editInnerMeasUnit);
+                      const effectiveBase = editUserBaseUnit || deriveLockedBaseUnit(editMeasFamily);
+                      const baseQty = calcBaseQtyPerPurchaseUnit(editMeasFamily, ipc, iqty, editInnerMeasUnit, effectiveBase);
                       if (!baseQty || baseQty <= 0) return '—';
-                      const lockedBase = deriveLockedBaseUnit(editMeasFamily);
-                      return `$${(cost / baseQty).toFixed(5)} / ${lockedBase}`;
+                      return `$${(cost / baseQty).toFixed(5)} / ${effectiveBase}`;
                     })()}
                   </div>
                 </div>
@@ -3753,21 +4526,21 @@ export default function Inventory() {
 
           {/* ── Section 2: Measurement Family ─────────────────────────────────── */}
           <div className="space-y-2 border border-neutral-200 rounded-lg p-3 bg-neutral-50">
-            <div className="flex items-center justify-between">
-              <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Measurement Family <span className="text-red-500">*</span></label>
-              {newMeasFamily && (
-                <div className="flex items-center gap-1.5 bg-brand-50 border border-brand-200 rounded-md px-2 py-1">
-                  <span className="text-[10px] text-neutral-500 font-medium">Locked Base Unit:</span>
-                  <span className="text-xs font-bold text-brand-700">{deriveLockedBaseUnit(newMeasFamily)}</span>
-                </div>
-              )}
-            </div>
+            <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Measurement Family <span className="text-red-500">*</span></label>
             <div className="flex flex-wrap gap-2">
               {(['weight', 'volume', 'count', 'labour', 'preparation', 'finished_good'] as const).map(fam => (
                 <button
                   key={fam}
                   type="button"
-                  onClick={() => { setNewMeasFamily(fam); setNewInnerMeasUnit(''); }}
+                  onClick={() => {
+                    setNewMeasFamily(fam);
+                    setNewInnerMeasUnit('');
+                    // Auto-set base unit to the family default when family changes
+                    const allowed = getAllowedBaseUnits(fam);
+                    if (!newUserBaseUnit || !allowed.includes(newUserBaseUnit)) {
+                      setNewUserBaseUnit(allowed[0] || '');
+                    }
+                  }}
                   className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-all ${
                     newMeasFamily === fam
                       ? 'bg-brand-600 text-white border-brand-600 shadow-sm'
@@ -3779,7 +4552,24 @@ export default function Inventory() {
               ))}
             </div>
             {!newMeasFamily && (
-              <p className="text-[11px] text-amber-600 font-medium">Select a family to lock the base unit and enable unit-compatible packaging.</p>
+              <p className="text-[11px] text-amber-600 font-medium">Select a family to enable base unit selection and unit-compatible packaging.</p>
+            )}
+            {/* ── Base Unit selector ─────────────────────────────────────────── */}
+            {newMeasFamily && (
+              <div className="pt-1 space-y-1">
+                <label className="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider">
+                  Base Unit <span className="text-neutral-400 font-normal normal-case">(stock, cost, and recipe calculations stored in this unit)</span>
+                </label>
+                <select
+                  value={newUserBaseUnit || getAllowedBaseUnits(newMeasFamily)[0]}
+                  onChange={e => handleNewBaseUnitChange(e.target.value)}
+                  className="w-full p-2 border border-brand-300 rounded text-sm font-semibold focus:outline-none focus:ring-1 focus:ring-brand-500 bg-brand-50 text-brand-800"
+                >
+                  {getAllowedBaseUnits(newMeasFamily).map(u => (
+                    <option key={u} value={u}>{u}</option>
+                  ))}
+                </select>
+              </div>
             )}
           </div>
 
@@ -3853,8 +4643,8 @@ export default function Inventory() {
               const ipc = parseFloat(newInnerPackCount);
               const iqty = parseFloat(newInnerQty);
               if (!newMeasFamily || isNaN(ipc) || isNaN(iqty) || !newInnerMeasUnit) return null;
-              const baseQty = calcBaseQtyPerPurchaseUnit(newMeasFamily, ipc, iqty, newInnerMeasUnit);
-              const lockedBase = deriveLockedBaseUnit(newMeasFamily);
+              const effectiveBase = newUserBaseUnit || deriveLockedBaseUnit(newMeasFamily);
+              const baseQty = calcBaseQtyPerPurchaseUnit(newMeasFamily, ipc, iqty, newInnerMeasUnit, effectiveBase);
               const allowed = getFamilyAllowedInnerUnits(newMeasFamily);
               if (baseQty === null || !allowed.includes(newInnerMeasUnit)) return null;
               const innerLabel = newInnerUnitLabel || newInnerMeasUnit;
@@ -3864,13 +4654,13 @@ export default function Inventory() {
                   <p className="text-[11px] font-bold text-brand-800 tracking-wide uppercase">Auto Calculation</p>
                   <p className="text-[13px] font-semibold text-brand-900">
                     1 {newPurchUnitLabel} = {ipc} {innerLabel}{ipc !== 1 ? 's' : ''} × {iqty} {newInnerMeasUnit}
-                    {newInnerMeasUnit !== lockedBase ? (
-                      <span> = {totalInner} {newInnerMeasUnit} = <strong>{baseQty.toFixed(2)} {lockedBase}</strong></span>
+                    {newInnerMeasUnit !== effectiveBase ? (
+                      <span> = {totalInner} {newInnerMeasUnit} = <strong>{baseQty.toFixed(2)} {effectiveBase}</strong></span>
                     ) : (
-                      <span> = <strong>{baseQty.toFixed(2)} {lockedBase}</strong></span>
+                      <span> = <strong>{baseQty.toFixed(2)} {effectiveBase}</strong></span>
                     )}
                   </p>
-                  <p className="text-[10px] text-brand-600">Calculated Base Qty per Purchase Unit: <strong>{baseQty.toFixed(4)} {lockedBase}</strong></p>
+                  <p className="text-[10px] text-brand-600">Calculated Base Qty per Purchase Unit: <strong>{baseQty.toFixed(4)} {effectiveBase}</strong></p>
                 </div>
               );
             })()}
@@ -3899,10 +4689,10 @@ export default function Inventory() {
                     const iqty = parseFloat(newInnerQty);
                     const cost = parseFloat(newCostInput);
                     if (!newMeasFamily || isNaN(ipc) || isNaN(iqty) || !newInnerMeasUnit || isNaN(cost) || cost <= 0) return '—';
-                    const baseQty = calcBaseQtyPerPurchaseUnit(newMeasFamily, ipc, iqty, newInnerMeasUnit);
+                    const effectiveBase = newUserBaseUnit || deriveLockedBaseUnit(newMeasFamily);
+                    const baseQty = calcBaseQtyPerPurchaseUnit(newMeasFamily, ipc, iqty, newInnerMeasUnit, effectiveBase);
                     if (!baseQty || baseQty <= 0) return '—';
-                    const lockedBase = deriveLockedBaseUnit(newMeasFamily);
-                    return `$${(cost / baseQty).toFixed(5)} / ${lockedBase}`;
+                    return `$${(cost / baseQty).toFixed(5)} / ${effectiveBase}`;
                   })()}
                 </div>
               </div>
@@ -3928,7 +4718,7 @@ export default function Inventory() {
                 {['base', 'purchase'].map(u => (
                   <button key={u} type="button" onClick={() => setNewStockCountUnit(u)}
                     className={`px-3 py-1 text-[11px] font-semibold transition-colors ${newStockCountUnit === u ? 'bg-brand-600 text-white' : 'bg-white text-neutral-600 hover:bg-neutral-50'}`}>
-                    {u === 'base' ? `Base (${newMeasFamily ? deriveLockedBaseUnit(newMeasFamily) : '—'})` : `Purchase (${newPurchUnitLabel || 'Unit'})`}
+                    {u === 'base' ? `Base (${newMeasFamily ? (newUserBaseUnit || deriveLockedBaseUnit(newMeasFamily)) : '—'})` : `Purchase (${newPurchUnitLabel || 'Unit'})`}
                   </button>
                 ))}
               </div>
@@ -3939,7 +4729,100 @@ export default function Inventory() {
       </Drawer>
 
 
+      {/* ── Base Unit Conversion Confirmation Modal ──────────────────────────── */}
+      {baseUnitConvertModal && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="bg-white rounded-xl shadow-2xl border border-neutral-200 w-full max-w-md mx-4 overflow-hidden">
+            {/* Header */}
+            <div className="px-5 py-4 border-b border-neutral-100 flex items-start gap-3">
+              <div className="flex-shrink-0 w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center">
+                <AlertTriangle className="h-4 w-4 text-amber-600" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-neutral-900">Change Base Unit?</h3>
+                <p className="text-xs text-neutral-500 mt-0.5">
+                  Switching from <strong>{baseUnitConvertModal.oldUnit}</strong> to <strong>{baseUnitConvertModal.newUnit}</strong> will convert stock, par level, and cost per base unit.
+                  Purchase case price is never changed.
+                </p>
+              </div>
+            </div>
+            {/* Conversion table */}
+            <div className="px-5 py-4">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-neutral-400 uppercase tracking-wider text-[10px]">
+                    <th className="text-left py-1 font-semibold">Field</th>
+                    <th className="text-right py-1 font-semibold text-red-500">Before ({baseUnitConvertModal.oldUnit})</th>
+                    <th className="text-right py-1 font-semibold text-emerald-600">After ({baseUnitConvertModal.newUnit})</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-neutral-100">
+                  <tr>
+                    <td className="py-1.5 text-neutral-600 font-medium">Stock</td>
+                    <td className="py-1.5 text-right tabular-nums text-neutral-500">{baseUnitConvertModal.oldStock} {baseUnitConvertModal.oldUnit}</td>
+                    <td className="py-1.5 text-right tabular-nums font-semibold text-emerald-700">{baseUnitConvertModal.newStock} {baseUnitConvertModal.newUnit}</td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 text-neutral-600 font-medium">Par Level</td>
+                    <td className="py-1.5 text-right tabular-nums text-neutral-500">{baseUnitConvertModal.oldPar} {baseUnitConvertModal.oldUnit}</td>
+                    <td className="py-1.5 text-right tabular-nums font-semibold text-emerald-700">{baseUnitConvertModal.newPar} {baseUnitConvertModal.newUnit}</td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 text-neutral-600 font-medium">Cost / Base Unit</td>
+                    <td className="py-1.5 text-right tabular-nums text-neutral-500">${baseUnitConvertModal.oldCostPerBase.toFixed(6)}/{baseUnitConvertModal.oldUnit}</td>
+                    <td className="py-1.5 text-right tabular-nums font-semibold text-emerald-700">${baseUnitConvertModal.newCostPerBase.toFixed(6)}/{baseUnitConvertModal.newUnit}</td>
+                  </tr>
+                  {(baseUnitConvertModal.oldPackConversion != null || baseUnitConvertModal.newPackConversion != null) && (
+                    <tr>
+                      <td className="py-1.5 text-neutral-600 font-medium">Pack Conversion</td>
+                      <td className="py-1.5 text-right tabular-nums text-neutral-500">
+                        {baseUnitConvertModal.oldPackConversion != null ? `${baseUnitConvertModal.oldPackConversion.toFixed(4)} ${baseUnitConvertModal.oldUnit}/pack` : '—'}
+                      </td>
+                      <td className="py-1.5 text-right tabular-nums font-semibold text-emerald-700">
+                        {baseUnitConvertModal.newPackConversion != null ? `${baseUnitConvertModal.newPackConversion.toFixed(4)} ${baseUnitConvertModal.newUnit}/pack` : '—'}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+              <p className="text-[10px] text-neutral-400 mt-3 italic">
+                ⚠ Purchase case cost is not changed — only the per-base-unit cost is recalculated.
+                If pack conversions look wrong, manually re-enter the Inner Size after saving.
+              </p>
+            </div>
+            {/* Actions */}
+            <div className="px-5 py-3 border-t border-neutral-100 flex gap-2 justify-end">
+              <button
+                type="button"
+                onClick={() => setBaseUnitConvertModal(null)}
+                className="px-4 py-2 text-sm font-medium bg-neutral-100 text-neutral-700 rounded-lg hover:bg-neutral-200 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const modal = baseUnitConvertModal;
+                  setEditItem((prev: any) => ({
+                    ...prev,
+                    inStock:  modal.newStock,
+                    parLevel: modal.newPar,
+                    cost:     modal.newCostPerBase,
+                  }));
+                  setEditUserBaseUnit(modal.newUnit);
+                  setBaseUnitConvertModal(null);
+                }}
+                className="px-4 py-2 text-sm font-bold bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors shadow-sm"
+              >
+                Confirm Conversion
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Import Drawer */}
+
       <Drawer
         isOpen={isImportDrawerOpen}
         onClose={() => setIsImportDrawerOpen(false)}
@@ -4021,6 +4904,246 @@ export default function Inventory() {
                   </TableBody>
                 </Table>
               </div>
+            </div>
+          )}
+        </div>
+      </Drawer>
+
+      {/* Duplicate Audit Drawer */}
+      <Drawer
+        isOpen={isDuplicateAuditOpen}
+        onClose={() => setIsDuplicateAuditOpen(false)}
+        title="Duplicate Inventory Audit"
+        description="Read-only duplicate analysis across inventory_items. No merge, archive, delete, or database cleanup actions are performed here."
+        footer={
+          <button onClick={() => setIsDuplicateAuditOpen(false)} className="w-full py-2 bg-neutral-100 text-neutral-800 rounded-lg font-medium text-sm hover:bg-neutral-200 transition-colors">
+            Close Audit
+          </button>
+        }
+      >
+        <div className="space-y-5">
+          <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+            <div className="flex gap-3">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+              <div>
+                <p className="text-sm font-bold text-amber-900">Audit only</p>
+                <p className="mt-1 text-xs leading-relaxed text-amber-800">
+                  This report explains why repeated names can appear in recipe or inventory search. It recommends a likely master row for later review, but it does not write to Supabase.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+            {[
+              ["Total inventory items", duplicateAudit.summary.totalInventoryItems],
+              ["Duplicate groups found", duplicateAudit.summary.duplicateGroupsFound],
+              ["Exact duplicate groups", duplicateAudit.summary.exactDuplicateGroups],
+              ["Unit variation groups", duplicateAudit.summary.unitVariationGroups],
+              ["Possible duplicate groups", duplicateAudit.summary.possibleDuplicateGroups],
+              ["Items inside groups", duplicateAudit.summary.itemsInsideDuplicateGroups],
+              ["Safe to merge later", duplicateAudit.summary.itemsSafeToMergeLater],
+              ["Manual review items", duplicateAudit.summary.itemsNeedingManualReview],
+            ].map(([label, value]) => (
+              <div key={String(label)} className="rounded-xl border border-neutral-200 bg-white p-3 shadow-sm">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-neutral-400">{label}</p>
+                <p className="mt-2 text-2xl font-bold text-neutral-950">{Number(value).toLocaleString()}</p>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+            <div className="relative flex-1">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-400" />
+              <input
+                value={duplicateAuditSearch}
+                onChange={e => setDuplicateAuditSearch(e.target.value)}
+                placeholder="Search duplicate audit by item name, id, or group key..."
+                className="w-full rounded-lg border border-neutral-200 bg-white py-2 pl-9 pr-3 text-sm text-neutral-900 outline-none transition focus:border-amber-400 focus:ring-2 focus:ring-amber-100"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={exportDuplicateAuditCsv}
+              className="inline-flex items-center justify-center gap-2 rounded-lg bg-neutral-950 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-neutral-800"
+            >
+              <Download className="h-4 w-4" />
+              Export CSV
+            </button>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            {[
+              ["all", "All"],
+              ["exact", "Exact duplicates"],
+              ["unit", "Unit variations"],
+              ["possible", "Possible duplicates"],
+              ["recipe", "Has recipe usage"],
+              ["stock", "Has stock"],
+              ["unit-setup", "Needs unit setup"],
+              ["manual-review", "Manual review needed"],
+            ].map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setDuplicateAuditFilter(value)}
+                className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                  duplicateAuditFilter === value
+                    ? "border-neutral-950 bg-neutral-950 text-white"
+                    : "border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {filteredDuplicateAuditGroups.length === 0 ? (
+            <div className="rounded-xl border border-neutral-200 bg-neutral-50 py-12 text-center text-sm text-neutral-500">
+              No duplicate groups found for the current search.
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {filteredDuplicateAuditGroups.map((group: any) => (
+                <div key={group.id} className="overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-sm">
+                  <button
+                    type="button"
+                    onClick={() => setExpandedDuplicateAuditGroups(prev => ({ ...prev, [group.id]: !prev[group.id] }))}
+                    className="w-full border-b border-neutral-100 bg-neutral-50 px-4 py-3 text-left transition-colors hover:bg-neutral-100"
+                  >
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          {expandedDuplicateAuditGroups[group.id] ? <ChevronDown className="h-4 w-4 text-neutral-500" /> : <ChevronRight className="h-4 w-4 text-neutral-500" />}
+                          <Badge
+                            variant={group.duplicateType === "exact" ? "warning" : group.duplicateType === "unit variation" ? "neutral" : "default"}
+                            className="capitalize"
+                          >
+                            {group.duplicateType}
+                          </Badge>
+                          <span className="text-xs font-semibold text-neutral-500">{group.itemCount} items</span>
+                          <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                            group.safetyStatus === "likely safe later"
+                              ? "bg-emerald-100 text-emerald-700"
+                              : group.safetyStatus === "do not auto-merge"
+                                ? "bg-red-100 text-red-700"
+                                : "bg-amber-100 text-amber-700"
+                          }`}>
+                            {group.safetyStatus}
+                          </span>
+                        </div>
+                        <p className="mt-2 text-sm font-semibold text-neutral-950">{group.items[0]?.name || group.groupKey}</p>
+                        <p className="mt-1 text-xs text-neutral-500">{group.groupReason}</p>
+                        <p className="mt-1 break-all font-mono text-[11px] text-neutral-400">{group.groupKey}</p>
+                      </div>
+                      <div className="grid gap-2 text-xs sm:grid-cols-3 lg:min-w-[460px]">
+                        <div className="rounded-lg border border-neutral-200 bg-white px-3 py-2">
+                          <p className="font-semibold text-neutral-900">Supplier</p>
+                          <p className="mt-0.5 truncate text-neutral-500">{group.supplier || "—"}</p>
+                        </div>
+                        <div className="rounded-lg border border-neutral-200 bg-white px-3 py-2">
+                          <p className="font-semibold text-neutral-900">Category</p>
+                          <p className="mt-0.5 truncate text-neutral-500">{group.category || "—"}</p>
+                        </div>
+                        <div className="rounded-lg border border-neutral-200 bg-white px-3 py-2">
+                          <p className="font-semibold text-neutral-900">Master</p>
+                          <p className="mt-0.5 font-mono text-neutral-500">{getDuplicateAuditShortId(group.recommendedMasterId)}</p>
+                        </div>
+                      </div>
+                    </div>
+                  </button>
+
+                  {expandedDuplicateAuditGroups[group.id] && (
+                    <>
+                      <div className="border-b border-neutral-100 bg-white px-4 py-3 text-xs text-neutral-600">
+                        <p><span className="font-semibold text-neutral-950">Recommended master:</span> <span className="font-mono">{group.recommendedMasterId || "None"}</span></p>
+                        <p className="mt-1"><span className="font-semibold text-neutral-950">Reason:</span> {group.recommendedMasterReason}</p>
+                      </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="min-w-[1500px] w-full text-left text-xs">
+                      <thead className="bg-white text-[10px] uppercase tracking-[0.14em] text-neutral-400">
+                        <tr className="border-b border-neutral-100">
+                          <th className="px-3 py-2 font-semibold">Item</th>
+                          <th className="px-3 py-2 font-semibold">Supplier</th>
+                          <th className="px-3 py-2 font-semibold">Category</th>
+                          <th className="px-3 py-2 font-semibold">Base Unit</th>
+                          <th className="px-3 py-2 font-semibold">Family</th>
+                          <th className="px-3 py-2 font-semibold">Purchase Unit</th>
+                          <th className="px-3 py-2 text-right font-semibold">Purchase Cost</th>
+                          <th className="px-3 py-2 text-right font-semibold">Base Qty</th>
+                          <th className="px-3 py-2 text-right font-semibold">Cost/Base</th>
+                          <th className="px-3 py-2 text-right font-semibold">Stock</th>
+                          <th className="px-3 py-2 text-right font-semibold">Par</th>
+                          <th className="px-3 py-2 font-semibold">Status</th>
+                          <th className="px-3 py-2 font-semibold">Unit Setup</th>
+                          <th className="px-3 py-2 font-semibold">Usage</th>
+                          <th className="px-3 py-2 font-semibold">Created / Updated</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-neutral-100">
+                        {group.items.map((item: any) => {
+                          const usage = item.audit.usage;
+                          const isMaster = String(item.id) === String(group.recommendedMasterId);
+                          return (
+                            <tr key={`${group.groupKey}-${item.id}`} className={isMaster ? "bg-blue-50/60" : "bg-white"}>
+                              <td className="px-3 py-3 align-top">
+                                <p className="font-semibold text-neutral-950">{item.name || "Unnamed item"}</p>
+                                <p className="mt-1 font-mono text-[10px] text-neutral-500">row: {getDuplicateAuditShortId(item.id)}</p>
+                                <p className="font-mono text-[10px] text-neutral-400 break-all">full: {item.id}</p>
+                                <p className="font-mono text-[10px] text-neutral-400">item_id: {item.itemId ?? item.item_id ?? "—"}</p>
+                                {isMaster && <p className="mt-1 text-[10px] font-bold uppercase tracking-wide text-blue-700">Recommended master</p>}
+                              </td>
+                              <td className="px-3 py-3 align-top text-neutral-700">{item.audit.supplier || "—"}</td>
+                              <td className="px-3 py-3 align-top text-neutral-700">{item.category || "—"}</td>
+                              <td className="px-3 py-3 align-top font-mono text-neutral-700">{item.baseUnit ?? item.baseunit ?? item.unit ?? "—"}</td>
+                              <td className="px-3 py-3 align-top text-neutral-700">{item.audit.measurementFamily || "—"}</td>
+                              <td className="px-3 py-3 align-top text-neutral-700">{item.audit.purchaseUnitLabel || "—"}</td>
+                              <td className="px-3 py-3 align-top text-right tabular-nums text-neutral-700">${Number(item.audit.purchaseCost || 0).toFixed(2)}</td>
+                              <td className="px-3 py-3 align-top text-right tabular-nums text-neutral-700">{Number(item.audit.baseQtyPerPurchaseUnit || 0).toLocaleString()}</td>
+                              <td className="px-3 py-3 align-top text-right tabular-nums text-neutral-700">${Number(item.audit.costPerBaseUnit || 0).toFixed(5)}</td>
+                              <td className="px-3 py-3 align-top text-right tabular-nums text-neutral-700">{Number(item.inStock ?? 0).toLocaleString()}</td>
+                              <td className="px-3 py-3 align-top text-right tabular-nums text-neutral-700">{Number(item.parLevel ?? 0).toLocaleString()}</td>
+                              <td className="px-3 py-3 align-top">
+                                <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${item.audit.isActive ? "bg-emerald-100 text-emerald-700" : "bg-neutral-200 text-neutral-600"}`}>
+                                  {item.audit.isActive ? "Active" : "Disabled"}
+                                </span>
+                              </td>
+                              <td className="px-3 py-3 align-top">
+                                <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                                  item.audit.unitSetupStatus === "Unit Ready"
+                                    ? "bg-emerald-100 text-emerald-700"
+                                    : item.audit.unitSetupStatus === "Unit Conflict"
+                                      ? "bg-red-100 text-red-700"
+                                      : "bg-amber-100 text-amber-700"
+                                }`}>
+                                  {item.audit.unitSetupStatus}
+                                </span>
+                              </td>
+                              <td className="px-3 py-3 align-top text-neutral-600">
+                                <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+                                  <span>Recipes: {usage.recipeUsageCount}</span>
+                                  <span>FG: {usage.finishedGoodsRecipeUsageCount}</span>
+                                  <span>POs: {usage.poUsageCount}</span>
+                                  <span>Options: {usage.purchaseOptionCount}</span>
+                                  <span>Ledger: {usage.movementLedgerCount}</span>
+                                  <span>Prod: {usage.productionUsageCount}</span>
+                                </div>
+                              </td>
+                              <td className="px-3 py-3 align-top text-neutral-500">
+                                <p>{item.audit.createdAt ? new Date(item.audit.createdAt).toLocaleDateString() : "—"}</p>
+                                <p>{item.audit.updatedAt ? new Date(item.audit.updatedAt).toLocaleDateString() : "—"}</p>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                    </>
+                  )}
+                </div>
+              ))}
             </div>
           )}
         </div>
