@@ -330,6 +330,98 @@ describe('computeIngredientLineCost', () => {
       expect(r.normalizedQty).toBe(500);
     }
   });
+
+  test('Onion: 150 lb against 50 lb case at $39 → $117', () => {
+    const item = {
+      name: 'PEELED ONION',
+      purchaseCost: 39,
+      purchaseUom: 'Case',
+      packQty: 1,
+      innerUnitSize: 50,
+      innerUnitUom: 'lb',
+      baseUnit: 'lb',
+      cost: 0,
+    };
+    const r = computeIngredientLineCost(150, 'lb', item);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.costAudit.costPathLabel).toBe('direct_base_unit');
+      expect(round(r.costPerBaseUnit, 2)).toBe(0.78);
+      expect(round(r.cost, 2)).toBe(117);
+    }
+  });
+
+  test('Oil: 4 L costs as litres, while 4 Case uses purchase pack conversion', () => {
+    const item = {
+      name: 'OIL VEGETABLE CAPRI',
+      purchaseCost: 43.49,
+      purchaseUom: 'Case',
+      packQty: 1,
+      innerUnitSize: 16,
+      innerUnitUom: 'l',
+      baseUnit: 'l',
+      cost: 0,
+    };
+    const litres = computeIngredientLineCost(4, 'l', item);
+    expect(litres.ok).toBe(true);
+    if (litres.ok) {
+      expect(litres.costAudit.costPathLabel).toBe('direct_base_unit');
+      expect(round(litres.costPerBaseUnit, 6)).toBe(2.718125);
+      expect(round(litres.cost, 2)).toBe(10.87);
+    }
+
+    const cases = computeIngredientLineCost(4, 'Case', item);
+    expect(cases.ok).toBe(true);
+    if (cases.ok) {
+      expect(cases.costAudit.costPathLabel).toBe('purchase_unit_conversion');
+      expect(cases.normalizedQty).toBe(64);
+      expect(round(cases.cost, 2)).toBe(173.96);
+    }
+  });
+
+  test('Biryani masala: 100 g normalizes to 0.1 kg with stable cost', () => {
+    const item = {
+      name: 'BIRYANI MASALA HYD',
+      purchaseCost: 20,
+      purchaseUom: 'Bag',
+      packQty: 1,
+      innerUnitSize: 1,
+      innerUnitUom: 'kg',
+      baseUnit: 'kg',
+      cost: 0,
+    };
+    const recipe = computeIngredientLineCost(100, 'g', item);
+    const production = computeIngredientLineCost(100, 'g', item);
+    expect(recipe.ok).toBe(true);
+    expect(production.ok).toBe(true);
+    if (recipe.ok && production.ok) {
+      expect(recipe.normalizedQty).toBe(0.1);
+      expect(recipe.cost).toBe(production.cost);
+      expect(round(recipe.cost, 2)).toBe(2);
+    }
+  });
+
+  test('Garlic: lb recipe quantity uses cost/lb; Case uses pack conversion', () => {
+    const item = {
+      name: 'GARLIC',
+      purchaseCost: 36,
+      purchaseUom: 'Case',
+      packQty: 1,
+      innerUnitSize: 18,
+      innerUnitUom: 'lb',
+      baseUnit: 'lb',
+      cost: 0,
+    };
+    const pounds = computeIngredientLineCost(1.5, 'lb', item);
+    const oneCase = computeIngredientLineCost(1, 'Case', item);
+    expect(pounds.ok).toBe(true);
+    expect(oneCase.ok).toBe(true);
+    if (pounds.ok && oneCase.ok) {
+      expect(round(pounds.cost, 2)).toBe(3);
+      expect(oneCase.normalizedQty).toBe(18);
+      expect(round(oneCase.cost, 2)).toBe(36);
+    }
+  });
 });
 
 // ═════════════════════════════════════════════════════════════════════════════

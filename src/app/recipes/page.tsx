@@ -17,7 +17,7 @@ import {
   resolveEffectiveBaseUom,
   computeBaseUnitCostFromPack,
   computeIngredientLineCost,
-  calculateIngredientLineCost,
+  calculateIngredientCost,
   auditItemUnitAmbiguity,
   type CostAuditRecord,
 } from "@/lib/units";
@@ -1122,10 +1122,11 @@ function RecipesPageContent() {
                      try {
                         // ── SINGLE COSTING ENTRYPOINT ───────────────────────────────
                         // Use the named wrapper so call-site matches the user-required API shape.
-                        const lineResult = calculateIngredientLineCost({
+                        const lineResult = calculateIngredientCost({
                           item:       invItem,
-                          recipeQty:  ing.qty,
-                          recipeUnit: ing.unit,
+                          quantity:   ing.qty,
+                          unit:       ing.unit,
+                          context:    'recipe',
                         });
                         if (lineResult.ok) {
                           lineCost  = lineResult.cost;
@@ -1303,7 +1304,7 @@ function RecipesPageContent() {
                             <ChevronDown className="h-3 w-3 transition-transform group-open:rotate-180" />
                             Cost Audit
                             <span className="ml-auto text-[10px] font-mono text-neutral-500">
-                              Path {costAudit.costPath} · {costAudit.baseUnit}
+                              {costAudit.costPathLabel} · {costAudit.baseUnit}
                             </span>
                           </summary>
                           <div className="px-3 pb-3 pt-1 bg-neutral-50">

@@ -48,7 +48,7 @@ import {
 } from "@/lib/storage";
 import {
   computeIngredientLineCost,
-  calculateIngredientLineCost,
+  calculateIngredientCost,
   convertQuantity,
   resolveEffectiveBaseUom,
   type CostAuditRecord,
@@ -796,12 +796,14 @@ export default function FinishedGoods() {
 
       if (rawItem) {
         // ── Route through the canonical costing engine ────────────────────────
-        // Use calculateIngredientLineCost (named wrapper) so the API shape matches
+        // Use calculateIngredientCost so production and recipe editor share the
+        // same quantity conversion, purchase-pack handling, and audit fields.
         // the recipe builder — same function, same math, same result.
-        const lineResult = calculateIngredientLineCost({
+        const lineResult = calculateIngredientCost({
           item:       rawItem,
-          recipeQty:  ing.qty,
-          recipeUnit: ing.unit,
+          quantity:   ing.qty,
+          unit:       ing.unit,
+          context:    'production',
         });
 
         if (lineResult.ok) {
@@ -2206,7 +2208,7 @@ export default function FinishedGoods() {
                               <ChevronDown className="h-3 w-3 transition-transform group-open:rotate-180" />
                               Cost Audit — {ing.costAudit.itemName}
                               <span className="ml-auto font-mono text-neutral-500">
-                                Path {ing.costAudit.costPath} · {ing.costAudit.baseUnit}
+                                {ing.costAudit.costPathLabel} · {ing.costAudit.baseUnit}
                               </span>
                             </summary>
                             <div className="px-4 pb-3 pt-1 bg-neutral-50/70">

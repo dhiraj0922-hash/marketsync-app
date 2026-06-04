@@ -415,6 +415,13 @@ export type CostAuditRecord = {
   normalizedRecipeQty: number;   // recipeQty converted to baseUnit
   calculatedCost:      number;   // final line cost
   costPath:            1 | 2 | 3;
+  costPathLabel:
+    | 'direct_base_unit'
+    | 'measurement_unit_conversion'
+    | 'purchase_unit_conversion'
+    | 'labour_cost'
+    | 'prep_cost'
+    | 'fallback_cost';
   baseUnit:            string;
 };
 
@@ -426,6 +433,7 @@ export type IngredientLineCostResult =
       baseUnit:       string;   // effective base unit used
       costPerBaseUnit:number;   // cost per base unit ($)
       costPath:       1 | 2 | 3; // which path resolved the cost
+      costPathLabel:   CostAuditRecord['costPathLabel'];
       costAudit:      CostAuditRecord;
     }
   | {
@@ -437,6 +445,59 @@ export type IngredientLineCostResult =
       error:          string;
     };
 
+const normalizeCostUnitLabel = (unit: string | null | undefined) =>
+  String(unit ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+const getPurchaseUnitCandidates = (invItem: {
+  purchaseUom?: string | null;
+  purchaseUnits?: Array<{ name?: string | null; label?: string | null; unit?: string | null; isPrimary?: boolean; conversion: number }> | null;
+}) => {
+  const candidates: Array<{ label: string; conversion: number | null }> = [];
+  if (invItem.purchaseUom?.trim()) candidates.push({ label: invItem.purchaseUom, conversion: null });
+  for (const unit of invItem.purchaseUnits ?? []) {
+    const label = unit.name ?? unit.label ?? unit.unit ?? '';
+    if (label?.trim()) candidates.push({ label, conversion: Number(unit.conversion ?? 0) || null });
+  }
+  return candidates;
+};
+
+const findExactPurchaseUnitMatch = (
+  recipeUnit: string,
+  invItem: {
+    purchaseUom?: string | null;
+    purchaseUnits?: Array<{ name?: string | null; label?: string | null; unit?: string | null; isPrimary?: boolean; conversion: number }> | null;
+  },
+) => {
+  const recipeLabel = normalizeCostUnitLabel(recipeUnit);
+  if (!recipeLabel) return null;
+  return getPurchaseUnitCandidates(invItem).find(candidate =>
+    normalizeCostUnitLabel(candidate.label) === recipeLabel
+  ) ?? null;
+};
+
+const resolveBaseQtyPerPurchaseUnit = (
+  invItem: Parameters<typeof computeBaseUnitCostFromPack>[0] & {
+    purchaseUnits?: Array<{ name?: string | null; label?: string | null; unit?: string | null; isPrimary?: boolean; conversion: number }> | null;
+  },
+  baseUnit: string,
+): number | null => {
+  if (
+    invItem.packQty       != null && invItem.packQty       > 0 &&
+    invItem.innerUnitSize != null && invItem.innerUnitSize > 0 &&
+    invItem.innerUnitUom?.trim()
+  ) {
+    try {
+      const totalInnerQty = invItem.packQty * invItem.innerUnitSize;
+      const converted = normalizeUnit(totalInnerQty, invItem.innerUnitUom, baseUnit);
+      if (converted > 0) return converted;
+    } catch { /* fallback below */ }
+  }
+
+  const primary = invItem.purchaseUnits?.find((u) => u.isPrimary) ?? invItem.purchaseUnits?.[0];
+  const conversion = Number(primary?.conversion ?? 0);
+  return conversion > 0 ? conversion : null;
+};
+
 export function computeIngredientLineCost(
   recipeQty:  number,
   recipeUnit: string,
@@ -445,7 +506,7 @@ export function computeIngredientLineCost(
     measurementFamily?: string | null;   // NEW: locked family from inventory engine
     cost?:              number | null;
     purchaseCost?:      number | null;
-    purchaseUnits?:     Array<{ isPrimary?: boolean; conversion: number }> | null;
+    purchaseUnits?:     Array<{ name?: string | null; label?: string | null; unit?: string | null; isPrimary?: boolean; conversion: number }> | null;
     packQty?:           number | null;
     innerUnitSize?:     number | null;
     innerUnitUom?:      string | null;
@@ -458,23 +519,10 @@ export function computeIngredientLineCost(
 ): IngredientLineCostResult {
   const baseUnit = resolveEffectiveBaseUom(invItem);
 
-  // ── Step 1: Quantity conversion ───────────────────────────────────────────
-  const convResult = convertQuantity(recipeQty, recipeUnit, baseUnit);
-  if (!convResult.ok) {
-    return {
-      ok:             false,
-      cost:           0,
-      normalizedQty:  null,
-      baseUnit,
-      costPerBaseUnit:0,
-      error:          convResult.error,
-    };
-  }
-  const normalizedQty = convResult.qty!;
-
-  // ── Step 2: Cost per base unit — three-path chain ─────────────────────────
+  // ── Step 1: Cost per base unit — shared chain ─────────────────────────────
   let effectiveBaseCost: number;
   let costPath: 1 | 2 | 3;
+  let costPathLabel: CostAuditRecord['costPathLabel'];
   let baseQtyPerPurchUnit: number | null = null;
 
   // Path 1: structured pack fields (purchaseCost, packQty, innerUnitSize, innerUnitUom)
@@ -482,18 +530,8 @@ export function computeIngredientLineCost(
   if (structuredCost !== null) {
     effectiveBaseCost = structuredCost;
     costPath          = 1;
-    // Derive baseQtyPerPurchUnit for audit display
-    if (
-      invItem.packQty       != null && invItem.packQty       > 0 &&
-      invItem.innerUnitSize != null && invItem.innerUnitSize > 0 &&
-      invItem.innerUnitUom?.trim()
-    ) {
-      try {
-        const totalInnerQty = invItem.packQty * invItem.innerUnitSize;
-        const converted     = normalizeUnit(totalInnerQty, invItem.innerUnitUom!, baseUnit);
-        baseQtyPerPurchUnit = converted > 0 ? converted : null;
-      } catch { /* ignore — audit only */ }
-    }
+    costPathLabel     = 'measurement_unit_conversion';
+    baseQtyPerPurchUnit = resolveBaseQtyPerPurchaseUnit(invItem, baseUnit);
   } else if (invItem.purchaseUnits && invItem.purchaseUnits.length > 0) {
     // Path 2: legacy purchaseUnits JSONB
     const primary = invItem.purchaseUnits.find((u) => u.isPrimary) ?? invItem.purchaseUnits[0];
@@ -503,12 +541,47 @@ export function computeIngredientLineCost(
         : Number(invItem.cost ?? 0) * primary.conversion; // reconstruct if purchaseCost missing
     effectiveBaseCost   = purchCost / primary.conversion;
     costPath            = 2;
+    costPathLabel       = 'purchase_unit_conversion';
     baseQtyPerPurchUnit = primary.conversion;
   } else {
     // Path 3: item.cost is already the per-base-unit cost (legacy)
     effectiveBaseCost   = Number(invItem.cost ?? 0);
     costPath            = 3;
+    costPathLabel       = 'fallback_cost';
     baseQtyPerPurchUnit = null;
+  }
+
+  // ── Step 2: Quantity conversion priority ─────────────────────────────────
+  // Measurement units win when compatible. Purchase-pack conversion is used
+  // only when the recipe unit exactly matches a purchase unit label.
+  let normalizedQty: number | null = null;
+  const convResult = convertQuantity(recipeQty, recipeUnit, baseUnit);
+  const conversionError = convResult.ok ? '' : convResult.error;
+  if (convResult.ok) {
+    normalizedQty = convResult.qty!;
+    costPathLabel = normalizeCostUnitLabel(recipeUnit) === normalizeCostUnitLabel(baseUnit)
+      ? 'direct_base_unit'
+      : costPathLabel === 'fallback_cost'
+        ? 'measurement_unit_conversion'
+        : costPathLabel;
+  } else {
+    const purchaseMatch = findExactPurchaseUnitMatch(recipeUnit, invItem);
+    const packConversion = baseQtyPerPurchUnit ?? purchaseMatch?.conversion ?? null;
+    if (purchaseMatch && packConversion && packConversion > 0) {
+      normalizedQty = recipeQty * packConversion;
+      costPathLabel = 'purchase_unit_conversion';
+    }
+  }
+
+  if (normalizedQty == null) {
+    return {
+      ok:             false,
+      cost:           0,
+      normalizedQty:  null,
+      baseUnit,
+      costPerBaseUnit:0,
+      error:          conversionError || `Unit conversion error: "${recipeUnit}" cannot convert to "${baseUnit}"`,
+    };
   }
 
   const cost = normalizedQty * effectiveBaseCost;
@@ -526,8 +599,43 @@ export function computeIngredientLineCost(
     normalizedRecipeQty: normalizedQty,
     calculatedCost:      roundedCost,
     costPath,
+    costPathLabel,
     baseUnit,
   };
+
+  if (process.env.NODE_ENV === 'development') {
+    const invalid = [
+      ['lineCost', roundedCost],
+      ['normalizedQty', normalizedQty],
+      ['costPerBaseUnit', effectiveBaseCost],
+    ].find(([, value]) => Number.isNaN(value));
+    if (invalid) {
+      console.warn('[CostAudit] Invalid ingredient cost output', {
+        field: invalid[0],
+        item: invItem.name,
+        recipeQty,
+        recipeUnit,
+        baseUnit,
+        costAudit,
+      });
+    }
+    const recipeCanon = canonicalizeUnit(recipeUnit);
+    const baseCanon = canonicalizeUnit(baseUnit);
+    if (
+      costPathLabel === 'purchase_unit_conversion' &&
+      recipeCanon &&
+      baseCanon &&
+      areDimensionsCompatible(recipeCanon, baseCanon)
+    ) {
+      console.warn('[CostAudit] Purchase conversion used for measurement unit', {
+        item: invItem.name,
+        recipeQty,
+        recipeUnit,
+        baseUnit,
+        costAudit,
+      });
+    }
+  }
 
   return {
     ok:             true,
@@ -536,6 +644,7 @@ export function computeIngredientLineCost(
     baseUnit,
     costPerBaseUnit:effectiveBaseCost,
     costPath,
+    costPathLabel,
     costAudit,
   };
 }
@@ -564,6 +673,40 @@ export function calculateIngredientLineCost({
   recipeUnit: string;
 }): IngredientLineCostResult {
   return computeIngredientLineCost(recipeQty, recipeUnit, item);
+}
+
+export function calculateIngredientCost({
+  item,
+  quantity,
+  unit,
+  context = 'recipe',
+}: {
+  item: Parameters<typeof computeIngredientLineCost>[2];
+  quantity: number;
+  unit: string;
+  context?: 'recipe' | 'production' | string;
+}): IngredientLineCostResult extends infer R
+  ? R extends { ok: true }
+    ? R & {
+        lineCost: number;
+        normalizedUnit: string;
+        audit: CostAuditRecord & { context: string; enteredQty: number; enteredUnit: string };
+      }
+    : IngredientLineCostResult
+  : never {
+  const result = computeIngredientLineCost(quantity, unit, item);
+  if (!result.ok) return result as any;
+  return {
+    ...result,
+    lineCost: result.cost,
+    normalizedUnit: result.baseUnit,
+    audit: {
+      ...result.costAudit,
+      context,
+      enteredQty: quantity,
+      enteredUnit: unit,
+    },
+  } as any;
 }
 
 // ─── 10. auditItemUnitAmbiguity — soft-warning audit ─────────────────────────
@@ -640,4 +783,3 @@ export function auditItemUnitAmbiguity(
 
   return warnings;
 }
-
