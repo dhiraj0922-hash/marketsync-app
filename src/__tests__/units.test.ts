@@ -345,7 +345,8 @@ describe('computeIngredientLineCost', () => {
     const r = computeIngredientLineCost(150, 'lb', item);
     expect(r.ok).toBe(true);
     if (r.ok) {
-      expect(r.costAudit.costPathLabel).toBe('direct_base_unit');
+      // Path 1 (structured pack) cost — label is measurement_unit_conversion
+      expect(r.costAudit.costPathLabel).toBe('measurement_unit_conversion');
       expect(round(r.costPerBaseUnit, 2)).toBe(0.78);
       expect(round(r.cost, 2)).toBe(117);
     }
@@ -365,7 +366,8 @@ describe('computeIngredientLineCost', () => {
     const litres = computeIngredientLineCost(4, 'l', item);
     expect(litres.ok).toBe(true);
     if (litres.ok) {
-      expect(litres.costAudit.costPathLabel).toBe('direct_base_unit');
+      // Path 1 (structured pack) cost — label is measurement_unit_conversion
+      expect(litres.costAudit.costPathLabel).toBe('measurement_unit_conversion');
       expect(round(litres.costPerBaseUnit, 6)).toBe(2.718125);
       expect(round(litres.cost, 2)).toBe(10.87);
     }
@@ -422,11 +424,85 @@ describe('computeIngredientLineCost', () => {
       expect(round(oneCase.cost, 2)).toBe(36);
     }
   });
-});
+
+  // ── MAIDA: the reported production costing bug ───────────────────────────
+  // When purchaseCost is null but purchaseUnits exists, Path 2 MUST NOT
+  // reconstruct purchaseCost as item.cost × conversion. That gives:
+  //   0.9725 × 20 = 19.45 "pack cost" → 19.45/20 = 0.9725/kg → wrong $19.45
+  // The fix: fall honestly to Path 3 instead of a false reconstruction.
+  test('MAIDA: purchaseCost=null with purchaseUnits must fall to Path 3, NOT reconstruct', () => {
+    const item = {
+      name: 'MAIDA 20KG/BAG',
+      cost: 0.9725,             // stale per-kg legacy cost — must NOT be multiplied back up
+      purchaseCost: null,       // not yet saved to DB
+      purchaseUnits: [{ isPrimary: true, conversion: 20, name: 'Case' }],
+      baseUnit: 'kg',
+    };
+    const r = computeIngredientLineCost(20, 'kg', item);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      // Must use Path 3 (honest stale cost), not a fake Path 2
+      expect(r.costPath).toBe(3);
+      // When unit matches base and Path 3 is used, label is 'direct_base_unit'
+      // (which is correct and distinct from a false Path 2 reconstruction)
+      expect(['fallback_cost', 'direct_base_unit']).toContain(r.costPathLabel);
+      // Cost per base unit must be the honest stale cost, not item.cost * conversion
+      expect(round(r.costPerBaseUnit, 4)).toBe(0.9725);
+      // CRITICAL: must NOT be the wrong reconstructed cost (item.cost × 20 / 20 = 0.9725
+      // is the same value, but lineCost for 20 kg must be 19.45, not 36.99 or anything else)
+      expect(round(r.cost, 4)).toBe(round(20 * 0.9725, 4));
+      // inventoryPriceLabel should show per-base-unit form (no purchase unit label)
+      if (r.costAudit) {
+        expect(r.costAudit.inventoryPriceLabel).toMatch(/\$.*\/ kg/);
+      }
+    }
+  });
+
+
+  test('MAIDA: with purchaseCost=$36.99 saved, Path 2 gives correct $1.8495/kg → $36.99 for 20 kg', () => {
+    const item = {
+      name: 'MAIDA 20KG/BAG',
+      cost: 0.9725,             // stale — must be ignored when purchaseCost is present
+      purchaseCost: 36.99,      // correct case price
+      purchaseUom: 'Case',
+      purchaseUnits: [{ isPrimary: true, conversion: 20, name: 'Case' }],
+      baseUnit: 'kg',
+    };
+    const r = computeIngredientLineCost(20, 'kg', item);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.costPath).toBe(2);
+      expect(r.costPathLabel).toBe('purchase_unit_conversion');
+      expect(round(r.costPerBaseUnit, 4)).toBe(1.8495);
+      expect(round(r.cost, 2)).toBe(36.99);
+      if (r.costAudit) {
+        expect(r.costAudit.inventoryPriceLabel).toBe('$36.99 / Case');
+        expect(r.costAudit.baseQtyPerPurchUnit).toBe(20);
+      }
+    }
+  });
+
+  test('MAIDA: inventoryPriceLabel for Path 3 (no purchaseCost) shows per-base-unit format', () => {
+    const item = {
+      name: 'MAIDA PLAIN FLOUR',
+      cost: 1.85,
+      purchaseCost: null,
+      baseUnit: 'kg',
+    };
+    const r = computeIngredientLineCost(5, 'kg', item);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.costPath).toBe(3);
+      expect(r.costAudit.inventoryPriceLabel).toBe('$1.8500 / kg');
+    }
+  });
+}); // end describe('computeIngredientLineCost')
+
 
 // ═════════════════════════════════════════════════════════════════════════════
 // 7. Requirement 6: Production stock deduction — qty matches base unit
 // ═════════════════════════════════════════════════════════════════════════════
+
 
 describe('Production deduction qty normalisation', () => {
   // Simulate what executeProduction does with convertQuantity

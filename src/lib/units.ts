@@ -423,6 +423,8 @@ export type CostAuditRecord = {
     | 'prep_cost'
     | 'fallback_cost';
   baseUnit:            string;
+  /** Human-readable price source label, e.g. "$36.99 / Case" or "$1.8495 / kg" */
+  inventoryPriceLabel: string;
 };
 
 export type IngredientLineCostResult =
@@ -524,25 +526,52 @@ export function computeIngredientLineCost(
   let costPath: 1 | 2 | 3;
   let costPathLabel: CostAuditRecord['costPathLabel'];
   let baseQtyPerPurchUnit: number | null = null;
+  let resolvedPurchaseCost: number | null = null; // tracks the actual pack cost for label
+  let resolvedPurchaseUomLabel = '';              // tracks the purchase unit label for label
 
   // Path 1: structured pack fields (purchaseCost, packQty, innerUnitSize, innerUnitUom)
   const structuredCost = computeBaseUnitCostFromPack(invItem);
   if (structuredCost !== null) {
-    effectiveBaseCost = structuredCost;
-    costPath          = 1;
-    costPathLabel     = 'measurement_unit_conversion';
-    baseQtyPerPurchUnit = resolveBaseQtyPerPurchaseUnit(invItem, baseUnit);
+    effectiveBaseCost     = structuredCost;
+    costPath              = 1;
+    costPathLabel         = 'measurement_unit_conversion';
+    baseQtyPerPurchUnit   = resolveBaseQtyPerPurchaseUnit(invItem, baseUnit);
+    resolvedPurchaseCost  = Number(invItem.purchaseCost ?? 0);
+    resolvedPurchaseUomLabel = invItem.purchaseUom?.trim() ?? '';
   } else if (invItem.purchaseUnits && invItem.purchaseUnits.length > 0) {
     // Path 2: legacy purchaseUnits JSONB
+    // IMPORTANT: only use Path 2 when purchaseCost is actually stored.
+    // Do NOT reconstruct from item.cost × conversion — that multiplies a stale
+    // per-unit cost back up, producing a meaningless pack cost.
     const primary = invItem.purchaseUnits.find((u) => u.isPrimary) ?? invItem.purchaseUnits[0];
-    const purchCost =
-      invItem.purchaseCost !== undefined && invItem.purchaseCost !== null
-        ? Number(invItem.purchaseCost)
-        : Number(invItem.cost ?? 0) * primary.conversion; // reconstruct if purchaseCost missing
-    effectiveBaseCost   = purchCost / primary.conversion;
-    costPath            = 2;
-    costPathLabel       = 'purchase_unit_conversion';
-    baseQtyPerPurchUnit = primary.conversion;
+    const pc = invItem.purchaseCost != null ? Number(invItem.purchaseCost) : null;
+    if (pc != null && pc > 0) {
+      effectiveBaseCost     = pc / primary.conversion;
+      costPath              = 2;
+      costPathLabel         = 'purchase_unit_conversion';
+      baseQtyPerPurchUnit   = primary.conversion;
+      resolvedPurchaseCost  = pc;
+      resolvedPurchaseUomLabel = (primary as any).name ?? (primary as any).label ?? '';
+      if (process.env.NODE_ENV === 'development') {
+        console.debug('[CostEngine] Path 2 ok', {
+          item: invItem.name, purchaseCost: pc, conversion: primary.conversion,
+          costPerBase: effectiveBaseCost,
+        });
+      }
+    } else {
+      // purchaseCost is null — fall honestly to Path 3 rather than reconstructing
+      if (process.env.NODE_ENV === 'development') {
+        console.warn(
+          '[CostEngine] Path 2 skipped — purchaseCost is null for item with purchaseUnits.',
+          'Falling to Path 3 (stale item.cost). Fix by saving a purchaseCost for this item.',
+          { item: invItem.name, purchaseUnits: invItem.purchaseUnits },
+        );
+      }
+      effectiveBaseCost   = Number(invItem.cost ?? 0);
+      costPath            = 3;
+      costPathLabel       = 'fallback_cost';
+      baseQtyPerPurchUnit = null;
+    }
   } else {
     // Path 3: item.cost is already the per-base-unit cost (legacy)
     effectiveBaseCost   = Number(invItem.cost ?? 0);
@@ -559,11 +588,14 @@ export function computeIngredientLineCost(
   const conversionError = convResult.ok ? '' : convResult.error;
   if (convResult.ok) {
     normalizedQty = convResult.qty!;
-    costPathLabel = normalizeCostUnitLabel(recipeUnit) === normalizeCostUnitLabel(baseUnit)
-      ? 'direct_base_unit'
-      : costPathLabel === 'fallback_cost'
-        ? 'measurement_unit_conversion'
-        : costPathLabel;
+    // Only override to 'direct_base_unit' when cost came from Path 3 (no purchase pack).
+    // Path 1 and 2 costs are derived from purchase pack pricing — preserve their label
+    // even when recipe unit happens to equal the base unit.
+    if (normalizeCostUnitLabel(recipeUnit) === normalizeCostUnitLabel(baseUnit) && costPath === 3) {
+      costPathLabel = 'direct_base_unit';
+    } else if (costPathLabel === 'fallback_cost' && normalizeCostUnitLabel(recipeUnit) !== normalizeCostUnitLabel(baseUnit)) {
+      costPathLabel = 'measurement_unit_conversion';
+    }
   } else {
     const purchaseMatch = findExactPurchaseUnitMatch(recipeUnit, invItem);
     const packConversion = baseQtyPerPurchUnit ?? purchaseMatch?.conversion ?? null;
@@ -587,11 +619,28 @@ export function computeIngredientLineCost(
   const cost = normalizedQty * effectiveBaseCost;
   const roundedCost = Math.round(cost * 1_000_000) / 1_000_000;
 
+  // Build the human-readable inventory price label for UI columns
+  const _purchaseUomForLabel =
+    resolvedPurchaseUomLabel ||
+    invItem.purchaseUom?.trim() ||
+    (invItem.purchaseUnits?.[0] as any)?.name ||
+    '';
+  const inventoryPriceLabel: string = (() => {
+    if (costPath === 1 || costPath === 2) {
+      const pc = resolvedPurchaseCost ?? Number(invItem.purchaseCost ?? 0);
+      return _purchaseUomForLabel
+        ? `$${pc.toFixed(2)} / ${_purchaseUomForLabel}`
+        : `$${effectiveBaseCost.toFixed(4)} / ${baseUnit}`;
+    }
+    // Path 3: direct per-base-unit cost
+    return `$${effectiveBaseCost.toFixed(4)} / ${baseUnit}`;
+  })();
+
   const costAudit: CostAuditRecord = {
     itemName:            invItem.name?.trim()         ?? 'Unknown',
     measurementFamily:   invItem.measurementFamily?.trim() ?? '',
-    purchaseUnit:        invItem.purchaseUom?.trim()  ?? '',
-    purchaseCost:        Number(invItem.purchaseCost  ?? invItem.cost ?? 0),
+    purchaseUnit:        _purchaseUomForLabel,
+    purchaseCost:        resolvedPurchaseCost ?? Number(invItem.purchaseCost ?? invItem.cost ?? 0),
     baseQtyPerPurchUnit,
     costPerBaseUnit:     effectiveBaseCost,
     recipeQty,
@@ -601,6 +650,7 @@ export function computeIngredientLineCost(
     costPath,
     costPathLabel,
     baseUnit,
+    inventoryPriceLabel,
   };
 
   if (process.env.NODE_ENV === 'development') {
