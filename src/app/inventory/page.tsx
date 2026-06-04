@@ -1490,9 +1490,26 @@ export default function Inventory() {
     setIsDrawerOpen(true);
   };
 
+  // ── Safe stock accessor ──────────────────────────────────────────────────
+  // ALWAYS use this instead of selectedItem.inStock directly in arithmetic.
+  // Root cause of the NaN bug: inStock can be stored as a string expression
+  // like "318-288" if a save failed midway. Number() of a non-numeric string
+  // returns NaN, and NaN propagates through all arithmetic silently.
+  const safeStock = (item: any): number => {
+    const v = Number(item?.inStock ?? 0);
+    return Number.isFinite(v) ? v : 0;
+  };
+
+  const isStockCorrupted = (item: any): boolean => {
+    const v = Number(item?.inStock ?? 0);
+    return !Number.isFinite(v);
+  };
+
   const getStockCorrectionUnitOptions = (item: any) => {
     const baseUnit = item?.baseUnit || item?.unit || "base";
-    const options = [{ name: baseUnit, conversion: 1, isBase: true }];
+    const options: { name: string; conversion: number; isBase: boolean }[] = [
+      { name: baseUnit, conversion: 1, isBase: true },
+    ];
     const purchaseUnits = Array.isArray(item?.purchaseUnits) ? item.purchaseUnits : [];
     for (const unit of purchaseUnits) {
       const conversion = Number(unit?.conversion);
@@ -1505,11 +1522,19 @@ export default function Inventory() {
   };
 
   const getStockCorrectionPreview = (item: any) => {
-    const qty = Number(stockCorrectionQty);
-    const unitOption = getStockCorrectionUnitOptions(item).find(option => option.name === stockCorrectionUnit)
-      ?? getStockCorrectionUnitOptions(item)[0];
-    const currentBaseQty = Number(item?.inStock ?? 0);
-    const targetBaseQty = Number.isFinite(qty) && qty >= 0 ? qty * Number(unitOption?.conversion ?? 1) : null;
+    const enteredQty = Number(stockCorrectionQty);
+    const unitOptions = getStockCorrectionUnitOptions(item);
+    const unitOption =
+      unitOptions.find(option => option.name === stockCorrectionUnit) ??
+      unitOptions[0];
+    // safeStock: always numeric
+    const currentBaseQty = safeStock(item);
+    const corrupted = isStockCorrupted(item);
+    // targetBaseQty = entered qty × unit conversion (e.g. 1 Case × 18 lb/Case = 18 lb)
+    const targetBaseQty =
+      Number.isFinite(enteredQty) && enteredQty >= 0
+        ? enteredQty * Number(unitOption?.conversion ?? 1)
+        : null;
     const delta = targetBaseQty === null ? null : targetBaseQty - currentBaseQty;
     const par = Number(item?.parLevel ?? 0);
     const isHuge =
@@ -1517,10 +1542,12 @@ export default function Inventory() {
       (Math.abs(delta) > 10000 || (par > 0 && Math.abs(delta) > par * 10));
     return {
       unitOption,
+      enteredQty: Number.isFinite(enteredQty) ? enteredQty : null,
       currentBaseQty,
       targetBaseQty,
       delta,
       isHuge,
+      corrupted,
     };
   };
 
@@ -1528,7 +1555,7 @@ export default function Inventory() {
     if (!selectedItem) return;
     const preview = getStockCorrectionPreview(selectedItem);
     if (preview.targetBaseQty === null || !Number.isFinite(preview.targetBaseQty) || preview.targetBaseQty < 0) {
-      alert("Enter a valid correct stock quantity 0 or greater.");
+      alert("Enter a valid stock quantity (0 or greater).");
       return;
     }
     if (!stockCorrectionReason.trim()) {
@@ -1556,23 +1583,30 @@ export default function Inventory() {
 
       const updatedItem = {
         ...selectedItem,
-        inStock: preview.targetBaseQty,
+        inStock: preview.targetBaseQty,   // always a clean number
         updatedAt: Date.now(),
       };
       setSelectedItem(updatedItem);
       setInventoryData(prev => prev.map((item: any) => item.id === selectedItem.id ? updatedItem : item));
 
       const now = new Date();
+      const unitDisplay = preview.unitOption?.name ?? baseUnit;
       const activityEntry = {
         id: `stock-correction-${Date.now()}`,
         date: now.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
         time: now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-        type: 'Stock Correction',
-        qty: `${preview.delta && preview.delta > 0 ? '+' : ''}${preview.delta ?? 0} ${baseUnit}`,
+        type: 'Stock Count Correction',
+        qty: `${preview.delta && preview.delta > 0 ? '+' : ''}${(preview.delta ?? 0).toFixed(4)} ${baseUnit}`,
         baseTransacted: preview.delta ?? 0,
         previousStock: preview.currentBaseQty,
         targetStock: preview.targetBaseQty,
-        notes: `From: ${preview.currentBaseQty} ${baseUnit} | To: ${preview.targetBaseQty} ${baseUnit} | Adjustment: ${preview.delta ?? 0} ${baseUnit} | Reason: ${stockCorrectionReason.trim()}`,
+        notes: [
+          `From: ${preview.currentBaseQty} ${baseUnit}`,
+          `To: ${preview.targetBaseQty} ${baseUnit}`,
+          `Entered: ${preview.enteredQty ?? '?'} ${unitDisplay}`,
+          `Adjustment: ${(preview.delta ?? 0).toFixed(4)} ${baseUnit}`,
+          `Reason: ${stockCorrectionReason.trim()}`,
+        ].join(' | '),
         user: user?.email ?? 'HQ',
       };
       const existing = activityData[selectedItem.id] || [];
@@ -1583,7 +1617,7 @@ export default function Inventory() {
       setStockCorrectionQty("");
       setStockCorrectionReason("");
       setStockCorrectionConfirm("");
-      alert("Stock correction applied.");
+      alert(`Stock set to ${preview.targetBaseQty} ${baseUnit}. ✓`);
     } catch (err: any) {
       alert(`Stock correction failed: ${err?.message ?? String(err)}`);
     } finally {
@@ -1596,29 +1630,41 @@ export default function Inventory() {
     const numericQty = parseFloat(adjQty);
     if (isNaN(numericQty) || numericQty <= 0) return;
 
-    let conversion = 1;
-    if (selectedItem.purchaseUnits) {
-      const mappedUnit = selectedItem.purchaseUnits.find((u: any) => u.name === adjUnit);
-      if (mappedUnit) conversion = mappedUnit.conversion;
+    // Guard: block movements on corrupted stock
+    if (isStockCorrupted(selectedItem)) {
+      alert('Stock value is corrupted (non-numeric). Use "Set Final Stock Count" to overwrite it with a clean value before adding or removing stock.');
+      return;
     }
 
-    let variance = 0;
-    const normalizedInput = numericQty * conversion;
+    // Resolve conversion factor from ALL unit options (base + purchase units)
+    const unitOptions = getStockCorrectionUnitOptions(selectedItem);
+    const matchedOption = unitOptions.find(u => u.name === adjUnit);
+    const conversion = matchedOption ? matchedOption.conversion : 1;
 
+    const normalizedInput = numericQty * conversion;
+    let variance = 0;
     if (adjType === "Add") variance = normalizedInput;
     if (adjType === "Remove" || adjType === "Waste") variance = -normalizedInput;
 
-    let updatedItem = { ...selectedItem, inStock: selectedItem.inStock + variance, updatedAt: Date.now() };
+    // safeStock ensures we never add to a string / NaN
+    const currentStock = safeStock(selectedItem);
+    const newStock = currentStock + variance;
+
+    let updatedItem = { ...selectedItem, inStock: newStock, updatedAt: Date.now() };
     const newInventory = inventoryData.map(i => i.id === selectedItem.id ? updatedItem : i);
 
+    const baseUnit = selectedItem.baseUnit || selectedItem.unit;
+    const adjLabel = adjType === 'Add' ? 'Received Stock' : adjType === 'Waste' ? 'Waste / Spoilage' : 'Stock Removed';
     const logEntry = {
       id: `log-${Date.now()}-${Math.random().toString(36).slice(2,7)}`,
       date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
       time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
       type: adjType,
-      qty: `${numericQty} ${adjUnit}`,
+      qty: `${adjType !== 'Add' ? '-' : '+'}${normalizedInput.toFixed(4)} ${baseUnit}`,
       baseTransacted: variance,
-      notes: adjNotes,
+      notes: adjNotes
+        ? `${adjLabel}: ${numericQty} ${adjUnit || baseUnit} → ${normalizedInput.toFixed(4)} ${baseUnit}. ${adjNotes}`
+        : `${adjLabel}: ${numericQty} ${adjUnit || baseUnit} → ${normalizedInput.toFixed(4)} ${baseUnit}`,
       user: userRole
     };
 
@@ -1639,7 +1685,6 @@ export default function Inventory() {
     setSelectedItem(updatedItem);
 
     // ── Log movement (fire-and-forget, non-fatal) ──────────────────────────────
-    // Use the canonical item_id (shared identity) if set, else fall back to row id.
     const movItemId = selectedItem.itemId ?? selectedItem.id;
     const movLocId = selectedItem.locationId ?? resolveLocationId(user);
     const movType = (adjType === 'Add') ? 'adjustment_in' : 'adjustment_out';
@@ -3402,61 +3447,79 @@ export default function Inventory() {
               <div className="bg-neutral-50 border border-neutral-200 rounded-xl p-4">
                 <p className="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Current Stock</p>
                 <div className="mt-1 flex items-end gap-2">
-                  <span className={`text-3xl font-bold ${selectedItem.inStock < selectedItem.parLevel ? 'text-danger-600' : 'text-neutral-900'}`}>{selectedItem.inStock}</span>
+                  {isStockCorrupted(selectedItem) ? (
+                    <span className="text-base font-bold text-red-600">Invalid stock</span>
+                  ) : (
+                    <span className={`text-3xl font-bold ${safeStock(selectedItem) < Number(selectedItem.parLevel || 0) ? 'text-danger-600' : 'text-neutral-900'}`}>{safeStock(selectedItem)}</span>
+                  )}
                   <span className="text-sm text-neutral-500 font-medium mb-1">/ {selectedItem.parLevel} {selectedItem.unit}</span>
                 </div>
               </div>
               <div className="bg-neutral-50 border border-neutral-200 rounded-xl p-4">
                 <p className="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Total Value Held</p>
                 <div className="mt-1">
-                  <span className="text-3xl font-bold text-neutral-900">${(selectedItem.inStock * selectedItem.cost).toFixed(2)}</span>
+                  {(() => {
+                    const sv = safeStock(selectedItem);
+                    const cv = Number(selectedItem.cost);
+                    if (!Number.isFinite(sv) || !Number.isFinite(cv)) return <span className="text-3xl font-bold text-neutral-400">—</span>;
+                    return <span className="text-3xl font-bold text-neutral-900">${(sv * cv).toFixed(2)}</span>;
+                  })()}
                 </div>
 	              </div>
 	            </div>
 
+            {/* ─────────────────────────────────────────────────
+                 SECTION 1: SET FINAL STOCK COUNT (PRIMARY)
+            ──────────────────────────────────────────────── */}
             {(() => {
               const preview = getStockCorrectionPreview(selectedItem);
               const baseUnit = selectedItem.baseUnit || selectedItem.unit;
               const unitOptions = getStockCorrectionUnitOptions(selectedItem);
+              const selectedUnitOpt = unitOptions.find(o => o.name === (stockCorrectionUnit || baseUnit)) ?? unitOptions[0];
               return (
                 <div>
-                  <h3 className="text-sm font-bold text-neutral-900 mb-3 uppercase tracking-wider flex items-center justify-between border-b border-neutral-100 pb-2">
-                    <span className="flex items-center gap-2"><Save className="h-4 w-4 text-brand-600" /> Set Stock to Correct Count</span>
-                    <span className="text-[10px] text-neutral-400 font-medium uppercase">Exact count correction</span>
+                  <h3 className="text-sm font-bold text-neutral-900 mb-1 uppercase tracking-wider flex items-center justify-between border-b border-neutral-100 pb-2">
+                    <span className="flex items-center gap-2"><Save className="h-4 w-4 text-brand-600" /> Set Final Stock Count</span>
+                    <span className="text-[10px] text-emerald-600 font-bold bg-emerald-50 px-2 py-0.5 rounded uppercase">Primary</span>
                   </h3>
+                  <p className="text-[11px] text-neutral-500 mb-3">Use this for physical counts. This sets stock to exactly what you enter.</p>
+                  {preview.corrupted && (
+                    <div className="mb-3 rounded-lg border border-red-200 bg-red-50 p-2.5 text-xs text-red-700 font-medium">
+                      ⚠️ Invalid stock value detected. Use Set Final Stock to overwrite with a clean numeric value.
+                    </div>
+                  )}
                   <div className="bg-white border border-neutral-200 rounded-lg p-4 space-y-4 shadow-sm">
                     <div className="grid grid-cols-2 gap-3">
                       <div className="space-y-1.5">
-                        <label className="text-xs font-semibold text-neutral-900">Correct Stock Quantity</label>
+                        <label className="text-xs font-semibold text-neutral-900">Physical Count Quantity</label>
                         <input
                           type="number"
                           min="0"
                           step="any"
                           value={stockCorrectionQty}
-                          onChange={(e) => {
-                            setStockCorrectionQty(e.target.value);
-                            setStockCorrectionConfirm("");
-                          }}
+                          onChange={(e) => { setStockCorrectionQty(e.target.value); setStockCorrectionConfirm(""); }}
                           className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
-                          placeholder="e.g. 0"
+                          placeholder="e.g. 1"
                         />
                       </div>
                       <div className="space-y-1.5">
                         <label className="text-xs font-semibold text-neutral-900">Unit</label>
                         <select
                           value={stockCorrectionUnit || baseUnit}
-                          onChange={(e) => {
-                            setStockCorrectionUnit(e.target.value);
-                            setStockCorrectionConfirm("");
-                          }}
+                          onChange={(e) => { setStockCorrectionUnit(e.target.value); setStockCorrectionConfirm(""); }}
                           className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
                         >
                           {unitOptions.map(option => (
                             <option key={option.name} value={option.name}>
-                              {option.isBase ? option.name : `${option.name} (x${option.conversion} ${baseUnit})`}
+                              {option.isBase ? option.name : `${option.name} = ${option.conversion} ${baseUnit}`}
                             </option>
                           ))}
                         </select>
+                        {!selectedUnitOpt.isBase && (
+                          <p className="text-[10px] text-brand-600 font-medium">
+                            1 {selectedUnitOpt.name} = {selectedUnitOpt.conversion} {baseUnit}
+                          </p>
+                        )}
                       </div>
                     </div>
                     <div className="space-y-1.5">
@@ -3466,14 +3529,17 @@ export default function Inventory() {
                         value={stockCorrectionReason}
                         onChange={(e) => setStockCorrectionReason(e.target.value)}
                         className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
-                        placeholder="Required: why this count is being corrected"
+                        placeholder="Required: reason for this count correction"
                       />
                     </div>
-                    <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-3 text-xs text-neutral-700 space-y-1">
-                      <div>Current stock: <strong>{preview.currentBaseQty} {baseUnit}</strong></div>
-                      <div>Correct stock: <strong>{preview.targetBaseQty ?? "—"} {baseUnit}</strong></div>
-                      <div>Adjustment to post: <strong className={(preview.delta ?? 0) < 0 ? "text-red-700" : "text-green-700"}>{preview.delta ?? "—"} {baseUnit}</strong></div>
-                      <div>Final stock after correction: <strong>{preview.targetBaseQty ?? "—"} {baseUnit}</strong></div>
+                    {/* Preview */}
+                    <div className="rounded-lg border border-brand-100 bg-brand-50 p-3 text-xs text-neutral-700 space-y-1">
+                      <div>Entered count: <strong>{preview.enteredQty ?? '—'} {selectedUnitOpt.name}</strong></div>
+                      <div>Converted final stock: <strong className="text-emerald-700">{preview.targetBaseQty != null ? `${preview.targetBaseQty} ${baseUnit}` : '—'}</strong></div>
+                      <div>Current stock: <strong>{preview.corrupted ? 'Invalid ⚠' : `${preview.currentBaseQty} ${baseUnit}`}</strong></div>
+                      {preview.delta != null && (
+                        <div>Adjustment system will post: <strong className={(preview.delta) < 0 ? 'text-red-700' : 'text-green-700'}>{preview.delta > 0 ? '+' : ''}{preview.delta.toFixed(4)} {baseUnit}</strong></div>
+                      )}
                     </div>
                     {preview.isHuge && (
                       <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 space-y-2">
@@ -3488,60 +3554,85 @@ export default function Inventory() {
                       </div>
                     )}
                     <button
-                      disabled={
-                        isApplyingStockCorrection ||
-                        preview.targetBaseQty === null ||
-                        !stockCorrectionReason.trim() ||
-                        (preview.isHuge && stockCorrectionConfirm.trim() !== "CONFIRM")
-                      }
+                      disabled={isApplyingStockCorrection || preview.targetBaseQty === null || !stockCorrectionReason.trim() || (preview.isHuge && stockCorrectionConfirm.trim() !== "CONFIRM")}
                       onClick={applyStockCorrection}
-                      className="w-full py-2 bg-brand-600 text-white rounded text-sm font-semibold hover:bg-brand-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                      className="w-full py-2.5 bg-brand-600 text-white rounded text-sm font-bold hover:bg-brand-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                     >
-                      <Save className="h-4 w-4" /> {isApplyingStockCorrection ? "Applying..." : "Apply Stock Correction"}
+                      <Save className="h-4 w-4" /> {isApplyingStockCorrection ? "Applying..." : "Set Final Stock"}
                     </button>
                   </div>
                 </div>
               );
             })()}
 
+            {/* ────────────────────────────────────────────────
+                 SECTION 2: RECEIVE / REMOVE / WASTE
+            ──────────────────────────────────────────────── */}
 	            <div>
-	              <h3 className="text-sm font-bold text-neutral-900 mb-3 uppercase tracking-wider flex items-center justify-between border-b border-neutral-100 pb-2">
-	                <span className="flex items-center gap-2"><ArrowUp className="h-4 w-4 text-brand-600" /> Stock Adjustment</span>
-                <span className="text-[10px] text-neutral-400 font-medium uppercase">{userRole} access granted</span>
+	              <h3 className="text-sm font-bold text-neutral-900 mb-1 uppercase tracking-wider flex items-center justify-between border-b border-neutral-100 pb-2">
+	                <span className="flex items-center gap-2"><ArrowUp className="h-4 w-4 text-brand-600" /> Receive / Remove / Waste Stock</span>
+                <span className="text-[10px] text-neutral-400 font-medium uppercase">{userRole} access</span>
               </h3>
+              <p className="text-[11px] text-neutral-500 mb-3">Use this only when adding or removing stock from the current balance.</p>
+              {isStockCorrupted(selectedItem) && (
+                <div className="mb-3 rounded-lg border border-red-200 bg-red-50 p-2.5 text-xs text-red-700 font-medium">
+                  ⚠️ Stock value is corrupted. Use “Set Final Stock Count” above to fix it before posting movements.
+                </div>
+              )}
               <div className="bg-white border border-neutral-200 rounded-lg p-4 space-y-4 shadow-sm">
-                <div className="flex gap-2">
-                  <button onClick={() => setAdjType("Add")} className={`flex-1 py-1.5 border rounded flex items-center justify-center gap-1.5 text-xs font-semibold transition-all ${adjType === "Add" ? 'ring-2 ring-offset-1 text-success-700 bg-success-50 border-success-200 ring-success-500' : 'bg-white text-neutral-500 hover:bg-neutral-50'}`}><Plus className="h-3 w-3" /> Add</button>
-                  <button onClick={() => setAdjType("Remove")} className={`flex-1 py-1.5 border rounded flex items-center justify-center gap-1.5 text-xs font-semibold transition-all ${adjType === "Remove" ? 'ring-2 ring-offset-1 text-warning-700 bg-warning-50 border-warning-200 ring-warning-500' : 'bg-white text-neutral-500 hover:bg-neutral-50'}`}><ArrowDown className="h-3 w-3" /> Remove</button>
-                  <button onClick={() => setAdjType("Waste")} className={`flex-1 py-1.5 border rounded flex items-center justify-center gap-1.5 text-xs font-semibold transition-all ${adjType === "Waste" ? 'ring-2 ring-offset-1 text-danger-700 bg-danger-50 border-danger-200 ring-danger-500' : 'bg-white text-neutral-500 hover:bg-neutral-50'}`}><Trash2 className="h-3 w-3" /> Waste</button>
-                </div>
-                <div className="flex gap-3">
-                  <div className="flex-1 space-y-1.5">
-                    <label className="text-xs font-semibold text-neutral-900">Quantity</label>
-                    <input type="number" min="0" step="0.1" value={adjQty} onChange={(e) => setAdjQty(e.target.value)} className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="e.g., 2.5" />
-                  </div>
-                  <div className="flex-1 space-y-1.5">
-                    <label className="text-xs font-semibold text-neutral-900">Unit Transacted</label>
-                    <select value={adjUnit} onChange={(e) => setAdjUnit(e.target.value)} className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white">
-                      {selectedItem.purchaseUnits ? selectedItem.purchaseUnits.map((u: any) => (
-                        <option key={u.name} value={u.name}>{u.name} (x{u.conversion} {selectedItem.baseUnit || selectedItem.unit})</option>
-                      )) : (
-                        <option value={selectedItem.baseUnit || selectedItem.unit}>{selectedItem.baseUnit || selectedItem.unit}</option>
-                      )}
-                    </select>
-                  </div>
-                </div>
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold text-neutral-900">Notes / Reason</label>
-                  <input type="text" value={adjNotes} onChange={(e) => setAdjNotes(e.target.value)} className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="Optional details..." />
-                </div>
-                <button disabled={!adjQty || parseFloat(adjQty) <= 0} onClick={saveAdjustment} className="w-full py-2 bg-neutral-900 text-white rounded text-sm font-semibold hover:bg-neutral-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
-                  <Save className="h-4 w-4" /> Commit Adjustment
-                </button>
+                {(() => {
+                  const baseUnit = selectedItem.baseUnit || selectedItem.unit;
+                  const unitOptions = getStockCorrectionUnitOptions(selectedItem);
+                  const selOpt = unitOptions.find(u => u.name === adjUnit) ?? unitOptions[0];
+                  const numericQty = parseFloat(adjQty);
+                  const previewBase = Number.isFinite(numericQty) && numericQty > 0 ? numericQty * selOpt.conversion : null;
+                  const currentSafe = safeStock(selectedItem);
+                  const previewFinal = previewBase != null ? (adjType === 'Add' ? currentSafe + previewBase : currentSafe - previewBase) : null;
+                  return (<>
+                    <div className="flex gap-2">
+                      <button onClick={() => setAdjType("Add")} className={`flex-1 py-1.5 border rounded flex items-center justify-center gap-1.5 text-xs font-semibold transition-all ${adjType === "Add" ? 'ring-2 ring-offset-1 text-success-700 bg-success-50 border-success-200 ring-success-500' : 'bg-white text-neutral-500 hover:bg-neutral-50'}`}><Plus className="h-3 w-3" /> Receive</button>
+                      <button onClick={() => setAdjType("Remove")} className={`flex-1 py-1.5 border rounded flex items-center justify-center gap-1.5 text-xs font-semibold transition-all ${adjType === "Remove" ? 'ring-2 ring-offset-1 text-warning-700 bg-warning-50 border-warning-200 ring-warning-500' : 'bg-white text-neutral-500 hover:bg-neutral-50'}`}><ArrowDown className="h-3 w-3" /> Remove</button>
+                      <button onClick={() => setAdjType("Waste")} className={`flex-1 py-1.5 border rounded flex items-center justify-center gap-1.5 text-xs font-semibold transition-all ${adjType === "Waste" ? 'ring-2 ring-offset-1 text-danger-700 bg-danger-50 border-danger-200 ring-danger-500' : 'bg-white text-neutral-500 hover:bg-neutral-50'}`}><Trash2 className="h-3 w-3" /> Waste</button>
+                    </div>
+                    <div className="flex gap-3">
+                      <div className="flex-1 space-y-1.5">
+                        <label className="text-xs font-semibold text-neutral-900">Quantity</label>
+                        <input type="number" min="0" step="0.1" value={adjQty} onChange={(e) => setAdjQty(e.target.value)} className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="e.g., 1" />
+                      </div>
+                      <div className="flex-1 space-y-1.5">
+                        <label className="text-xs font-semibold text-neutral-900">Unit</label>
+                        <select value={adjUnit || baseUnit} onChange={(e) => setAdjUnit(e.target.value)} className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white">
+                          {unitOptions.map((u) => (
+                            <option key={u.name} value={u.name}>
+                              {u.isBase ? u.name : `${u.name} = ${u.conversion} ${baseUnit}`}
+                            </option>
+                          ))}
+                        </select>
+                        {!selOpt.isBase && <p className="text-[10px] text-brand-600 font-medium">1 {selOpt.name} = {selOpt.conversion} {baseUnit}</p>}
+                      </div>
+                    </div>
+                    {previewBase != null && (
+                      <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-2.5 text-xs text-neutral-700 space-y-0.5">
+                        <div>Entered: <strong>{numericQty} {selOpt.name}</strong> → <strong>{previewBase.toFixed(4)} {baseUnit}</strong></div>
+                        <div>Current stock: <strong>{currentSafe} {baseUnit}</strong></div>
+                        <div>New stock after {adjType.toLowerCase()}: <strong className={previewFinal != null && previewFinal < 0 ? 'text-red-600' : 'text-emerald-700'}>{previewFinal?.toFixed(4) ?? '—'} {baseUnit}</strong></div>
+                        {previewFinal != null && previewFinal < 0 && <div className="text-red-600 font-semibold">⚠ Result would be negative. Check quantity.</div>}
+                      </div>
+                    )}
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-semibold text-neutral-900">Notes / Reason</label>
+                      <input type="text" value={adjNotes} onChange={(e) => setAdjNotes(e.target.value)} className="w-full py-2 px-3 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="Optional details..." />
+                    </div>
+                    <button disabled={!adjQty || parseFloat(adjQty) <= 0 || isStockCorrupted(selectedItem)} onClick={saveAdjustment} className="w-full py-2 bg-neutral-900 text-white rounded text-sm font-semibold hover:bg-neutral-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
+                      <Save className="h-4 w-4" /> Commit {adjType}
+                    </button>
+                  </>);
+                })()}
               </div>
             </div>
 
             {userRole === "HQ" && (
+
               <div className="space-y-6">
                 <div>
                   <h3 className="text-sm font-bold text-neutral-900 mb-3 uppercase tracking-wider flex items-center justify-between border-b border-neutral-100 pb-2">
