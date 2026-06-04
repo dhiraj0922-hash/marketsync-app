@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Drawer } from "@/components/ui/drawer";
 import { Calendar, CheckCircle2, Clock, Smartphone, Play, Save, Send, ShieldCheck, FileEdit, Calculator, ArrowRight, X, Search, SlidersHorizontal } from "lucide-react";
-import { loadCounts, saveCounts, loadInventory, saveInventory, loadLocations, loadSuppliers } from "@/lib/storage";
+import { loadCounts, saveCounts, loadInventory, loadLocations, loadSuppliers, updateInventoryItemScoped } from "@/lib/storage";
 import { useAuth } from "@/components/AuthProvider";
 import { isHqAdmin, resolveLocationId } from "@/lib/roles";
 
@@ -262,17 +262,23 @@ export default function Counts() {
     // IF APPROVED -> MUTATE THE MASTER INVENTORY!!
     if (status === "Approved") {
       let newInventory = [...inventoryData];
-      countItems.forEach(countedItem => {
+      const updateErrors: string[] = [];
+      for (const countedItem of countItems) {
          if (countedItem.physicalQty !== "" && countedItem.physicalQty !== undefined) {
            const invIdx = newInventory.findIndex(inv => inv.id === countedItem.id);
            if (invIdx > -1) {
-             newInventory[invIdx].inStock = parseFloat(countedItem.physicalQty as string);
+             const updatedRow = { ...newInventory[invIdx], inStock: parseFloat(countedItem.physicalQty as string) };
+             const invRes = await updateInventoryItemScoped(updatedRow, updatedRow.locationId);
+             if (!invRes.success) {
+               updateErrors.push(`${updatedRow.name}: ${invRes.error?.message ?? 'update failed'}`);
+             } else {
+               newInventory[invIdx] = updatedRow;
+             }
            }
          }
-      });
-      const invRes = await saveInventory(newInventory);
-      if (!invRes?.success) {
-         alert(`Database Error (Inventory Update): ${invRes?.error?.message}`);
+      }
+      if (updateErrors.length > 0) {
+         alert(`Database Error (Inventory Update): ${updateErrors.join("\n")}`);
          return;
       }
       setInventoryData(newInventory);

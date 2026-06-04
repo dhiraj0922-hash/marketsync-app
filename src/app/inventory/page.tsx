@@ -10,7 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
 import { Search, Plus, Upload, MoreHorizontal, ShoppingCart, History, Save, Trash2, ArrowDown, ArrowUp, AlertTriangle, X, Download, Loader2, Link2, ChevronDown, ChevronRight, GitMerge, MapPin, Copy } from "lucide-react";
-import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId, logMovement, deleteInventoryItem, deleteSaleItemByNameOrId, insertPurchaseOptions, loadPurchaseOptions, savePurchaseOptions, deletePurchaseOption, updateInventoryRowItemId, allocateInventoryToLocations, loadLocations, copyInventoryItemsToLocations, type CopyInventoryItemsToLocationsResult, deriveLockedBaseUnit, getAllowedBaseUnits, resolveStorageBaseUnit, getFamilyAllowedInnerUnits, calcBaseQtyPerPurchaseUnit, inferMeasurementFamily, setInventoryStockToTarget, loadRecipes, loadProductionMovements } from "@/lib/storage";
+import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId, logMovement, deleteInventoryItem, deleteSaleItemByNameOrId, insertPurchaseOptions, loadPurchaseOptions, savePurchaseOptions, deletePurchaseOption, updateInventoryRowItemId, updateInventoryItemScoped, allocateInventoryToLocations, loadLocations, copyInventoryItemsToLocations, type CopyInventoryItemsToLocationsResult, deriveLockedBaseUnit, getAllowedBaseUnits, resolveStorageBaseUnit, getFamilyAllowedInnerUnits, calcBaseQtyPerPurchaseUnit, inferMeasurementFamily, setInventoryStockToTarget, loadRecipes, loadProductionMovements } from "@/lib/storage";
 import { convertQuantity } from "@/lib/units";
 import { supabase } from "@/lib/supabase";
 
@@ -522,6 +522,42 @@ export default function Inventory() {
 
   console.log(`[Diagnostic] Extracted ${uniqueCategories.length} categories from Inventory.`);
   console.log(`[Diagnostic] Extracted ${uniqueSuppliers.length} suppliers from Inventory.`);
+
+  useEffect(() => {
+    if (process.env.NODE_ENV !== "development" || inventoryData.length === 0) return;
+    const grouped = new Map<string, any[]>();
+    for (const row of inventoryData) {
+      const supplier = getSupplierName(row.supplierId);
+      const key = [
+        normalizeInventoryDisplayKey(row.name),
+        normalizeInventoryDisplayKey(supplier),
+        normalizeInventoryDisplayKey(row.baseUnit ?? row.unit),
+      ].join("|");
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key)!.push(row);
+    }
+    const isolationRows = Array.from(grouped.entries())
+      .filter(([, rows]) => rows.length > 1)
+      .flatMap(([groupKey, rows]) =>
+        rows.map((row: any) => ({
+          groupKey,
+          rowId: row.id,
+          itemId: row.itemId,
+          name: row.name,
+          supplier: getSupplierName(row.supplierId),
+          uom: row.baseUnit ?? row.unit,
+          locationId: row.locationId,
+          currentStock: row.inStock,
+          physicalCount: row.physicalCount ?? "n/a",
+          parLevel: row.parLevel,
+          unitCost: row.cost,
+          purchaseCost: row.purchaseCost ?? "n/a",
+        }))
+      );
+    if (isolationRows.length > 0) {
+      console.table(isolationRows);
+    }
+  }, [inventoryData, suppliersData]);
 
   const effectiveInventoryLocationId = isHqAdmin(user)
     ? activeLocation?.id ?? null
@@ -1291,7 +1327,7 @@ export default function Inventory() {
       const newInventory = inventoryData.map(i => i.id === updated.id ? updated : i);
 
       console.log("[EditItem] request start  id=", updated.id);
-      const res = await saveInventory(newInventory);
+      const res = await updateInventoryItemScoped(updated, updated.locationId);
       if (!res?.success) {
         const msg = `Save failed: ${res?.error?.message ?? JSON.stringify(res?.error)}`;
         console.log("[EditItem] request error", msg);
@@ -1674,7 +1710,7 @@ export default function Inventory() {
       [selectedItem.id]: [logEntry, ...currentHistoryList]
     };
 
-    const res = await saveInventory(newInventory);
+    const res = await updateInventoryItemScoped(updatedItem, selectedItem.locationId);
     if (!res.success) {
       alert(`Save Failed: ${res.error?.message || "Database rejected the adjustment."}`);
       return;
@@ -1734,7 +1770,7 @@ export default function Inventory() {
 
       const updatedItem = { ...selectedItem, inStock: selectedItem.inStock + delta, updatedAt: Date.now() };
       const newInventory = inventoryData.map((i: any) => i.id === selectedItem.id ? updatedItem : i);
-      const res = await saveInventory([updatedItem]);
+      const res = await updateInventoryItemScoped(updatedItem, selectedItem.locationId);
       if (!res.success) throw new Error(res.error?.message ?? 'Save failed');
       setInventoryData(newInventory);
       setSelectedItem(updatedItem);
@@ -1795,7 +1831,7 @@ export default function Inventory() {
 
       const updatedItem = { ...selectedItem, inStock: selectedItem.inStock + reversal, updatedAt: Date.now() };
       const newInventory = inventoryData.map((i: any) => i.id === selectedItem.id ? updatedItem : i);
-      const res = await saveInventory([updatedItem]);
+      const res = await updateInventoryItemScoped(updatedItem, selectedItem.locationId);
       if (!res.success) throw new Error(res.error?.message ?? 'Save failed');
       setInventoryData(newInventory);
       setSelectedItem(updatedItem);
@@ -1863,7 +1899,7 @@ export default function Inventory() {
     };
     const newInventory = inventoryData.map(i => i.id === selectedItem.id ? updatedItem : i);
 
-    const res = await saveInventory(newInventory);
+    const res = await updateInventoryItemScoped(updatedItem, selectedItem.locationId);
     if (!res.success) {
       alert(`Save Failed: ${res.error?.message || "Database rejected unit update."}`);
       return;
@@ -1903,7 +1939,7 @@ export default function Inventory() {
       [selectedItem.id]: [logEntry, ...currentHistoryList]
     };
 
-    const res = await saveInventory(newInventory);
+    const res = await updateInventoryItemScoped(updatedItem, selectedItem.locationId);
     if (!res.success) {
       alert(`Save Failed: ${res.error?.message || "Database rejected supplier match."}`);
       return;
@@ -2038,7 +2074,7 @@ export default function Inventory() {
     }
 
     // Use the returned UUID as the canonical id for local state
-    const localItem = { ...finalItem, id: res.id };
+    const localItem = { ...finalItem, id: res.id, locationId, location_id: locationId };
     setInventoryData([localItem, ...inventoryData]);
 
     // Reset new-item form state
@@ -2122,7 +2158,11 @@ export default function Inventory() {
           ` | sourceUOM="${rawUom}" → baseUnit="${baseUnit}" | itemType="${payload.itemType}"`
         );
 
-        const isDuplicate = inventoryData.some(i => i.name.toLowerCase() === payload.name.toLowerCase());
+        const previewLocationId = effectiveInventoryLocationId ?? resolveLocationId(user);
+        const isDuplicate = inventoryData.some(i =>
+          i.locationId === previewLocationId &&
+          i.name.toLowerCase() === payload.name.toLowerCase()
+        );
         parsedData.push({ payload, isDuplicate });
       }
 
@@ -2145,6 +2185,12 @@ export default function Inventory() {
       }
 
       console.log("[Commit Import] Phase A: Pre-flight Validation");
+      const importLocationId = effectiveInventoryLocationId ?? resolveLocationId(user);
+      if (!importLocationId) {
+        setImportErrors(["Select a specific inventory location before importing. All Locations view cannot be used for location-scoped inventory writes."]);
+        setIsCommitting(false);
+        return;
+      }
       const currentCategoriesLower = categories.map(c => c.toLowerCase());
       const newlyCreatedCategories: string[] = [];
       const finalCategoriesList = [...categories];
@@ -2153,7 +2199,11 @@ export default function Inventory() {
       const newlyCreatedSuppliers: any[] = [];
       const finalSuppliersList = [...suppliersData];
 
-      const currentInventoryMap = new Map(inventoryData.map(i => [i.name.toLowerCase(), i]));
+      const currentInventoryMap = new Map(
+        inventoryData
+          .filter((i: any) => i.locationId === importLocationId)
+          .map(i => [i.name.toLowerCase(), i])
+      );
       const timestamp = Date.now();
 
       const newItems: any[] = [];
@@ -2227,8 +2277,6 @@ export default function Inventory() {
             updatedAt: timestamp
           });
         } else {
-          // Determine location for this import (HQ admin → LOC-HQ, else current user location)
-          const importLocationId: string = resolveLocationId(user);
           const newRowId = crypto.randomUUID(); // always unique per location row
 
           // Reuse shared item_id if same product name exists on the other side of HQ/store boundary
@@ -2285,7 +2333,7 @@ export default function Inventory() {
         return;
       }
 
-      console.log("[Commit Import] Phase B: Database Schema Commits");
+      console.log("[Commit Import] Phase B: location-scoped database commits", { importLocationId, newItems: newItems.length, updatedItems: updatedItems.length });
       let unifiedInventory = [...inventoryData];
       for (const u of updatedItems) {
         const ix = unifiedInventory.findIndex(i => i.id === u.id);
@@ -2293,9 +2341,17 @@ export default function Inventory() {
       }
       unifiedInventory = [...newItems, ...unifiedInventory];
 
-      const res = await saveInventory(unifiedInventory);
-      if (!res.success) {
-        setImportErrors([`Database Rejected Bulk Upsert: ${res.error?.message || JSON.stringify(res.error)}`]);
+      const commitErrors: string[] = [];
+      for (const u of updatedItems) {
+        const res = await updateInventoryItemScoped(u, importLocationId);
+        if (!res.success) commitErrors.push(`${u.name}: ${res.error?.message || JSON.stringify(res.error)}`);
+      }
+      if (newItems.length > 0) {
+        const res = await saveInventory(newItems);
+        if (!res.success) commitErrors.push(`New item insert failed: ${res.error?.message || JSON.stringify(res.error)}`);
+      }
+      if (commitErrors.length > 0) {
+        setImportErrors(commitErrors);
         setIsCommitting(false);
         return;
       }

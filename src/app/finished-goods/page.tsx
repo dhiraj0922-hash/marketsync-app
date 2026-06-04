@@ -26,6 +26,8 @@ import {
   Calendar,
   DollarSign,
   Package,
+  Edit3,
+  Check,
 } from "lucide-react";
 import {
   loadRecipes,
@@ -40,6 +42,7 @@ import {
   updateSaleItemStock,
   deductInventoryItemStock,
   adjustInventoryItemStock,
+  updateInventoryItemScoped,
   loadProductionMovements,
   upsertRecipe,
   syncLinkedFgCost,
@@ -289,6 +292,132 @@ export default function FinishedGoods() {
   const [isAutoFulfillMode, setIsAutoFulfillMode] = useState<boolean>(false);
   const [isImportOpen, setIsImportOpen]         = useState(false);
   const [isLoading, setIsLoading]               = useState(true);
+
+  // ── Ingredient price overrides (session-only, resets on selection change) ──
+  const [ingredientOverrides, setIngredientOverrides] = useState<Record<number, any>>({});
+  // Which ingredient's override modal is open
+  const [overrideModal, setOverrideModal] = useState<{ ing: any; ingIdx: number } | null>(null);
+
+  // Local state for override modal input fields
+  const [modalPurchaseCost, setModalPurchaseCost] = useState<string>('');
+  const [modalPurchaseUom, setModalPurchaseUom] = useState<string>('');
+  const [modalConversion, setModalConversion] = useState<string>('');
+  const [modalSyncToInventory, setModalSyncToInventory] = useState<boolean>(false);
+
+  // Clear overrides when selected FG changes
+  useEffect(() => {
+    setIngredientOverrides({});
+  }, [selectedFG]);
+
+  // Synchronise modal input fields with either existing override or original values on open
+  useEffect(() => {
+    if (overrideModal) {
+      const { ing, ingIdx } = overrideModal;
+      const existing = ingredientOverrides[ingIdx];
+      const rawItem = getEffectiveRawItem(ing, ingIdx);
+      
+      const defaultCost = existing ? existing.purchaseCost : (rawItem?.purchaseCost ?? 0);
+      const defaultUom = existing ? existing.purchaseUom : (rawItem?.purchaseUom ?? 'Case');
+      
+      let defaultConversion = 1;
+      if (existing) {
+        defaultConversion = existing.conversion;
+      } else if (rawItem) {
+        const primaryUnit = rawItem.purchaseUnits?.find((u: any) => u.isPrimary) || rawItem.purchaseUnits?.[0];
+        defaultConversion = primaryUnit ? primaryUnit.conversion : (rawItem.innerUnitSize ?? 1);
+      }
+
+      setModalPurchaseCost(defaultCost.toString());
+      setModalPurchaseUom(defaultUom);
+      setModalConversion(defaultConversion.toString());
+      setModalSyncToInventory(false);
+    }
+  }, [overrideModal, ingredientOverrides]);
+
+  const handleSaveOverride = async () => {
+    if (!overrideModal) return;
+    const { ing, ingIdx } = overrideModal;
+    const rawItem = getEffectiveRawItem(ing, ingIdx);
+    if (!rawItem) return;
+
+    const parsedCost = parseFloat(modalPurchaseCost);
+    const parsedConversion = parseFloat(modalConversion);
+    const trimmedUom = modalPurchaseUom.trim();
+
+    if (isNaN(parsedCost) || parsedCost < 0) {
+      alert("Please enter a valid non-negative purchase cost.");
+      return;
+    }
+    if (isNaN(parsedConversion) || parsedConversion <= 0) {
+      alert("Please enter a valid positive conversion factor.");
+      return;
+    }
+    if (!trimmedUom) {
+      alert("Please enter a purchase unit label.");
+      return;
+    }
+
+    const newOverride = {
+      purchaseCost: parsedCost,
+      purchaseUom: trimmedUom,
+      conversion: parsedConversion,
+    };
+
+    if (modalSyncToInventory) {
+      const confirmSave = window.confirm(
+        `Are you sure you want to permanently update the master inventory pricing for "${rawItem.name}" to $${parsedCost.toFixed(2)} / ${trimmedUom} (Conversion: ${parsedConversion} ${rawItem.baseUnit || rawItem.unit || 'ea'})?`
+      );
+      if (!confirmSave) return;
+
+      try {
+        const updatedInventory = inventoryData.map((item: any) => {
+          if (item.id.toString() === rawItem.id.toString()) {
+            return {
+              ...item,
+              purchaseCost: parsedCost,
+              purchaseUom: trimmedUom,
+              packQty: 1,
+              innerUnitSize: parsedConversion,
+              purchaseUnits: [
+                {
+                  name: trimmedUom,
+                  conversion: parsedConversion,
+                  isPrimary: true,
+                },
+              ],
+            };
+          }
+          return item;
+        });
+
+        const updatedRow = updatedInventory.find((item: any) => item.id.toString() === rawItem.id.toString());
+        const scopedRes = await updateInventoryItemScoped(updatedRow, updatedRow?.locationId);
+        if (!scopedRes.success) throw new Error(scopedRes.error?.message ?? "Scoped inventory update failed");
+        setInventoryData(updatedInventory);
+        console.log(`Successfully updated master inventory item "${rawItem.name}" pricing`);
+      } catch (err) {
+        console.error("Failed to save master inventory pricing:", err);
+        alert("Failed to update master inventory. Please try again.");
+        return;
+      }
+    }
+
+    setIngredientOverrides((prev) => ({
+      ...prev,
+      [ingIdx]: newOverride,
+    }));
+
+    setOverrideModal(null);
+  };
+
+  const handleClearOverride = (ingIdx: number) => {
+    setIngredientOverrides((prev) => {
+      const next = { ...prev };
+      delete next[ingIdx];
+      return next;
+    });
+    setOverrideModal(null);
+  };
 
   // ── Ingredient substitution (session-only, never persisted) ──────────────
   // Key = ingredient index in recipe.ingredients[]
@@ -740,6 +869,22 @@ export default function FinishedGoods() {
   };
 
 
+  // ── getSourceLabel: map costing path to user-friendly source labels ──
+  const getSourceLabel = (ing: any) => {
+    if (ing.isLabour) return 'Labour';
+    if (ing.isOverridden) return 'Override';
+    const path = ing.costAudit?.costPathLabel;
+    if (!path) return '—';
+    switch (path) {
+      case 'direct_base_unit': return 'Direct';
+      case 'measurement_unit_conversion': return 'Pack Uom';
+      case 'purchase_unit_conversion': return 'Purchase Uom';
+      case 'fallback_cost': return 'Fallback';
+      case 'prep_cost': return 'Prep Recipe';
+      default: return path;
+    }
+  };
+
   // ── getLinkedRecipe: authoritative recipe lookup for prep inventory items ──
   // For prep items: use fg.linkedRecipeId directly (explicit HQ mapping).
   // For FG/hq_sale_items: fall through to findRecipeForFg() which handles
@@ -757,11 +902,18 @@ export default function FinishedGoods() {
   // Returns the effective raw item for a given ingredient — substitute if set,
   // otherwise the original inventory lookup.  Keyed by ingredient array index.
   const getEffectiveRawItem = (ing: any, ingIdx: number, invList = inventoryData): any | null => {
+    if (!ing) return null;
     if (substitutes.has(ingIdx)) return substitutes.get(ingIdx);
+    if (!ing.inventoryId) return null;
+    
+    const searchId = ing.inventoryId.toString();
     return invList.find(
-      (i: any) =>
-        i.id.toString() === ing.inventoryId.toString() ||
-        i.itemId === ing.inventoryId
+      (i: any) => {
+        if (!i) return false;
+        const iId = i.id !== undefined && i.id !== null ? i.id.toString() : '';
+        const iItemId = i.itemId !== undefined && i.itemId !== null ? i.itemId.toString() : '';
+        return iId === searchId || iItemId === searchId;
+      }
     ) ?? null;
   };
 
@@ -793,17 +945,43 @@ export default function FinishedGoods() {
       let conversionError  = '';
       let itemCost         = 0;    // cost per base unit
       let lineCostAudit: CostAuditRecord | null = null;
+      let originalPriceLabel = '';
+      const activeOverride = ingredientOverrides[ingIdx];
 
       if (rawItem) {
-        // ── Route through the canonical costing engine ────────────────────────
-        // Use calculateIngredientCost so production and recipe editor share the
-        // same quantity conversion, purchase-pack handling, and audit fields.
-        // the recipe builder — same function, same math, same result.
-        const lineResult = calculateIngredientCost({
+        // Calculate original for reference/audit label
+        const originalResult = calculateIngredientCost({
           item:       rawItem,
           quantity:   ing.qty,
           unit:       ing.unit,
-          context:    'production',
+          context:    'production_original',
+        });
+        originalPriceLabel = originalResult.ok ? (originalResult.costAudit?.inventoryPriceLabel ?? '') : '';
+
+        const effectiveRawItem = activeOverride
+          ? {
+              ...rawItem,
+              purchaseCost: activeOverride.purchaseCost,
+              purchaseUom: activeOverride.purchaseUom,
+              packQty: 1,
+              innerUnitSize: activeOverride.conversion,
+              innerUnitUom: rawItem.baseUnit || rawItem.unit || 'ea',
+              purchaseUnits: [
+                {
+                  name: activeOverride.purchaseUom,
+                  conversion: activeOverride.conversion,
+                  isPrimary: true,
+                },
+              ],
+            }
+          : rawItem;
+
+        // ── Route through the canonical costing engine ────────────────────────
+        const lineResult = calculateIngredientCost({
+          item:       effectiveRawItem,
+          quantity:   ing.qty,
+          unit:       ing.unit,
+          context:    activeOverride ? 'production_override' : 'production',
         });
 
         if (lineResult.ok) {
@@ -859,6 +1037,9 @@ export default function FinishedGoods() {
         isLabour,
         itemCost,       // cost per base unit (not raw item.cost)
         costAudit: lineCostAudit,  // full 10-field breakdown from costing engine
+        isOverridden: !!activeOverride,
+        originalPriceLabel,
+        overrideData: activeOverride ?? null,
       };
 
     });
@@ -895,7 +1076,7 @@ export default function FinishedGoods() {
   // (findRecipeForFg and executeProduction are defined below)
   // Branched on fg._source for stock write:
   //   'hq_sale_items' → updateSaleItemStock() (writes hq_sale_items.instock)
-  //   undefined/other → saveInventory()       (writes inventory_items, unchanged)
+  //   undefined/other → updateInventoryItemScoped() (writes one inventory_items row)
   const executeProduction = async (
     fg: any,
     targetBatches: number,
@@ -913,7 +1094,7 @@ export default function FinishedGoods() {
     // discarded it because saveInventory() was inside the !isHqItem else block.
     // Ingredient deductions NEVER reached the DB for hq_sale_items items.
     //
-    // Fix: build a deductionPlan[] of (rowId, rawItem, normalizedQty) tuples
+    // Fix: build a deductionPlan[] of (rowId, rawItem, normalizedQty, unitCost) tuples
     // up-front, then call deductInventoryItemStock() for EVERY ingredient on
     // BOTH paths (step 5a). This is an atomic targeted UPDATE per row.
     //
@@ -925,6 +1106,7 @@ export default function FinishedGoods() {
       normalizedQty:  number;
       isLabourItem:   boolean;  // labour items skip stock deduction but still log movement
       substituteNote: string;   // "" when no substitute; "substitute for X" when swapped
+      unitCost:       number;   // potentially overridden cost per base unit
     };
     const deductionPlan: DeductionPlan[] = [];
 
@@ -945,6 +1127,34 @@ export default function FinishedGoods() {
       // logMovement('production_consumption') fires for them.
       const _itemNameUpper = (rawItem.name ?? ing.name ?? "").toUpperCase();
       const isLabourItem = _itemNameUpper.includes("LABOUR") || _itemNameUpper.includes("LABOR");
+
+      // ── Session cost override integration ───────────────────────────────
+      const activeOverride = ingredientOverrides[ingIdx];
+      const effectiveRawItem = activeOverride
+        ? {
+            ...rawItem,
+            purchaseCost: activeOverride.purchaseCost,
+            purchaseUom: activeOverride.purchaseUom,
+            packQty: 1,
+            innerUnitSize: activeOverride.conversion,
+            innerUnitUom: rawItem.baseUnit || rawItem.unit || 'ea',
+            purchaseUnits: [
+              {
+                name: activeOverride.purchaseUom,
+                conversion: activeOverride.conversion,
+                isPrimary: true,
+              },
+            ],
+          }
+        : rawItem;
+
+      const lineResult = calculateIngredientCost({
+        item:       effectiveRawItem,
+        quantity:   ing.qty,
+        unit:       ing.unit,
+        context:    activeOverride ? 'production_override' : 'production',
+      });
+      const itemCost = lineResult.ok ? lineResult.costPerBaseUnit : Number(rawItem.cost ?? 0);
 
       // ── Canonical qty normalisation via the costing engine ──────────────
       // MUST normalise into the item's base unit — not rawItem.unit (display)
@@ -975,6 +1185,7 @@ export default function FinishedGoods() {
         substituteNote: isSubstituteUsed
           ? `[substitute for "${ing.name}"]`
           : "",
+        unitCost: itemCost,
       });
 
       // Mirror in _inv for auto-fulfill FG stock math — skip for labour
@@ -990,7 +1201,7 @@ export default function FinishedGoods() {
     // ── 2. FG yield amount ───────────────────────────────────────────────────
     const yieldAmount = recipe.yieldQty * targetBatches;
 
-    // inventory_items path: apply FG output increment in _inv for saveInventory()
+    // inventory_items path: apply FG output increment in _inv for scoped row update
     const fgIndex = _inv.findIndex(
       (f: any) => f.id.toString() === fg.id.toString()
     );
@@ -1133,8 +1344,13 @@ export default function FinishedGoods() {
         )
       );
     } else {
-      // inventory_items: saveInventory() writes FG output increment + auto-fulfill changes
-      const invRes = await saveInventory(_inv);
+      // inventory_items: update only the produced FG row at its own location.
+      // Ingredient deductions above are already targeted row updates.
+      if (fgIndex === -1) {
+        alert(`Database Error (Save Inventory): produced inventory row was not found for ${fg.name}.`);
+        return;
+      }
+      const invRes = await updateInventoryItemScoped(_inv[fgIndex], _inv[fgIndex]?.locationId);
       if (!invRes?.success) {
         alert(`Database Error (Save Inventory): ${invRes?.error?.message}`);
         return;
@@ -1151,7 +1367,7 @@ export default function FinishedGoods() {
           itemId:        String(plan.rawItem?.itemId || plan.rowId),
           movementType:  "production_consumption",
           quantity:      plan.normalizedQty,
-          unitCost:      plan.rawItem.cost ?? null,
+          unitCost:      plan.unitCost,
           referenceType: "production",
           referenceId:   newLog.id,
           notes: `Production: ${targetBatches}× ${fg.name} — consumed ${plan.normalizedQty} ${plan.rawItem.unit} of ${plan.rawItem.name}${
@@ -1160,6 +1376,10 @@ export default function FinishedGoods() {
         });
       }
 
+      // Compute actual total cost of the production run
+      const totalCostForFGLog = deductionPlan.reduce((sum, plan) => sum + (plan.normalizedQty * plan.unitCost), 0);
+      const fgUnitCostLog = yieldAmount > 0 ? (totalCostForFGLog / yieldAmount) : (fg.cost ?? null);
+
       // production_in for the output item (works for both prep and FG; item_id is TEXT)
       const isPrepOutput = recipe?.outputItemType === 'prep' || isPreparationItem(fg);
       await logMovement({
@@ -1167,11 +1387,10 @@ export default function FinishedGoods() {
         itemId:        String(fg.id),
         movementType:  "production_in",
         quantity:      yieldAmount,
-        unitCost:      fg.cost ?? null,
+        unitCost:      fgUnitCostLog,
         referenceType: "production",
         referenceId:   newLog.id,
         notes: `Production output: ${targetBatches} batches of ${fg.name}${isPrepOutput ? " [prep_item]" : isHqItem ? " [hq_sale_items]" : ""}`,
-
       });
     })();
 
@@ -1892,386 +2111,496 @@ export default function FinishedGoods() {
           )}
 
           {/* Ingredients table */}
-          <div className="bg-white border border-neutral-200 rounded-lg overflow-hidden">
+          <div className="bg-white border border-neutral-200 rounded-lg overflow-hidden w-full">
             {(!activeConstraints || (activeConstraints.ingredientsCheck?.length ?? 0) === 0) && getRecipeForItem(selectedFG!) && (
               <div className="px-4 py-6 text-center text-sm text-neutral-400 italic">
                 Recipe found but has no ingredients. Add ingredients in the Recipes page.
               </div>
             )}
-            <Table>
-              <TableHeader className="bg-neutral-50/50 text-[11px] uppercase text-neutral-500 tracking-wider">
-                <TableRow>
-                  <TableHead>Raw Ingredient</TableHead>
-                  <TableHead>Required</TableHead>
-                  <TableHead>HQ Stock</TableHead>
-                  <TableHead className="text-right">Status / Switch</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {(activeConstraints?.ingredientsCheck ?? []).map((ing: any, idx: number) => {
-                  const recipe = selectedFG ? getRecipeForItem(selectedFG) : null;
-                  const ingIdx = ing.ingIdx ?? idx;
-                  const originalIngName = recipe?.ingredients?.[ingIdx]?.name ?? ing.originalName ?? ing.name ?? 'Unknown';
-                  const isModalOpen = substituteModal?.ingIdx === ingIdx;
+            <div className="overflow-x-auto w-full">
+              <Table className="min-w-[950px] table-fixed">
+                <TableHeader className="bg-neutral-50/50 text-[11px] uppercase text-neutral-500 tracking-wider">
+                  <TableRow>
+                    <TableHead className="w-[200px]">Raw Ingredient</TableHead>
+                    <TableHead className="w-[100px]">Required</TableHead>
+                    <TableHead className="w-[100px]">HQ Stock</TableHead>
+                    <TableHead className="w-[130px]">Inventory Price</TableHead>
+                    <TableHead className="w-[110px]">Cost/Unit</TableHead>
+                    <TableHead className="w-[100px]">Source</TableHead>
+                    <TableHead className="w-[100px]">Total Cost</TableHead>
+                    <TableHead className="w-[180px] text-right">Status / Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {(activeConstraints?.ingredientsCheck ?? []).map((ing: any, idx: number) => {
+                    const recipe = selectedFG ? getRecipeForItem(selectedFG) : null;
+                    const ingIdx = ing.ingIdx ?? idx;
+                    const originalIngName = recipe?.ingredients?.[ingIdx]?.name ?? ing.originalName ?? ing.name ?? 'Unknown';
+                    const isModalOpen = substituteModal?.ingIdx === ingIdx;
 
-                  // ── Labour row: special rendering ──────────────────────────
-                  if (ing.isLabour) {
-                    const labourCost = ing.requiredTotal * ing.itemCost;
-                    return (
-                      <TableRow key={`ing-${idx}`} className="bg-amber-50/30 hover:bg-amber-50/50">
-                        <TableCell>
-                          <div className="flex items-center gap-1.5">
-                            <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-amber-100 text-amber-700 shrink-0">
-                              <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                                <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
-                              </svg>
-                            </span>
-                            <div>
-                              <div className="font-medium text-sm text-neutral-900">{ing.effectiveName ?? ing.name}</div>
-                              <div className="text-[10px] text-amber-700 font-medium mt-0.5">Labour / Non-stock cost</div>
+                    // ── Labour row: special rendering ──────────────────────────
+                    if (ing.isLabour) {
+                      const labourCost = ing.requiredTotal * ing.itemCost;
+                      return (
+                        <>
+                        <TableRow key={`ing-${idx}`} className="bg-amber-50/30 hover:bg-amber-50/50">
+                          <TableCell>
+                            <div className="flex items-center gap-1.5">
+                              <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-amber-100 text-amber-700 shrink-0">
+                                <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                                  <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
+                                </svg>
+                              </span>
+                              <div>
+                                <div className="font-medium text-sm text-neutral-900 truncate" title={ing.effectiveName ?? ing.name}>{ing.effectiveName ?? ing.name}</div>
+                                <div className="text-[10px] text-amber-700 font-medium mt-0.5">Labour / Non-stock cost</div>
+                              </div>
                             </div>
-                          </div>
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex flex-col gap-0.5">
-                            <span className="text-sm font-bold text-neutral-800 tabular-nums">
-                              {ing.requiredTotal} hr{ing.requiredTotal !== 1 ? "s" : ""}
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex flex-col gap-0.5">
+                              <span className="text-sm font-bold text-neutral-800 tabular-nums">
+                                {ing.requiredTotal} hr{ing.requiredTotal !== 1 ? "s" : ""}
+                              </span>
+                              <span className="text-[10px] text-neutral-500">
+                                Rate: ${(ing.itemCost ?? 0).toFixed(2)}/hr
+                              </span>
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            {/* Labour items intentionally show no stock */}
+                            <span className="text-xs text-neutral-400 italic">Non-stock</span>
+                          </TableCell>
+                          <TableCell>
+                            <span className="text-xs text-neutral-400 italic">—</span>
+                          </TableCell>
+                          <TableCell>
+                            <span className="text-sm font-semibold text-neutral-700 tabular-nums">
+                              ${(ing.itemCost ?? 0).toFixed(2)} / hr
                             </span>
-                            <span className="text-[10px] text-neutral-500">
-                              Rate: ${(ing.itemCost ?? 0).toFixed(2)}/hr
+                          </TableCell>
+                          <TableCell>
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold border bg-amber-50 border-amber-200 text-amber-700">
+                              Labour
                             </span>
-                          </div>
-                        </TableCell>
-                        <TableCell>
-                          {/* Labour items intentionally show no stock */}
-                          <span className="text-xs text-neutral-400 italic">Non-stock</span>
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <div className="flex flex-col items-end gap-1">
+                          </TableCell>
+                          <TableCell>
+                            <span className="text-sm font-bold text-neutral-850 tabular-nums">
+                              ${labourCost.toFixed(2)}
+                            </span>
+                          </TableCell>
+                          <TableCell className="text-right">
                             <Badge
                               variant="success"
                               className="text-xs px-2 py-0.5 border-none bg-amber-100 text-amber-800"
                             >
                               Labour Cost
                             </Badge>
-                            <span className="text-xs font-bold text-amber-700 tabular-nums">
-                              ${labourCost.toFixed(2)}
-                            </span>
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    );
-                  }
+                          </TableCell>
+                        </TableRow>
 
-                  // ── Standard ingredient row ────────────────────────────────
-
-                  // Prioritise: same unit AND same category as original ingredient's item
-                  const effectiveOriginal = findInventoryItem(
-                    inventoryData,
-                    recipe?.ingredients?.[ingIdx]?.inventoryId?.toString()
-                  );
-                  const sameGroup = substituteInventoryOptions.filter((i: any) =>
-                    i.id.toString() !== effectiveOriginal?.id?.toString() &&
-                    (i.unit === effectiveOriginal?.unit || i.category === effectiveOriginal?.category)
-                  );
-                  const rest = substituteInventoryOptions.filter((i: any) =>
-                    !sameGroup.some((s: any) => s.id === i.id) &&
-                    i.id.toString() !== effectiveOriginal?.id?.toString()
-                  );
-                  const candidates = [...sameGroup, ...rest];
-                  const q = debouncedSubstituteQuery.trim();
-                  const rankedCandidates = q
-                    ? candidates
-                        .map((item: any, index: number) => ({
-                          item,
-                          index,
-                          rank: rankSubstituteMatch(item, q),
-                        }))
-                        .filter((match) => match.rank >= 0)
-                        .sort((a, b) => b.rank - a.rank || a.index - b.index)
-                        .map((match) => match.item)
-                    : candidates;
-                  const filtered = rankedCandidates.slice(0, 50);
-                  const hasMoreSubstituteResults = rankedCandidates.length > filtered.length;
-                  if (process.env.NODE_ENV === "development" && normalizeInventoryDisplayKey(q).includes("butter")) {
-                    console.debug("[Production] Butter substitute filtered results", {
-                      ingredientIndex: ingIdx,
-                      filteredMatches: filtered
-                        .filter((item: any) => normalizeInventoryDisplayKey(item?.name).includes("butter"))
-                        .map((item: any) => ({
-                          id: item.id,
-                          itemId: item.itemId,
-                          name: item.name,
-                          locationId: item.locationId,
-                          displayKey: item.displayKey,
-                          unit: item.unit,
-                          supplierId: item.supplierId,
-                          cost: item.cost,
-                        })),
-                    });
-                  }
-
-                  return (
-                    <>
-                    <TableRow
-                      key={`ing-${idx}`}
-                      className={`hover:bg-neutral-50/50 ${ing.isShort ? "bg-red-50/30" : ""}`}
-                    >
-                      <TableCell>
-                        {/* ── Blocking incompatibility banner ─────────────────── */}
-                        {ing.error && (
-                          <div className="flex items-start gap-1.5 mb-1.5 p-1.5 bg-red-50 border border-red-200 rounded text-[10px]">
-                            <AlertTriangle className="h-3 w-3 text-red-500 flex-shrink-0 mt-0.5" />
-                            <span className="font-semibold text-red-700">
-                              Unit conversion missing or incompatible. Cost cannot be trusted.{' '}
-                              <span className="font-normal text-red-600">{ing.error}</span>
-                            </span>
-                          </div>
+                        {ing.costAudit && (
+                          <TableRow key={`audit-${idx}`} className="border-0 p-0">
+                            <TableCell colSpan={8} className="py-0 px-0">
+                              <details className="group">
+                                <summary className="flex items-center gap-1.5 px-4 py-1 cursor-pointer text-[10px] font-semibold text-neutral-400 hover:text-brand-600 hover:bg-neutral-50 select-none list-none transition-colors border-t border-neutral-100">
+                                  <ChevronDown className="h-3 w-3 transition-transform group-open:rotate-180" />
+                                  Cost Audit — {ing.costAudit.itemName}
+                                  <span className="ml-auto font-mono text-neutral-500">
+                                    {ing.costAudit.costPathLabel} · {ing.costAudit.baseUnit}
+                                  </span>
+                                </summary>
+                                <div className="px-4 pb-3 pt-1 bg-neutral-50/70">
+                                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-1 text-[11px]">
+                                    <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                      <span className="text-neutral-500">Family</span>
+                                      <span className="font-semibold text-brand-700">{ing.costAudit.measurementFamily || '—'}</span>
+                                    </div>
+                                    <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                      <span className="text-neutral-500">Purchase Unit</span>
+                                      <span className="font-semibold text-neutral-800">{ing.costAudit.purchaseUnit || '—'}</span>
+                                    </div>
+                                    <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                      <span className="text-neutral-500">Purchase Cost</span>
+                                      <span className="font-semibold text-neutral-800">${ing.costAudit.purchaseCost.toFixed(4)}</span>
+                                    </div>
+                                    <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                      <span className="text-neutral-500">Base Qty/PurchUnit</span>
+                                      <span className="font-semibold text-neutral-800">
+                                        {ing.costAudit.baseQtyPerPurchUnit != null
+                                          ? `${ing.costAudit.baseQtyPerPurchUnit.toFixed(4)} ${ing.costAudit.baseUnit}`
+                                          : '—'}
+                                      </span>
+                                    </div>
+                                    <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                      <span className="text-neutral-500">Cost / {ing.costAudit.baseUnit}</span>
+                                      <span className="font-semibold text-emerald-700">${ing.costAudit.costPerBaseUnit.toFixed(6)}</span>
+                                    </div>
+                                    <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                      <span className="text-neutral-500">Recipe Qty</span>
+                                      <span className="font-semibold text-neutral-800">{ing.costAudit.recipeQty} {ing.costAudit.recipeUnit}</span>
+                                    </div>
+                                    <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                      <span className="text-neutral-500">Normalized Qty</span>
+                                      <span className="font-semibold text-neutral-800">{ing.costAudit.normalizedRecipeQty.toFixed(4)} {ing.costAudit.baseUnit}</span>
+                                    </div>
+                                    <div className="col-span-2 sm:col-span-3 flex justify-between pt-1 mt-0.5 border-t border-neutral-200">
+                                      <span className="font-bold text-neutral-700">Calculated Line Cost (1 batch)</span>
+                                      <span className="font-bold text-emerald-700">${ing.costAudit.calculatedCost.toFixed(6)}</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              </details>
+                            </TableCell>
+                          </TableRow>
                         )}
-                        <div className="font-medium text-sm text-neutral-900">
-                          {ing.effectiveName ?? ing.name}
-                        </div>
-                        {ing.isSubstituted && (
-                          <div className="flex items-center gap-1 mt-0.5 flex-wrap">
-                            <Repeat2 className="h-3 w-3 text-violet-500 shrink-0" />
-                            <span className="text-[10px] text-violet-600 font-medium">
-                              Using substitute instead of &ldquo;{originalIngName}&rdquo;
-                            </span>
-                            {/* Restore original */}
-                            <button
-                              onClick={() => {
-                                const m = new Map(substitutes);
-                                m.delete(ingIdx);
-                                setSubstitutes(m);
-                              }}
-                              className="ml-1 text-[10px] text-neutral-400 hover:text-red-500 transition-colors"
-                              title="Restore original ingredient"
-                            >
-                              <X className="h-3 w-3" />
-                            </button>
-                            {/* Permanent recipe update */}
-                            {recipe && (
+                        </>
+                      );
+                    }
+
+                    // ── Standard ingredient row ────────────────────────────────
+
+                    // Prioritise: same unit AND same category as original ingredient's item
+                    const effectiveOriginal = findInventoryItem(
+                      inventoryData,
+                      recipe?.ingredients?.[ingIdx]?.inventoryId?.toString()
+                    );
+                    const sameGroup = substituteInventoryOptions.filter((i: any) =>
+                      i.id.toString() !== effectiveOriginal?.id?.toString() &&
+                      (i.unit === effectiveOriginal?.unit || i.category === effectiveOriginal?.category)
+                    );
+                    const rest = substituteInventoryOptions.filter((i: any) =>
+                      !sameGroup.some((s: any) => s.id === i.id) &&
+                      i.id.toString() !== effectiveOriginal?.id?.toString()
+                    );
+                    const candidates = [...sameGroup, ...rest];
+                    const q = debouncedSubstituteQuery.trim();
+                    const rankedCandidates = q
+                      ? candidates
+                          .map((item: any, index: number) => ({
+                            item,
+                            index,
+                            rank: rankSubstituteMatch(item, q),
+                          }))
+                          .filter((match) => match.rank >= 0)
+                          .sort((a, b) => b.rank - a.rank || a.index - b.index)
+                          .map((match) => match.item)
+                      : candidates;
+                    const filtered = rankedCandidates.slice(0, 50);
+                    const hasMoreSubstituteResults = rankedCandidates.length > filtered.length;
+
+                    return (
+                      <>
+                      <TableRow
+                        key={`ing-${idx}`}
+                        className={`hover:bg-neutral-50/50 ${ing.isShort ? "bg-red-50/30" : ""}`}
+                      >
+                        <TableCell>
+                          {/* ── Blocking incompatibility banner ─────────────────── */}
+                          {ing.error && (
+                            <div className="flex items-start gap-1.5 mb-1.5 p-1.5 bg-red-50 border border-red-200 rounded text-[10px]">
+                              <AlertTriangle className="h-3 w-3 text-red-500 flex-shrink-0 mt-0.5" />
+                              <span className="font-semibold text-red-700">
+                                Unit conversion missing or incompatible. Cost cannot be trusted.{' '}
+                                <span className="font-normal text-red-600">{ing.error}</span>
+                              </span>
+                            </div>
+                          )}
+                          <div className="font-medium text-sm text-neutral-900 truncate" title={ing.effectiveName ?? ing.name}>
+                            {ing.effectiveName ?? ing.name}
+                          </div>
+                          {ing.isSubstituted && (
+                            <div className="flex items-center gap-1 mt-0.5 flex-wrap">
+                              <Repeat2 className="h-3 w-3 text-violet-500 shrink-0" />
+                              <span className="text-[10px] text-violet-600 font-medium">
+                                Using substitute instead of &ldquo;{originalIngName}&rdquo;
+                              </span>
+                              {/* Restore original */}
                               <button
                                 onClick={() => {
-                                  const sub = substitutes.get(ingIdx);
-                                  if (sub) {
-                                    setRecipeUpdateError(null);
-                                    setRecipeUpdateConfirm({
-                                      ingIdx:        ingIdx,
-                                      substituteItem: sub,
-                                      recipe,
-                                    });
-                                  }
+                                  const m = new Map(substitutes);
+                                  m.delete(ingIdx);
+                                  setSubstitutes(m);
                                 }}
-                                className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded hover:bg-emerald-100 transition-colors"
-                                title="Permanently replace this ingredient in the recipe"
+                                className="ml-1 text-[10px] text-neutral-400 hover:text-red-500 transition-colors"
+                                title="Restore original ingredient"
                               >
-                                <CheckCircle2 className="h-2.5 w-2.5" /> Update recipe
+                                <X className="h-3 w-3" />
                               </button>
-                            )}
-                          </div>
-                        )}
-                        {/* ── Substitute picker modal ──────────────────── */}
-                        {isModalOpen && (
-                          <div className="absolute z-50 mt-1 w-72 bg-white border border-neutral-200 rounded-lg shadow-xl p-3 flex flex-col gap-2">
-                            <div className="flex items-center justify-between">
-                              <span className="text-xs font-semibold text-neutral-700">Pick substitute</span>
-                              <button
-                                onClick={() => setSubstituteModal(null)}
-                                className="text-neutral-400 hover:text-neutral-700"
-                              >
-                                <X className="h-3.5 w-3.5" />
-                              </button>
-                            </div>
-                            <input
-                              autoFocus
-                              type="text"
-                              placeholder="Search inventory…"
-                              value={substituteModal?.query ?? ""}
-                              onChange={(e) =>
-                                setSubstituteModal((prev) =>
-                                  prev ? { ...prev, query: e.target.value } : prev
-                                )
-                              }
-                              className="px-2 py-1.5 text-xs border border-neutral-200 rounded-md w-full focus:outline-none focus:ring-1 focus:ring-brand-500"
-                            />
-                            <div className="max-h-48 overflow-y-auto flex flex-col gap-0.5">
-                              {filtered.length === 0 && (
-                                <span className="text-xs text-neutral-400 text-center py-3">No items found</span>
-                              )}
-                              {sameGroup.length > 0 && !q && (
-                                <div className="text-[10px] text-neutral-400 font-semibold uppercase tracking-wider px-1 py-0.5 mt-1">
-                                  Same unit / category
-                                </div>
-                              )}
-                              {filtered.map((item: any) => (
+                              {/* Permanent recipe update */}
+                              {recipe && (
                                 <button
-                                  key={item.id}
                                   onClick={() => {
-                                    const m = new Map(substitutes);
-                                    m.set(ingIdx, item);
-                                    setSubstitutes(m);
-                                    setSubstituteModal(null);
+                                    const sub = substitutes.get(ingIdx);
+                                    if (sub) {
+                                      setRecipeUpdateError(null);
+                                      setRecipeUpdateConfirm({
+                                        ingIdx:        ingIdx,
+                                        substituteItem: sub,
+                                        recipe,
+                                      });
+                                    }
                                   }}
-                                  className="flex items-center justify-between px-2 py-1.5 rounded hover:bg-brand-50 text-left transition-colors"
+                                  className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded hover:bg-emerald-100 transition-colors"
+                                  title="Permanently replace this ingredient in the recipe"
                                 >
-                                  <span className="min-w-0">
-                                    <span className="block truncate text-xs font-medium text-neutral-800">{item.name}</span>
-                                    {item.isAvailableInProductionLocation === false && (
-                                      <span className="block text-[9px] font-medium text-amber-600">
-                                        Not available in this location
-                                      </span>
-                                    )}
-                                  </span>
-                                  <span className={`text-[10px] ml-2 shrink-0 ${
-                                    item.inStock <= 0 ? "text-red-500" : "text-green-600"
-                                  }`}>
-                                    {item.inStock} {item.unit}
-                                  </span>
+                                  <CheckCircle2 className="h-2.5 w-2.5" /> Update recipe
                                 </button>
-                              ))}
-                              {hasMoreSubstituteResults && (
-                                <span className="px-1 py-1 text-center text-[10px] font-medium text-neutral-400">
-                                  Showing 50 results. Keep typing to narrow.
-                                </span>
                               )}
                             </div>
-                          </div>
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        <span className="text-sm font-bold text-neutral-800 tabular-nums">
-                          {ing.requiredTotal} {ing.unit}
-                        </span>
-                      </TableCell>
-                      <TableCell>
-                        <span
-                          className={`text-sm font-semibold tabular-nums ${
-                            ing.isShort ? "text-red-600" : "text-neutral-600"
-                          }`}
-                        >
-                          {ing.inStock} {ing.unit}
-                        </span>
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <div className="flex items-center justify-end gap-2">
-                          {ing.error ? (
-                            <Badge
-                              variant="danger"
-                              className="text-xs px-2 py-0.5 border-none bg-red-100 text-red-800"
-                              title={ing.error}
-                            >
-                              Unit Conflict
-                            </Badge>
-                          ) : ing.isShort ? (
-                            <Badge
-                              variant="danger"
-                              className="text-xs px-2 py-0.5 border-none"
-                            >
-                              Shortage (-{(ing.requiredTotal - ing.inStock).toFixed(2)})
-                            </Badge>
-                          ) : (
-                            <Badge
-                              variant="success"
-                              className="text-xs px-2 py-0.5 border-none bg-green-100 text-green-800"
-                            >
-                              Available
-                            </Badge>
                           )}
-                          {/* Switch button */}
-                          <button
-                            onClick={() =>
-                              setSubstituteModal(
-                                isModalOpen ? null : { ingIdx: ingIdx, query: "" }
-                              )
-                            }
-                            className={`inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-semibold transition-colors border ${
-                              ing.isSubstituted
-                                ? "bg-violet-50 border-violet-200 text-violet-700 hover:bg-violet-100"
-                                : "bg-neutral-50 border-neutral-200 text-neutral-500 hover:bg-neutral-100"
-                            }`}
-                            title={ing.isSubstituted ? "Change substitute" : "Switch ingredient"}
-                          >
-                            <Repeat2 className="h-3 w-3" />
-                            {ing.isSubstituted ? "Change" : "Switch"}
-                          </button>
-                        </div>
-                      </TableCell>
-                    </TableRow>
-
-                    {/* ── Cost Audit Panel (sub-row below the ingredient) ───────────── */}
-                    {ing.costAudit && (
-                      <TableRow key={`audit-${idx}`} className="border-0 p-0">
-                        <TableCell colSpan={4} className="py-0 px-0">
-                          <details className="group">
-                            <summary className="flex items-center gap-1.5 px-4 py-1 cursor-pointer text-[10px] font-semibold text-neutral-400 hover:text-brand-600 hover:bg-neutral-50 select-none list-none transition-colors border-t border-neutral-100">
-                              <ChevronDown className="h-3 w-3 transition-transform group-open:rotate-180" />
-                              Cost Audit — {ing.costAudit.itemName}
-                              <span className="ml-auto font-mono text-neutral-500">
-                                {ing.costAudit.costPathLabel} · {ing.costAudit.baseUnit}
-                              </span>
-                            </summary>
-                            <div className="px-4 pb-3 pt-1 bg-neutral-50/70">
-                              <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-1 text-[11px]">
-                                <div className="flex justify-between border-b border-neutral-100 py-0.5">
-                                  <span className="text-neutral-500">Family</span>
-                                  <span className="font-semibold text-brand-700">{ing.costAudit.measurementFamily || '—'}</span>
-                                </div>
-                                <div className="flex justify-between border-b border-neutral-100 py-0.5">
-                                  <span className="text-neutral-500">Purchase Unit</span>
-                                  <span className="font-semibold text-neutral-800">{ing.costAudit.purchaseUnit || '—'}</span>
-                                </div>
-                                <div className="flex justify-between border-b border-neutral-100 py-0.5">
-                                  <span className="text-neutral-500">Purchase Cost</span>
-                                  <span className="font-semibold text-neutral-800">${ing.costAudit.purchaseCost.toFixed(4)}</span>
-                                </div>
-                                <div className="flex justify-between border-b border-neutral-100 py-0.5">
-                                  <span className="text-neutral-500">Base Qty/PurchUnit</span>
-                                  <span className="font-semibold text-neutral-800">
-                                    {ing.costAudit.baseQtyPerPurchUnit != null
-                                      ? `${ing.costAudit.baseQtyPerPurchUnit.toFixed(4)} ${ing.costAudit.baseUnit}`
-                                      : '—'}
+                          {/* ── Substitute picker modal ──────────────────── */}
+                          {isModalOpen && (
+                            <div className="absolute z-50 mt-1 w-72 bg-white border border-neutral-200 rounded-lg shadow-xl p-3 flex flex-col gap-2">
+                              <div className="flex items-center justify-between">
+                                <span className="text-xs font-semibold text-neutral-700">Pick substitute</span>
+                                <button
+                                  onClick={() => setSubstituteModal(null)}
+                                  className="text-neutral-400 hover:text-neutral-700"
+                                >
+                                  <X className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+                              <input
+                                autoFocus
+                                type="text"
+                                placeholder="Search inventory…"
+                                value={substituteModal?.query ?? ""}
+                                onChange={(e) =>
+                                  setSubstituteModal((prev) =>
+                                    prev ? { ...prev, query: e.target.value } : prev
+                                  )
+                                }
+                                className="px-2 py-1.5 text-xs border border-neutral-200 rounded-md w-full focus:outline-none focus:ring-1 focus:ring-brand-500"
+                              />
+                              <div className="max-h-48 overflow-y-auto flex flex-col gap-0.5">
+                                {filtered.length === 0 && (
+                                  <span className="text-xs text-neutral-400 text-center py-3">No items found</span>
+                                )}
+                                {sameGroup.length > 0 && !q && (
+                                  <div className="text-[10px] text-neutral-400 font-semibold uppercase tracking-wider px-1 py-0.5 mt-1">
+                                    Same unit / category
+                                  </div>
+                                )}
+                                {filtered.map((item: any) => (
+                                  <button
+                                    key={item.id}
+                                    onClick={() => {
+                                      const m = new Map(substitutes);
+                                      m.set(ingIdx, item);
+                                      setSubstitutes(m);
+                                      setSubstituteModal(null);
+                                    }}
+                                    className="flex items-center justify-between px-2 py-1.5 rounded hover:bg-brand-50 text-left transition-colors"
+                                  >
+                                    <span className="min-w-0">
+                                      <span className="block truncate text-xs font-medium text-neutral-800">{item.name}</span>
+                                      {item.isAvailableInProductionLocation === false && (
+                                        <span className="block text-[9px] font-medium text-amber-600">
+                                          Not available in this location
+                                        </span>
+                                      )}
+                                    </span>
+                                    <span className={`text-[10px] ml-2 shrink-0 ${
+                                      item.inStock <= 0 ? "text-red-500" : "text-green-600"
+                                    }`}>
+                                      {item.inStock} {item.unit}
+                                    </span>
+                                  </button>
+                                ))}
+                                {hasMoreSubstituteResults && (
+                                  <span className="px-1 py-1 text-center text-[10px] font-medium text-neutral-400">
+                                    Showing 50 results. Keep typing to narrow.
                                   </span>
-                                </div>
-                                <div className="flex justify-between border-b border-neutral-100 py-0.5">
-                                  <span className="text-neutral-500">Cost / {ing.costAudit.baseUnit}</span>
-                                  <span className="font-semibold text-emerald-700">${ing.costAudit.costPerBaseUnit.toFixed(6)}</span>
-                                </div>
-                                <div className="flex justify-between border-b border-neutral-100 py-0.5">
-                                  <span className="text-neutral-500">Recipe Qty</span>
-                                  <span className="font-semibold text-neutral-800">{ing.costAudit.recipeQty} {ing.costAudit.recipeUnit}</span>
-                                </div>
-                                <div className="flex justify-between border-b border-neutral-100 py-0.5">
-                                  <span className="text-neutral-500">Normalized Qty</span>
-                                  <span className="font-semibold text-neutral-800">{ing.costAudit.normalizedRecipeQty.toFixed(4)} {ing.costAudit.baseUnit}</span>
-                                </div>
-                                <div className="col-span-2 sm:col-span-3 flex justify-between pt-1 mt-0.5 border-t border-neutral-200">
-                                  <span className="font-bold text-neutral-700">Calculated Line Cost (1 batch)</span>
-                                  <span className="font-bold text-emerald-700">${ing.costAudit.calculatedCost.toFixed(6)}</span>
-                                </div>
+                                )}
                               </div>
                             </div>
-                          </details>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <span className="text-sm font-bold text-neutral-800 tabular-nums">
+                            {ing.requiredTotal} {ing.unit}
+                          </span>
+                        </TableCell>
+                        <TableCell>
+                          <span
+                            className={`text-sm font-semibold tabular-nums ${
+                              ing.isShort ? "text-red-600" : "text-neutral-600"
+                            }`}
+                          >
+                            {ing.inStock} {ing.unit}
+                          </span>
+                        </TableCell>
+                        <TableCell>
+                          {ing.isOverridden ? (
+                            <div className="flex flex-col gap-0.5">
+                              <span className="text-xs text-neutral-400 line-through tabular-nums">
+                                {ing.originalPriceLabel || '—'}
+                              </span>
+                              <span className="text-xs font-bold text-amber-700 tabular-nums" title="Overridden for this batch">
+                                {ing.costAudit?.inventoryPriceLabel} (Override)
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="text-xs text-neutral-700 font-medium tabular-nums">
+                              {ing.originalPriceLabel || '—'}
+                            </span>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <span className="text-sm font-semibold text-neutral-700 tabular-nums">
+                            ${(ing.itemCost ?? 0).toFixed(4)} / {ing.unit}
+                          </span>
+                        </TableCell>
+                        <TableCell>
+                          <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold border ${
+                            ing.isOverridden
+                              ? "bg-amber-100 border-amber-300 text-amber-800"
+                              : ing.costAudit?.costPathLabel === 'fallback_cost'
+                                ? "bg-red-50 border-red-200 text-red-700"
+                                : "bg-neutral-50 border-neutral-200 text-neutral-600"
+                          }`}>
+                            {getSourceLabel(ing)}
+                          </span>
+                        </TableCell>
+                        <TableCell>
+                          <span className="text-sm font-bold text-neutral-800 tabular-nums">
+                            ${(ing.requiredTotal * ing.itemCost).toFixed(2)}
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <div className="flex items-center justify-end gap-1">
+                            {ing.error ? (
+                              <Badge
+                                variant="danger"
+                                className="text-[10px] px-1.5 py-0.5 border-none bg-red-100 text-red-800 shrink-0"
+                                title={ing.error}
+                              >
+                                Unit Conflict
+                              </Badge>
+                            ) : ing.isShort ? (
+                              <Badge
+                                variant="danger"
+                                className="text-[10px] px-1.5 py-0.5 border-none shrink-0"
+                              >
+                                Shortage (-{(ing.requiredTotal - ing.inStock).toFixed(2)})
+                              </Badge>
+                            ) : (
+                              <Badge
+                                variant="success"
+                                className="text-[10px] px-1.5 py-0.5 border-none bg-green-100 text-green-800 shrink-0"
+                              >
+                                Available
+                              </Badge>
+                            )}
+                            {/* Switch button */}
+                            <button
+                              onClick={() =>
+                                setSubstituteModal(
+                                  isModalOpen ? null : { ingIdx: ingIdx, query: "" }
+                                )
+                              }
+                              className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-semibold transition-colors border shrink-0 ${
+                                ing.isSubstituted
+                                  ? "bg-violet-50 border-violet-200 text-violet-700 hover:bg-violet-100"
+                                  : "bg-neutral-50 border-neutral-200 text-neutral-500 hover:bg-neutral-100"
+                              }`}
+                              title={ing.isSubstituted ? "Change substitute" : "Switch ingredient"}
+                            >
+                              <Repeat2 className="h-2.5 w-2.5" />
+                              {ing.isSubstituted ? "Change" : "Switch"}
+                            </button>
+                            {/* Edit Price override button */}
+                            <button
+                              onClick={() => setOverrideModal({ ing, ingIdx })}
+                              className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-semibold transition-colors border shrink-0 ${
+                                ing.isOverridden
+                                  ? "bg-amber-50 border-amber-200 text-amber-700 hover:bg-amber-100"
+                                  : "bg-neutral-50 border-neutral-200 text-neutral-500 hover:bg-neutral-100"
+                              }`}
+                              title="Override cost for this run"
+                            >
+                              <Edit3 className="h-2.5 w-2.5" />
+                              Price
+                            </button>
+                          </div>
                         </TableCell>
                       </TableRow>
-                    )}
-                    </>
-                  );
-                 })}
 
-                {(!activeConstraints ||
-                  activeConstraints.ingredientsCheck.length === 0) && (
-                  <TableRow>
-                    <TableCell
-                      colSpan={4}
-                      className="text-center py-6 text-neutral-400 text-sm"
-                    >
-                      No recipe linked — no ingredient constraints to display.
-                    </TableCell>
-                  </TableRow>
-                )}
-              </TableBody>
-            </Table>
+                      {/* ── Cost Audit Panel (sub-row below the ingredient) ───────────── */}
+                      {ing.costAudit && (
+                        <TableRow key={`audit-${idx}`} className="border-0 p-0">
+                          <TableCell colSpan={8} className="py-0 px-0">
+                            <details className="group">
+                              <summary className="flex items-center gap-1.5 px-4 py-1 cursor-pointer text-[10px] font-semibold text-neutral-400 hover:text-brand-600 hover:bg-neutral-50 select-none list-none transition-colors border-t border-neutral-100">
+                                <ChevronDown className="h-3 w-3 transition-transform group-open:rotate-180" />
+                                Cost Audit — {ing.costAudit.itemName}
+                                <span className="ml-auto font-mono text-neutral-500">
+                                  {ing.costAudit.costPathLabel} · {ing.costAudit.baseUnit}
+                                </span>
+                              </summary>
+                              <div className="px-4 pb-3 pt-1 bg-neutral-50/70">
+                                <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-1 text-[11px]">
+                                  <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                    <span className="text-neutral-500">Family</span>
+                                    <span className="font-semibold text-brand-700">{ing.costAudit.measurementFamily || '—'}</span>
+                                  </div>
+                                  <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                    <span className="text-neutral-500">Purchase Unit</span>
+                                    <span className="font-semibold text-neutral-800">{ing.costAudit.purchaseUnit || '—'}</span>
+                                  </div>
+                                  <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                    <span className="text-neutral-500">Purchase Cost</span>
+                                    <span className="font-semibold text-neutral-800">${ing.costAudit.purchaseCost.toFixed(4)}</span>
+                                  </div>
+                                  <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                    <span className="text-neutral-500">Base Qty/PurchUnit</span>
+                                    <span className="font-semibold text-neutral-800">
+                                      {ing.costAudit.baseQtyPerPurchUnit != null
+                                        ? `${ing.costAudit.baseQtyPerPurchUnit.toFixed(4)} ${ing.costAudit.baseUnit}`
+                                        : '—'}
+                                    </span>
+                                  </div>
+                                  <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                    <span className="text-neutral-500">Cost / {ing.costAudit.baseUnit}</span>
+                                    <span className="font-semibold text-emerald-700">${ing.costAudit.costPerBaseUnit.toFixed(6)}</span>
+                                  </div>
+                                  <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                    <span className="text-neutral-500">Recipe Qty</span>
+                                    <span className="font-semibold text-neutral-800">{ing.costAudit.recipeQty} {ing.costAudit.recipeUnit}</span>
+                                  </div>
+                                  <div className="flex justify-between border-b border-neutral-100 py-0.5">
+                                    <span className="text-neutral-500">Normalized Qty</span>
+                                    <span className="font-semibold text-neutral-800">{ing.costAudit.normalizedRecipeQty.toFixed(4)} {ing.costAudit.baseUnit}</span>
+                                  </div>
+                                  <div className="col-span-2 sm:col-span-3 flex justify-between pt-1 mt-0.5 border-t border-neutral-200">
+                                    <span className="font-bold text-neutral-700">Calculated Line Cost (1 batch)</span>
+                                    <span className="font-bold text-emerald-700">${ing.costAudit.calculatedCost.toFixed(6)}</span>
+                                  </div>
+                                </div>
+                              </div>
+                            </details>
+                          </TableCell>
+                        </TableRow>
+                      )}
+                      </>
+                    );
+                  })}
+
+                  {(!activeConstraints ||
+                    activeConstraints.ingredientsCheck.length === 0) && (
+                    <TableRow>
+                      <TableCell
+                        colSpan={8}
+                        className="text-center py-6 text-neutral-400 text-sm"
+                      >
+                        No recipe linked — no ingredient constraints to display.
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </div>
           </div>
 
           {/* ── Production Cost Summary ───────────────────────────────────── */}
@@ -2382,6 +2711,143 @@ export default function FinishedGoods() {
                     )}
                     {recipeUpdateSaving ? "Updating…" : "Confirm update"}
                   </button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* ── Ingredient Price Override Modal ───────────────────────────────── */}
+        {overrideModal && (() => {
+          const { ing, ingIdx } = overrideModal;
+          const rawItem = getEffectiveRawItem(ing, ingIdx);
+          if (!rawItem) return null;
+
+          const isCurrentlyOverridden = ingredientOverrides[ingIdx] != null;
+          const baseUnit = rawItem.baseUnit || rawItem.unit || 'ea';
+
+          return (
+            <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm">
+              <div className="bg-white rounded-xl shadow-2xl border border-neutral-200 w-full max-w-md mx-4 p-6 flex flex-col gap-4">
+                {/* Header */}
+                <div className="flex items-start gap-3">
+                  <span className="inline-flex items-center justify-center w-9 h-9 rounded-full bg-amber-100 text-amber-750 shrink-0">
+                    <DollarSign className="h-5 w-5 text-amber-700" />
+                  </span>
+                  <div>
+                    <h3 className="font-bold text-neutral-900 text-base">Override Ingredient Cost</h3>
+                    <p className="text-sm text-neutral-500 mt-0.5">{rawItem.name}</p>
+                  </div>
+                </div>
+
+                {/* Form fields */}
+                <div className="flex flex-col gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-neutral-600 mb-1">
+                      Purchase Cost ($)
+                    </label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={modalPurchaseCost}
+                      onChange={(e) => setModalPurchaseCost(e.target.value)}
+                      className="px-3 py-2 text-sm border border-neutral-200 rounded-lg w-full focus:outline-none focus:ring-1 focus:ring-brand-500"
+                      placeholder="e.g. 36.99"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-neutral-600 mb-1">
+                        Purchase Unit
+                      </label>
+                      <input
+                        type="text"
+                        value={modalPurchaseUom}
+                        onChange={(e) => setModalPurchaseUom(e.target.value)}
+                        className="px-3 py-2 text-sm border border-neutral-200 rounded-lg w-full focus:outline-none focus:ring-1 focus:ring-brand-500"
+                        placeholder="e.g. Case"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-neutral-600 mb-1">
+                        Conversion (in {baseUnit})
+                      </label>
+                      <input
+                        type="number"
+                        step="any"
+                        min="0.0001"
+                        value={modalConversion}
+                        onChange={(e) => setModalConversion(e.target.value)}
+                        className="px-3 py-2 text-sm border border-neutral-200 rounded-lg w-full focus:outline-none focus:ring-1 focus:ring-brand-500"
+                        placeholder="e.g. 20"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Audit calculation preview */}
+                  {(() => {
+                    const cost = parseFloat(modalPurchaseCost);
+                    const conv = parseFloat(modalConversion);
+                    if (!isNaN(cost) && !isNaN(conv) && conv > 0) {
+                      const costPerBase = cost / conv;
+                      return (
+                        <div className="bg-amber-50 border border-amber-100 rounded-lg p-2.5 text-xs text-amber-900 flex justify-between">
+                          <span className="font-medium">Derived cost per {baseUnit}:</span>
+                          <span className="font-bold tabular-nums">${costPerBase.toFixed(4)} / {baseUnit}</span>
+                        </div>
+                      );
+                    }
+                    return null;
+                  })()}
+
+                  {/* Apply to Inventory Checkbox */}
+                  <label className="flex items-start gap-2.5 p-2 bg-neutral-50 rounded-lg border border-neutral-200 cursor-pointer hover:bg-neutral-100/55 transition-colors">
+                    <input
+                      type="checkbox"
+                      checked={modalSyncToInventory}
+                      onChange={(e) => setModalSyncToInventory(e.target.checked)}
+                      className="mt-0.5 rounded border-neutral-300 text-brand-600 focus:ring-brand-500"
+                    />
+                    <div className="flex flex-col gap-0.5">
+                      <span className="text-xs font-semibold text-neutral-700 select-none">
+                        Apply this price to Inventory for future production
+                      </span>
+                      <span className="text-[10px] text-neutral-500 select-none leading-normal">
+                        This immediately updates the master inventory item's purchase unit pricing in storage.
+                      </span>
+                    </div>
+                  </label>
+                </div>
+
+                {/* Actions */}
+                <div className="flex items-center justify-between gap-3 pt-2 border-t border-neutral-150">
+                  <div>
+                    {isCurrentlyOverridden && (
+                      <button
+                        onClick={() => handleClearOverride(ingIdx)}
+                        className="px-3 py-1.5 text-xs font-semibold text-red-600 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors border border-transparent hover:border-red-150"
+                      >
+                        Clear Override
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setOverrideModal(null)}
+                      className="px-4 py-2 text-sm font-semibold text-neutral-600 bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleSaveOverride}
+                      className="px-4 py-2 text-sm font-semibold text-white bg-amber-600 rounded-lg hover:bg-amber-700 transition-colors inline-flex items-center gap-1.5"
+                    >
+                      <Check className="h-4 w-4" />
+                      Save
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>

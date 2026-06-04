@@ -268,6 +268,7 @@ const mapInventoryToFrontend = (db: any) => ({
      baseUnit: db.baseunit,
      unit: db.unit,
      inStock: db.instock,
+     physicalCount: db.physical_count ?? db.physicalcount ?? null,
      parLevel: db.parlevel,
      cost: db.cost,
      // purchaseCost: pack/case price as entered by user.
@@ -420,6 +421,39 @@ export async function saveInventory(data: any[]) {
 }
 
 /**
+ * Update exactly one inventory_items row, guarded by both row id and location_id.
+ * Use this for location-scoped item setup, stock, par, price, and unit edits.
+ * It never upserts, so it cannot create a row in HQ or another location.
+ */
+export async function updateInventoryItemScoped(
+  item: any,
+  expectedLocationId?: string | null
+): Promise<{ success: boolean; error?: any }> {
+  const row = mapInventoryToDB(item);
+  const locationId = expectedLocationId ?? row.location_id;
+  if (!row.id || !locationId) {
+    return { success: false, error: { message: 'Inventory row id and location_id are required for scoped update.' } };
+  }
+
+  const { id, ...patch } = row;
+  const { data, error } = await supabase
+    .from('inventory_items')
+    .update(patch)
+    .eq('id', id)
+    .eq('location_id', locationId)
+    .select('id, location_id');
+
+  if (error) return { success: false, error };
+  if (!data || data.length !== 1) {
+    return {
+      success: false,
+      error: { message: `Scoped inventory update matched ${data?.length ?? 0} rows for id=${id} location_id=${locationId}.` },
+    };
+  }
+  return { success: true };
+}
+
+/**
  * Patch only the cost field on a single inventory item.
  *
  * Used by recipe save to update output item cost without re-upserting the
@@ -484,7 +518,7 @@ export async function deductInventoryItemStock(
   // Read current stock
   const { data: current, error: fetchErr } = await supabase
     .from('inventory_items')
-    .select('instock')
+    .select('instock, location_id')
     .eq('id', rowId)
     .single();
 
@@ -502,7 +536,8 @@ export async function deductInventoryItemStock(
   const { error: updateErr } = await supabase
     .from('inventory_items')
     .update({ instock: newStock })
-    .eq('id', rowId);
+    .eq('id', rowId)
+    .eq('location_id', current.location_id);
 
   if (updateErr) {
     console.error('[deductInventoryItemStock] update error', updateErr);
@@ -523,7 +558,7 @@ export async function adjustInventoryItemStock(
 ): Promise<{ success: boolean; newStock?: number; error?: any }> {
   const { data: current, error: fetchErr } = await supabase
     .from('inventory_items')
-    .select('instock')
+    .select('instock, location_id')
     .eq('id', rowId)
     .single();
 
@@ -538,7 +573,8 @@ export async function adjustInventoryItemStock(
   const { error: updateErr } = await supabase
     .from('inventory_items')
     .update({ instock: newStock })
-    .eq('id', rowId);
+    .eq('id', rowId)
+    .eq('location_id', current.location_id);
 
   if (updateErr) {
     console.error('[adjustInventoryItemStock] update error', updateErr);
@@ -583,7 +619,8 @@ export async function setInventoryStockToTarget(params: {
   const { error: updateErr } = await supabase
     .from('inventory_items')
     .update({ instock: targetStock })
-    .eq('id', params.itemId);
+    .eq('id', params.itemId)
+    .eq('location_id', current.location_id);
 
   if (updateErr) {
     console.error('[setInventoryStockToTarget] update error', updateErr);
@@ -1092,11 +1129,18 @@ export async function loadFinishedGoods() {
 }
 export async function saveFinishedGoods(fgs: any[]) {
   const inv = await loadInventory();
+  const errors: string[] = [];
   fgs.forEach(fgItem => {
      const match = inv.findIndex((i: any) => i.id.toString() === fgItem.id.toString());
      if (match !== -1) inv[match] = { ...inv[match], ...fgItem };
   });
-  return await saveInventory(inv);
+  for (const fgItem of fgs) {
+    const match = inv.find((i: any) => i.id.toString() === fgItem.id.toString());
+    if (!match) continue;
+    const res = await updateInventoryItemScoped(match, match.locationId);
+    if (!res.success) errors.push(`${match.name}: ${res.error?.message ?? 'update failed'}`);
+  }
+  return errors.length > 0 ? { success: false, error: { message: errors.join('\n') } } : { success: true };
 }
 
 
@@ -3518,7 +3562,7 @@ export async function updateRequisitionItemFulfilled(
     const { error: hqDeductError } = await supabase
       .from("inventory_items")
       .update({ instock: hqStockAfter })   // no updated_at — DB trigger handles it
-      .eq("item_id", sharedItemId)
+      .eq("id", hqRow.id)
       .eq("location_id", HQ_LOCATION_ID);
 
     if (hqDeductError) {
@@ -3532,7 +3576,7 @@ export async function updateRequisitionItemFulfilled(
       const { error: destUpdateError } = await supabase
         .from("inventory_items")
         .update({ instock: destStockAfter })   // no updated_at — DB trigger handles it
-        .eq("item_id", sharedItemId)
+        .eq("id", destRow.id)
         .eq("location_id", destLocationId);
 
       if (destUpdateError) {

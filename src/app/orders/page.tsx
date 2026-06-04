@@ -986,11 +986,16 @@ export default function Orders() {
     }
     setOrders(prev => prev.map(o => o.id === receivingOrder.id ? (res.order ?? patch) : o));
 
-    // ── 2. Post received stock directly to HQ inventory rows ─────────────────
+    // ── 2. Post received stock to the order's own inventory location ─────────
     // Each PO line item carries itemId (shared identity) and id (row PK).
-    // We update inventory_items directly via supabase scoped to LOC-HQ
-    // so we never clobber other-location rows.
+    // We update inventory_items directly via Supabase scoped to the PO location
+    // so receiving a location PO never changes HQ or another location.
     const stockErrors: string[] = [];
+    const receiveLocationId = receivingOrder.locationId || receivingOrder.location_id || resolveLocationId(user);
+    if (!receiveLocationId) {
+      alert("Cannot receive stock: purchase order has no location_id.");
+      return;
+    }
 
     for (const recItem of receivingItems) {
       if (recItem.id === 999 || recItem.receivedQty <= 0) continue;
@@ -998,12 +1003,12 @@ export default function Orders() {
       const sharedItemId: string | undefined = recItem.itemId || recItem.item_id;
 
       if (sharedItemId) {
-        // ── Preferred path: match by shared item_id + LOC-HQ ─────────────────
+        // ── Preferred path: match by shared item_id + order location ──────────
         const { data: hqRow, error: fetchErr } = await supabase
           .from("inventory_items")
           .select("id, instock")
           .eq("item_id", sharedItemId)
-          .eq("location_id", HQ_LOCATION_ID)
+          .eq("location_id", receiveLocationId)
           .maybeSingle();
 
         if (fetchErr) {
@@ -1016,14 +1021,15 @@ export default function Orders() {
           const { error: updErr } = await supabase
             .from("inventory_items")
             .update({ instock: newStock, cost: recItem.actualPrice })
-            .eq("id", hqRow.id);
+            .eq("id", hqRow.id)
+            .eq("location_id", receiveLocationId);
 
           if (updErr) stockErrors.push(`${recItem.name}: update failed (${updErr.message})`);
           else {
             console.log(`[PO Receive] ${recItem.name}: instock ${hqRow.instock} → ${newStock}`);
             // Log purchase_in movement (fire-and-forget)
             logMovement({
-              locationId:    HQ_LOCATION_ID,
+              locationId:    receiveLocationId,
               itemId:        sharedItemId,
               movementType:  'purchase_in',
               quantity:      recItem.receivedQty,
@@ -1034,7 +1040,7 @@ export default function Orders() {
             });
           }
         } else {
-          stockErrors.push(`${recItem.name}: no HQ row found for item_id=${sharedItemId}. Add this product to HQ inventory first.`);
+          stockErrors.push(`${recItem.name}: no inventory row found for item_id=${sharedItemId} at location ${receiveLocationId}. Add this product to that location inventory first.`);
         }
       } else {
         // ── Fallback: match by row id for legacy PO lines without itemId ──────
@@ -1053,7 +1059,8 @@ export default function Orders() {
         const { error: updErr } = await supabase
           .from("inventory_items")
           .update({ instock: newStock, cost: recItem.actualPrice })
-          .eq("id", invRow.id);
+          .eq("id", invRow.id)
+          .eq("location_id", invRow.location_id);
 
         if (updErr) stockErrors.push(`${recItem.name}: update failed (${updErr.message})`);
         else {
