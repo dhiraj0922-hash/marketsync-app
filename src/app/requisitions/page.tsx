@@ -313,13 +313,16 @@ function LocationManagerView({
     });
   }, [catalogItems, catalogSearch, categoryFilter, supplierFilter, storageFilter]);
 
-  const draftTotal = lineItems.reduce((sum, li) => sum + li.quantityRequested * li.unitPrice, 0);
+  const draftTotal = lineItems.filter(li => li.quantityRequested > 0).reduce((sum, li) => sum + li.quantityRequested * li.unitPrice, 0);
   const lowStockCount = catalogItems.filter(i => i.status === "low_stock" || i.status === "out_of_stock" || i.status === "not_available").length;
   const lastSubmittedOrder = requisitions[0]?.id ?? "None";
 
   const addItemById = (itemId: string) => {
     if (!itemId) return;
-    const quantity = Math.max(1, Number(catalogQtyById[itemId] ?? 1));
+    // Only add if user has explicitly typed a qty > 0. Never default to 1.
+    const rawQty = catalogQtyById[itemId];
+    const quantity = Math.max(0, Number(rawQty ?? 0));
+    if (quantity <= 0) return; // user must enter a positive number first
 
     // ── Local vendor path ──────────────────────────────────────────────────
     const localItem = localCatalogItems.find(c => c.itemId === itemId);
@@ -542,7 +545,7 @@ function LocationManagerView({
               id="btn-submit-requisition"
               type="button"
               onClick={handleCreate}
-              disabled={isSaving || lineItems.length === 0}
+              disabled={isSaving || lineItems.filter(li => li.quantityRequested > 0).length === 0}
               className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-emerald-700 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShoppingCart className="h-4 w-4" />}
@@ -560,7 +563,7 @@ function LocationManagerView({
         <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
           {[
             { label: "Draft Order Total", value: `$${draftTotal.toFixed(2)}`, icon: <CircleDollarSign className="h-5 w-5" /> },
-            { label: "Items in Cart", value: lineItems.length, icon: <ShoppingCart className="h-5 w-5" /> },
+            { label: "Items in Cart", value: lineItems.filter(li => li.quantityRequested > 0).length, icon: <ShoppingCart className="h-5 w-5" /> },
             { label: "Low Stock Items", value: lowStockCount, icon: <AlertCircle className="h-5 w-5" /> },
             { label: "Last Submitted Order", value: lastSubmittedOrder, icon: <ClipboardList className="h-5 w-5" /> },
           ].map((card) => (
@@ -632,7 +635,6 @@ function LocationManagerView({
                   </TableHeader>
                   <TableBody>
                     {visibleCatalogItems.map(item => {
-                      const qty = catalogQtyById[item.id] ?? 1;
                       const isLocal = (item as any).sourceType === 'local_vendor';
                       return (
                         <TableRow key={item.id} className="border-slate-100 hover:bg-emerald-50/30">
@@ -656,9 +658,24 @@ function LocationManagerView({
                           <TableCell className="py-4">
                             <input
                               type="number"
-                              min={1}
-                              value={qty}
-                              onChange={(e) => setCatalogQtyById(prev => ({ ...prev, [item.id]: Math.max(1, Number(e.target.value)) }))}
+                              min={0}
+                              value={catalogQtyById[item.id] ?? 0}
+                              onChange={(e) => {
+                                const newQty = Math.max(0, Number(e.target.value) || 0);
+                                setCatalogQtyById(prev => ({ ...prev, [item.id]: newQty }));
+                                // If item is already in cart and user zeroes out, remove it
+                                if (newQty <= 0 && item.added) {
+                                  setLineItems(prev => prev.filter(li => (li.catalogItemId ?? li.finishedGoodId ?? li.itemId) !== item.id));
+                                }
+                                // If item is already in cart and user changes qty, sync cart qty too
+                                if (newQty > 0 && item.added) {
+                                  setLineItems(prev => prev.map(li =>
+                                    (li.catalogItemId ?? li.finishedGoodId ?? li.itemId) === item.id
+                                      ? { ...li, quantityRequested: newQty }
+                                      : li
+                                  ));
+                                }
+                              }}
                               className="h-10 w-20 rounded-lg border border-slate-200 px-3 text-sm outline-none ring-emerald-600 focus:ring-2"
                             />
                           </TableCell>
@@ -666,7 +683,7 @@ function LocationManagerView({
                             <button
                               type="button"
                               onClick={() => addItemById(item.id)}
-                              disabled={item.added}
+                              disabled={item.added || (catalogQtyById[item.id] ?? 0) <= 0}
                               className="inline-flex h-10 items-center justify-center rounded-lg border border-emerald-200 bg-emerald-50 px-3 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400"
                             >
                               {item.added ? "Added" : "Add"}
@@ -681,7 +698,6 @@ function LocationManagerView({
 
               <div className="grid gap-3 p-4 md:hidden">
                 {visibleCatalogItems.map(item => {
-                  const qty = catalogQtyById[item.id] ?? 1;
                   const isLocal = (item as any).sourceType === 'local_vendor';
                   return (
                     <div key={item.id} className="rounded-xl border border-slate-200 bg-white p-4">
@@ -706,15 +722,28 @@ function LocationManagerView({
                       <div className="mt-4 flex gap-2">
                         <input
                           type="number"
-                          min={1}
-                          value={qty}
-                          onChange={(e) => setCatalogQtyById(prev => ({ ...prev, [item.id]: Math.max(1, Number(e.target.value)) }))}
+                          min={0}
+                          value={catalogQtyById[item.id] ?? 0}
+                          onChange={(e) => {
+                            const newQty = Math.max(0, Number(e.target.value) || 0);
+                            setCatalogQtyById(prev => ({ ...prev, [item.id]: newQty }));
+                            if (newQty <= 0 && item.added) {
+                              setLineItems(prev => prev.filter(li => (li.catalogItemId ?? li.finishedGoodId ?? li.itemId) !== item.id));
+                            }
+                            if (newQty > 0 && item.added) {
+                              setLineItems(prev => prev.map(li =>
+                                (li.catalogItemId ?? li.finishedGoodId ?? li.itemId) === item.id
+                                  ? { ...li, quantityRequested: newQty }
+                                  : li
+                              ));
+                            }
+                          }}
                           className="h-11 w-24 rounded-lg border border-slate-200 px-3 text-sm"
                         />
                         <button
                           type="button"
                           onClick={() => addItemById(item.id)}
-                          disabled={item.added}
+                          disabled={item.added || (catalogQtyById[item.id] ?? 0) <= 0}
                           className="flex min-h-11 flex-1 items-center justify-center rounded-lg bg-emerald-700 px-3 text-sm font-semibold text-white disabled:bg-slate-200 disabled:text-slate-500"
                         >
                           {item.added ? "Added" : "Add item"}
@@ -724,6 +753,7 @@ function LocationManagerView({
                   );
                 })}
               </div>
+
             </section>
 
             <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
@@ -795,7 +825,7 @@ function LocationManagerView({
               <div className="flex items-center justify-between border-b border-slate-200 p-5">
                 <div>
                   <h2 className="text-lg font-semibold text-slate-950">Order Cart</h2>
-                  <p className="mt-1 text-sm text-slate-500">{lineItems.length} selected item{lineItems.length === 1 ? "" : "s"}</p>
+                  <p className="mt-1 text-sm text-slate-500">{lineItems.filter(li => li.quantityRequested > 0).length} selected item{lineItems.filter(li => li.quantityRequested > 0).length === 1 ? "" : "s"}</p>
                 </div>
                 <div className="rounded-xl bg-emerald-50 p-2 text-emerald-700"><ShoppingCart className="h-5 w-5" /></div>
               </div>
