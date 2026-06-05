@@ -16,7 +16,7 @@ export function AppLayoutWrapper({ children }: { children: React.ReactNode }) {
       {children}
     </main>
   ) : (
-    <div className="flex bg-neutral-50 text-neutral-900 min-h-screen">
+    <div className="flex bg-neutral-50 text-neutral-900 min-h-screen h-screen overflow-hidden">
       {/* Sidebar: desktop = static column; mobile = drawer controlled by sidebarOpen */}
       <Sidebar isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
 
@@ -24,7 +24,7 @@ export function AppLayoutWrapper({ children }: { children: React.ReactNode }) {
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Pass the hamburger toggle to Header so it can render the ☰ button */}
         <Header onMenuToggle={() => setSidebarOpen((o) => !o)} />
-        <main className="flex-1 p-3 sm:p-5 lg:p-8 min-w-0 overflow-x-hidden">
+        <main className="flex-1 p-3 sm:p-5 lg:p-8 min-w-0 overflow-x-hidden overflow-y-auto">
           {children}
         </main>
       </div>

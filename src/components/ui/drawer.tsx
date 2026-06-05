@@ -115,7 +115,7 @@ export function Drawer({ isOpen, onClose, title, description, children, footer, 
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto bg-neutral-50 p-4 sm:p-6 text-neutral-600">
+        <div className="flex-1 overflow-y-auto bg-neutral-50 p-4 sm:p-6 text-neutral-600 min-h-0">
           {children}
         </div>
 

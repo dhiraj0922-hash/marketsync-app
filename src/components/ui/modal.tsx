@@ -12,6 +12,15 @@ interface ModalProps {
 }
 
 export function Modal({ isOpen, onClose, title, description, children, footer }: ModalProps) {
+  React.useEffect(() => {
+    if (!isOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [isOpen]);
+
   if (!isOpen) return null;
 
   return (
@@ -22,29 +31,29 @@ export function Modal({ isOpen, onClose, title, description, children, footer }:
       <div 
         onClick={(e) => e.stopPropagation()}
         className={cn(
-          "bg-white w-full max-w-lg rounded-xl shadow-lg border border-neutral-200 overflow-hidden",
+          "bg-white w-full max-w-lg rounded-xl shadow-lg border border-neutral-200 flex flex-col max-h-[85vh] overflow-hidden",
           "animate-in fade-in zoom-in-95 duration-200"
         )}
       >
-        <div className="flex items-center justify-between px-6 py-4 border-b border-neutral-100">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-neutral-100 shrink-0 bg-white z-10">
           <div>
             <h2 className="text-lg font-semibold text-neutral-900">{title}</h2>
             {description && <p className="text-sm text-neutral-500 mt-0.5">{description}</p>}
           </div>
           <button 
             onClick={onClose}
-            className="text-neutral-400 hover:text-neutral-600 hover:bg-neutral-100 p-1.5 rounded-md transition-colors"
+            className="text-neutral-400 hover:text-neutral-600 hover:bg-neutral-100 p-1.5 rounded-md transition-colors shrink-0"
           >
             <X className="h-5 w-5" />
           </button>
         </div>
         
-        <div className="p-6 text-neutral-600">
+        <div className="p-6 text-neutral-600 flex-1 overflow-y-auto min-h-0">
           {children}
         </div>
 
         {footer && (
-          <div className="px-6 py-4 border-t border-neutral-100 bg-neutral-50 flex items-center justify-end gap-3">
+          <div className="px-6 py-4 border-t border-neutral-100 bg-neutral-50 flex items-center justify-end gap-3 shrink-0">
             {footer}
           </div>
         )}
