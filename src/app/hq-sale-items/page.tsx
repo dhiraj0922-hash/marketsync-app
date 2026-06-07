@@ -221,7 +221,7 @@ function computeLiveCost(item: SaleItem, recipes: any[]): LiveCost {
 function HQSaleItemsContent() {
   const [items, setItems]       = useState<SaleItem[]>([]);
   const [recipes, setRecipes]   = useState<any[]>([]);
-  const [locations, setLocations] = useState<{ id: string; name: string; type?: string }[]>([]);
+  const [locations, setLocations] = useState<{ id: string; name: string; type?: string; subtype?: string; status?: string }[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [search, setSearch]     = useState("");
   const [filterCategory, setFilterCategory] = useState("All");
@@ -281,7 +281,13 @@ function HQSaleItemsContent() {
       setRecipes(Array.isArray(rec) ? rec : []);
       setLocations(
         Array.isArray(locs)
-          ? locs.filter((l: any) => !l.status || l.status === "active").map((l: any) => ({ id: l.id, name: l.name, type: l.type }))
+          ? locs.map((l: any) => ({
+              id: l.id,
+              name: l.name,
+              type: l.type,
+              subtype: l.subtype,
+              status: l.status
+            }))
           : []
       );
       // DB categories — if empty (pre-migration), UI falls back to CATEGORY_OPTIONS
@@ -503,8 +509,24 @@ function HQSaleItemsContent() {
   // category strings already on items but not yet in the categories table.
   // This keeps the filter backward-compatible with pre-migration data.
   const activeSellableLocations = locations.filter(l => {
+    const id = (l.id ?? '').toLowerCase().trim();
+    if (id === 'loc-hq' || id === 'hq') return false;
+    
+    const name = (l.name ?? '').toLowerCase().trim();
+    if (name.includes('head office') || name.includes('central kitchen') || name === 'hq') return false;
+
     const type = (l.type ?? '').toLowerCase().trim();
-    return l.id !== 'LOC-HQ' && type !== 'hq' && type !== 'warehouse' && type !== 'internal';
+    if (type === 'warehouse' || type === 'internal' || type === 'hq') return false;
+
+    const subtype = (l.subtype ?? '').toLowerCase().trim();
+    if (subtype === 'warehouse' || subtype === 'internal' || subtype === 'hq') return false;
+
+    if (l.status) {
+      const statusStr = String(l.status).toLowerCase().trim();
+      if (statusStr !== 'active') return false;
+    }
+
+    return true;
   });
 
   const dropdownLocations = activeSellableLocations.filter(loc => {
