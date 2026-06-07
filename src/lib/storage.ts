@@ -2384,7 +2384,42 @@ export async function loadBackorders(locationId?: string): Promise<any[]> {
     console.error('[Backorders] load error', error);
     return [];
   }
-  return data || [];
+  return (data || []).map(row => ({
+    id: row.id,
+    locationId: row.location_id,
+    location_id: row.location_id,
+    originalRequisitionId: row.original_requisition_id,
+    original_requisition_id: row.original_requisition_id,
+    originalRequisitionItemId: row.original_requisition_item_id,
+    original_requisition_item_id: row.original_requisition_item_id,
+    itemId: row.item_id,
+    item_id: row.item_id,
+    itemName: row.item_name,
+    item_name: row.item_name,
+    requestedQty: Number(row.requested_qty ?? 0),
+    requested_qty: Number(row.requested_qty ?? 0),
+    fulfilledQty: Number(row.fulfilled_qty ?? 0),
+    fulfilled_qty: Number(row.fulfilled_qty ?? 0),
+    backorderQty: Number(row.backorder_qty ?? 0),
+    backorder_qty: Number(row.backorder_qty ?? 0),
+    remainingQty: Number(row.remaining_qty ?? 0),
+    remaining_qty: Number(row.remaining_qty ?? 0),
+    unit: row.unit,
+    unitPrice: Number(row.unit_price ?? 0),
+    unit_price: Number(row.unit_price ?? 0),
+    sourceType: row.source_type,
+    source_type: row.source_type,
+    supplierName: row.supplier_name,
+    supplier_name: row.supplier_name,
+    status: row.status,
+    createdAt: row.created_at,
+    created_at: row.created_at,
+    updatedAt: row.updated_at,
+    updated_at: row.updated_at,
+    fulfilledAt: row.fulfilled_at,
+    fulfilled_at: row.fulfilled_at,
+    notes: row.notes,
+  }));
 }
 
 export async function loadBackorderFulfillments(backorderId: string): Promise<any[]> {

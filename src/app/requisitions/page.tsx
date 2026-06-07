@@ -255,13 +255,16 @@ function LocationManagerView({
 
   const filteredBackorders = useMemo(() => {
     return backorders.filter((bo) => {
-      if (boFilterStatus !== "all" && bo.status !== boFilterStatus) return false;
+      const boStatus = (bo.status ?? "").toLowerCase();
+      const filterStatus = boFilterStatus.toLowerCase();
+      if (filterStatus !== "all" && boStatus !== filterStatus) return false;
+
       if (boSearchQuery) {
         const q = boSearchQuery.toLowerCase();
         if (
-          !String(bo.item_name).toLowerCase().includes(q) &&
-          !String(bo.item_id).toLowerCase().includes(q) &&
-          !String(bo.original_requisition_id).toLowerCase().includes(q)
+          !String(bo.itemName || "").toLowerCase().includes(q) &&
+          !String(bo.itemId || "").toLowerCase().includes(q) &&
+          !String(bo.originalRequisitionId || "").toLowerCase().includes(q)
         ) {
           return false;
         }
@@ -920,15 +923,15 @@ function LocationManagerView({
                       <TableBody>
                         {filteredBackorders.length > 0 ? filteredBackorders.map(bo => (
                           <TableRow key={bo.id} className="border-slate-100 hover:bg-slate-50">
-                            <TableCell className="px-5 py-4 font-semibold text-slate-955">{bo.original_requisition_id}</TableCell>
+                            <TableCell className="px-5 py-4 font-semibold text-slate-955">{bo.originalRequisitionId}</TableCell>
                             <TableCell className="py-4 text-sm">
-                              <div className="font-semibold text-slate-900">{bo.item_name}</div>
-                              <div className="text-slate-500 text-xs mt-0.5">{bo.item_id} ({bo.source_type})</div>
+                              <div className="font-semibold text-slate-900">{bo.itemName}</div>
+                              <div className="text-slate-500 text-xs mt-0.5">{bo.itemId} ({bo.sourceType})</div>
                             </TableCell>
-                            <TableCell className="py-4 text-right text-sm text-slate-700">{bo.requested_qty} {bo.unit}</TableCell>
-                            <TableCell className="py-4 text-right text-sm text-slate-700">{bo.fulfilled_qty} {bo.unit}</TableCell>
-                            <TableCell className="py-4 text-right text-sm font-semibold text-rose-600">{bo.remaining_qty} {bo.unit}</TableCell>
-                            <TableCell className="py-4 text-right text-sm text-slate-700">${Number(bo.unit_price).toFixed(2)}</TableCell>
+                            <TableCell className="py-4 text-right text-sm text-slate-700">{bo.requestedQty} {bo.unit}</TableCell>
+                            <TableCell className="py-4 text-right text-sm text-slate-700">{bo.fulfilledQty} {bo.unit}</TableCell>
+                            <TableCell className="py-4 text-right text-sm font-semibold text-rose-600">{bo.remainingQty} {bo.unit}</TableCell>
+                            <TableCell className="py-4 text-right text-sm text-slate-700">${Number(bo.unitPrice).toFixed(2)}</TableCell>
                             <TableCell className="py-4"><StatusBadge status={bo.status} /></TableCell>
                           </TableRow>
                         )) : (
@@ -1467,7 +1470,10 @@ function HQAdminView({
   const PENDING_STATUSES      = new Set(["draft", "submitted"]);
 
   const pendingCount   = requisitions.filter((r) => PENDING_STATUSES.has((r.status ?? "").toLowerCase())).length;
-  const backorderCount = requisitions.filter((r) => (r.status ?? "").toLowerCase() === "backordered").length;
+  const backorderCount = backorders.filter((b) =>
+    (b.status === "open" || b.status === "partially_fulfilled") &&
+    Number(b.remainingQty ?? 0) > 0
+  ).length;
 
   // KPI: Total Value Supplied — use getDisplayValue so it works without requiring
   // every row to be opened first. For fulfilled rows getDisplayValue returns actual
@@ -1538,14 +1544,17 @@ function HQAdminView({
 
   const filteredBackorders = useMemo(() => {
     return backorders.filter((bo) => {
-      if (boFilterStatus !== "all" && bo.status !== boFilterStatus) return false;
-      if (boFilterLocation !== "all" && bo.location_id !== boFilterLocation) return false;
+      const boStatus = (bo.status ?? "").toLowerCase();
+      const filterStatus = boFilterStatus.toLowerCase();
+      if (filterStatus !== "all" && boStatus !== filterStatus) return false;
+      if (boFilterLocation !== "all" && bo.locationId !== boFilterLocation) return false;
+
       if (boSearchQuery) {
         const q = boSearchQuery.toLowerCase();
         if (
-          !String(bo.item_name).toLowerCase().includes(q) &&
-          !String(bo.item_id).toLowerCase().includes(q) &&
-          !String(bo.original_requisition_id).toLowerCase().includes(q)
+          !String(bo.itemName || "").toLowerCase().includes(q) &&
+          !String(bo.itemId || "").toLowerCase().includes(q) &&
+          !String(bo.originalRequisitionId || "").toLowerCase().includes(q)
         ) {
           return false;
         }
@@ -1591,6 +1600,14 @@ function HQAdminView({
     const lower = newStatus.toLowerCase();
     setRequisitions((prev) => prev.map((r) => r.id === reqId ? { ...r, status: lower } : r));
     if (selectedReq?.id === reqId) setSelectedReq({ ...selectedReq, status: lower });
+    if (lower === "fulfilled") {
+      try {
+        const updatedBo = await loadBackorders();
+        setBackorders(updatedBo);
+      } catch (boErr) {
+        console.error("Failed to load backorders", boErr);
+      }
+    }
   };
 
   const handleDeliveryTicketAction = async () => {
@@ -1796,7 +1813,7 @@ function HQAdminView({
         <div className="flex rounded-lg border border-white/10 bg-[#151515] p-1 shadow-inner shadow-black/30">
           <button onClick={() => setActiveTab("overview")}
             className={`rounded-md px-4 py-1.5 text-sm font-medium transition-colors ${activeTab === "overview" ? "bg-blue-600 text-white shadow-sm shadow-blue-600/20" : "text-zinc-400 hover:text-white"}`}>
-            Store Requisitions
+            Requests
           </button>
           <button onClick={() => setActiveTab("hq-production")}
             className={`flex items-center gap-2 rounded-md px-4 py-1.5 text-sm font-medium transition-colors ${activeTab === "hq-production" ? "bg-blue-600 text-white shadow-sm shadow-blue-600/20" : "text-zinc-400 hover:text-white"}`}>
@@ -2099,6 +2116,14 @@ function HQAdminView({
                           if (!res.success) {
                             alert(`Failed to save status: ${res.error?.message}`);
                             return;
+                          }
+
+                          // Refresh backorders state
+                          try {
+                            const updatedBo = await loadBackorders();
+                            setBackorders(updatedBo);
+                          } catch (boErr) {
+                            console.error("Failed to load backorders after fulfillment completion", boErr);
                           }
 
                           // ── 4. Compute fulfilled total for local state ─────────────
@@ -2491,21 +2516,22 @@ function HQAdminView({
                 <TableHeader className="bg-[#151515] text-xs uppercase tracking-[0.14em] text-zinc-400">
                   <TableRow className="border-b border-white/5">
                     <TableHead className="px-6 py-3.5">Location</TableHead>
-                    <TableHead className="py-3.5">Requisition</TableHead>
-                    <TableHead className="py-3.5">Item Name / SKU</TableHead>
-                    <TableHead className="py-3.5 text-right">Requested</TableHead>
-                    <TableHead className="py-3.5 text-right">Fulfilled</TableHead>
-                    <TableHead className="py-3.5 text-right">Remaining</TableHead>
+                    <TableHead className="py-3.5">Item</TableHead>
+                    <TableHead className="py-3.5">Original Requisition #</TableHead>
+                    <TableHead className="py-3.5 text-right">Requested Qty</TableHead>
+                    <TableHead className="py-3.5 text-right">Initially Fulfilled Qty</TableHead>
+                    <TableHead className="py-3.5 text-right">Remaining Qty</TableHead>
+                    <TableHead className="py-3.5">Unit</TableHead>
                     <TableHead className="py-3.5 text-right">Unit Price</TableHead>
-                    <TableHead className="py-3.5 text-right">Remaining Value</TableHead>
                     <TableHead className="py-3.5">Status</TableHead>
-                    <TableHead className="px-6 py-3.5 text-right">Action</TableHead>
+                    <TableHead className="py-3.5">Created Date</TableHead>
+                    <TableHead className="px-6 py-3.5 text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {backordersLoading ? (
                     <TableRow>
-                      <TableCell colSpan={10} className="py-10 text-center text-zinc-500 text-sm">
+                      <TableCell colSpan={11} className="py-10 text-center text-zinc-500 text-sm">
                         <div className="flex items-center justify-center gap-2">
                           <Loader2 className="h-4 w-4 animate-spin" /> Loading backorders...
                         </div>
@@ -2513,40 +2539,47 @@ function HQAdminView({
                     </TableRow>
                   ) : filteredBackorders.length > 0 ? (
                     filteredBackorders.map((bo) => {
-                      const remainingVal = Number(bo.remaining_qty ?? 0) * Number(bo.unit_price ?? 0);
                       const isFulfillable = bo.status === "open" || bo.status === "partially_fulfilled";
+                      const createdDateStr = bo.createdAt ? new Date(bo.createdAt).toLocaleDateString("en-US", {
+                        month: "short",
+                        day: "numeric",
+                        year: "numeric"
+                      }) : "—";
                       return (
                         <TableRow key={bo.id} className="border-b border-white/5 hover:bg-[#151515]/50 transition-colors">
-                          <TableCell className="px-6 py-4 font-medium text-zinc-100">{bo.location_id}</TableCell>
-                          <TableCell className="py-4 text-sm text-zinc-400">{bo.original_requisition_id}</TableCell>
+                          <TableCell className="px-6 py-4 font-medium text-zinc-100">{bo.locationId}</TableCell>
                           <TableCell className="py-4 text-sm">
-                            <div className="font-semibold text-zinc-100">{bo.item_name}</div>
-                            <div className="text-zinc-500 text-xs mt-0.5">{bo.item_id} ({bo.source_type})</div>
+                            <div className="font-semibold text-zinc-100">{bo.itemName}</div>
+                            <div className="text-zinc-500 text-xs mt-0.5">{bo.itemId} ({bo.sourceType})</div>
+                          </TableCell>
+                          <TableCell className="py-4 text-sm text-zinc-400">{bo.originalRequisitionId}</TableCell>
+                          <TableCell className="py-4 text-right text-sm text-zinc-300">
+                            {bo.requestedQty}
                           </TableCell>
                           <TableCell className="py-4 text-right text-sm text-zinc-300">
-                            {bo.requested_qty} {bo.unit}
-                          </TableCell>
-                          <TableCell className="py-4 text-right text-sm text-zinc-300">
-                            {bo.fulfilled_qty} {bo.unit}
+                            {bo.fulfilledQty}
                           </TableCell>
                           <TableCell className="py-4 text-right text-sm font-semibold text-amber-400">
-                            {bo.remaining_qty} {bo.unit}
+                            {bo.remainingQty}
+                          </TableCell>
+                          <TableCell className="py-4 text-sm text-zinc-300">
+                            {bo.unit}
                           </TableCell>
                           <TableCell className="py-4 text-right text-sm text-zinc-400">
-                            ${Number(bo.unit_price).toFixed(2)}
-                          </TableCell>
-                          <TableCell className="py-4 text-right text-sm font-semibold text-zinc-200">
-                            ${remainingVal.toFixed(2)}
+                            ${Number(bo.unitPrice).toFixed(2)}
                           </TableCell>
                           <TableCell className="py-4">
                             <StatusBadge status={bo.status} />
+                          </TableCell>
+                          <TableCell className="py-4 text-sm text-zinc-400">
+                            {createdDateStr}
                           </TableCell>
                           <TableCell className="px-6 py-4 text-right">
                             {isFulfillable ? (
                               <button
                                 onClick={() => {
                                   setSelectedFulfillBo(bo);
-                                  setQtyToFulfill(bo.remaining_qty);
+                                  setQtyToFulfill(bo.remainingQty);
                                 }}
                                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 text-xs font-semibold text-white hover:bg-blue-500 transition-colors"
                               >
@@ -2561,7 +2594,7 @@ function HQAdminView({
                     })
                   ) : (
                     <TableRow>
-                      <TableCell colSpan={10} className="py-10 text-center text-sm text-zinc-500">
+                      <TableCell colSpan={11} className="py-10 text-center text-sm text-zinc-500">
                         No backorders found.
                       </TableCell>
                     </TableRow>
@@ -2589,23 +2622,23 @@ function HQAdminView({
           <div className="grid grid-cols-2 gap-4 rounded-xl border border-neutral-200 bg-white p-4 text-sm text-neutral-800">
             <div>
               <span className="text-xs text-neutral-500 uppercase font-semibold">Location</span>
-              <p className="mt-1 font-bold text-neutral-900">{selectedFulfillBo?.location_id}</p>
+              <p className="mt-1 font-bold text-neutral-900">{selectedFulfillBo?.locationId}</p>
             </div>
             <div>
               <span className="text-xs text-neutral-500 uppercase font-semibold">Item SKU/ID</span>
-              <p className="mt-1 font-bold text-neutral-900">{selectedFulfillBo?.item_id}</p>
+              <p className="mt-1 font-bold text-neutral-900">{selectedFulfillBo?.itemId}</p>
             </div>
             <div className="col-span-2 border-t border-neutral-100 pt-2 mt-2">
               <span className="text-xs text-neutral-500 uppercase font-semibold">Item Name</span>
-              <p className="mt-1 font-bold text-neutral-900">{selectedFulfillBo?.item_name}</p>
+              <p className="mt-1 font-bold text-neutral-900">{selectedFulfillBo?.itemName}</p>
             </div>
             <div className="border-t border-neutral-100 pt-2 mt-2">
               <span className="text-xs text-neutral-500 uppercase font-semibold">Requested / Fulfilled</span>
-              <p className="mt-1 text-neutral-900 font-medium">{selectedFulfillBo?.requested_qty} / {selectedFulfillBo?.fulfilled_qty} {selectedFulfillBo?.unit}</p>
+              <p className="mt-1 text-neutral-900 font-medium">{selectedFulfillBo?.requestedQty} / {selectedFulfillBo?.fulfilledQty} {selectedFulfillBo?.unit}</p>
             </div>
             <div className="border-t border-neutral-100 pt-2 mt-2">
               <span className="text-xs text-neutral-500 uppercase font-semibold">Remaining Backorder</span>
-              <p className="mt-1 text-amber-600 font-bold">{selectedFulfillBo?.remaining_qty} {selectedFulfillBo?.unit}</p>
+              <p className="mt-1 text-amber-600 font-bold">{selectedFulfillBo?.remainingQty} {selectedFulfillBo?.unit}</p>
             </div>
             <div className="border-t border-neutral-100 pt-2 mt-2">
               <span className="text-xs text-neutral-500 uppercase font-semibold">HQ Stock Available</span>
@@ -2615,7 +2648,7 @@ function HQAdminView({
                 ) : hqStock === null ? (
                   <span className="text-rose-600">Not found / Out of Stock</span>
                 ) : (
-                  <span className={hqStock <= 0 ? "text-rose-600" : hqStock < (selectedFulfillBo?.remaining_qty ?? 0) ? "text-amber-600" : "text-emerald-600"}>
+                  <span className={hqStock <= 0 ? "text-rose-600" : hqStock < (selectedFulfillBo?.remainingQty ?? 0) ? "text-amber-600" : "text-emerald-600"}>
                     {hqStock} {selectedFulfillBo?.unit}
                   </span>
                 )}
@@ -2623,7 +2656,7 @@ function HQAdminView({
             </div>
             <div className="border-t border-neutral-100 pt-2 mt-2">
               <span className="text-xs text-neutral-500 uppercase font-semibold">Unit Price</span>
-              <p className="mt-1 text-neutral-900 font-medium">${Number(selectedFulfillBo?.unit_price ?? 0).toFixed(2)}</p>
+              <p className="mt-1 text-neutral-900 font-medium">${Number(selectedFulfillBo?.unitPrice ?? 0).toFixed(2)}</p>
             </div>
           </div>
 
@@ -2640,10 +2673,10 @@ function HQAdminView({
               type="number"
               min={0.01}
               step="any"
-              max={selectedFulfillBo?.remaining_qty}
+              max={selectedFulfillBo?.remainingQty}
               value={qtyToFulfill || ""}
               onChange={(e) => setQtyToFulfill(Number(e.target.value))}
-              placeholder={`Max ${selectedFulfillBo?.remaining_qty}`}
+              placeholder={`Max ${selectedFulfillBo?.remainingQty}`}
               className="mt-2 w-full h-11 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
@@ -2670,8 +2703,8 @@ function HQAdminView({
             <button
               type="button"
               onClick={async () => {
-                if (qtyToFulfill <= 0 || qtyToFulfill > (selectedFulfillBo?.remaining_qty ?? 0)) {
-                  setBoFulfillError(`Fulfill quantity must be between 0.01 and ${selectedFulfillBo?.remaining_qty}.`);
+                if (qtyToFulfill <= 0 || qtyToFulfill > (selectedFulfillBo?.remainingQty ?? 0)) {
+                  setBoFulfillError(`Fulfill quantity must be between 0.01 and ${selectedFulfillBo?.remainingQty}.`);
                   return;
                 }
                 if (hqStock !== null && hqStock < qtyToFulfill) {
