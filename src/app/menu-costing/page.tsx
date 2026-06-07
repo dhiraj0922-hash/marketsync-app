@@ -6,11 +6,8 @@ import { isHqAdmin } from "@/lib/roles";
 import {
   loadLocations,
   loadSaleItems,
-  loadOutletCatalog,
-  loadOutletInventoryV2,
+  loadInventory,
   SaleItem,
-  OutletCatalogItem,
-  OutletInventoryRowV2,
 } from "@/lib/storage";
 import {
   loadMenuCostings,
@@ -65,8 +62,7 @@ export default function MenuCostingPage() {
   // ── State Variables ─────────────────────
   const [costings, setCostings] = useState<MenuCosting[]>([]);
   const [saleItems, setSaleItems] = useState<SaleItem[]>([]);
-  const [catalogItems, setCatalogItems] = useState<OutletCatalogItem[]>([]);
-  const [inventoryRows, setInventoryRows] = useState<OutletInventoryRowV2[]>([]);
+  const [localInventory, setLocalInventory] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("All");
@@ -119,16 +115,14 @@ export default function MenuCostingPage() {
     if (!activeLoc) return;
     setLoading(true);
     try {
-      const [costingList, fgs, cat, inv] = await Promise.all([
+      const [costingList, fgs, loadedInv] = await Promise.all([
         loadMenuCostings(activeLoc),
         loadSaleItems(),
-        loadOutletCatalog(),
-        loadOutletInventoryV2(activeLoc),
+        loadInventory(activeLoc),
       ]);
       setCostings(costingList);
       setSaleItems(fgs.filter((item) => item.isActive));
-      setCatalogItems(cat.filter((item) => item.isActive));
-      setInventoryRows(inv);
+      setLocalInventory(loadedInv);
     } catch (err) {
       console.error("Error loading data:", err);
     } finally {
@@ -142,20 +136,17 @@ export default function MenuCostingPage() {
 
   // ── Map Inventory Items with Overrides ────
   const inventoryItemsMerged = useMemo(() => {
-    const map = new Map(inventoryRows.map((r) => [r.itemId, r]));
-    return catalogItems.map((c) => {
-      const o = map.get(c.itemId);
-      const effectivePrice = o?.localPrice != null && o.localPrice > 0 ? o.localPrice : c.price;
+    return localInventory.map((item) => {
       return {
-        ...c,
-        itemId: c.itemId,
-        name: c.name,
-        category: c.category || "General",
-        uom: c.uom || "ea",
-        effectivePrice,
+        ...item,
+        itemId: item.itemId || item.id,
+        name: item.name,
+        category: item.category || "General",
+        uom: item.baseUnit || item.unit || "ea",
+        effectivePrice: item.cost || 0,
       };
     });
-  }, [catalogItems, inventoryRows]);
+  }, [localInventory]);
 
   // ── Autocomplete Filtering Options ────────
   const getItemSuggestions = useCallback((sourceType: "finished_good" | "inventory_item", searchStr: string) => {
@@ -1044,7 +1035,7 @@ export default function MenuCostingPage() {
                                 className="w-full border border-neutral-200 rounded px-2 py-1 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-brand-500 disabled:bg-neutral-100 disabled:text-neutral-600"
                               >
                                 <option value="finished_good">HQ Finished Good</option>
-                                <option value="inventory_item">Local Inventory</option>
+                                <option value="inventory_item">Location Inventory Item</option>
                               </select>
                             </div>
 
