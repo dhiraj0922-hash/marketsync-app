@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
+import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
@@ -25,6 +26,7 @@ import {
   Trash2,
   ArrowLeft,
   ShoppingCart,
+  Truck,
   X,
   Warehouse,
 } from "lucide-react";
@@ -44,6 +46,11 @@ import {
   getHQAvailabilityLabel,
   sendHqRequisitionNotification,
   loadOutletCatalog,
+  loadBackorders,
+  loadBackorderFulfillments,
+  fulfillBackorder,
+  createDeliveryTicketFromRequisition,
+  getDeliveryTicketForRequisition,
   type SaleItem,
   type OutletCatalogItem,
 } from "@/lib/storage";
@@ -53,6 +60,7 @@ import {
   clearProfileCache,
   type UserProfile,
 } from "@/lib/auth";
+import { supabase } from "@/lib/supabase";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -192,12 +200,19 @@ function LocationManagerView({
   // Local vendor catalog items (from outlet_catalog_items)
   const [localCatalogItems, setLocalCatalogItems] = useState<OutletCatalogItem[]>([]);
 
+  const [activeHistoryTab, setActiveHistoryTab] = useState<"orders" | "backorders">("orders");
+  const [backorders, setBackorders] = useState<any[]>([]);
+  const [backordersLoading, setBackordersLoading] = useState(false);
+  const [boSearchQuery, setBoSearchQuery] = useState("");
+  const [boFilterStatus, setBoFilterStatus] = useState("all");
+
   const fetchReqs = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [rows, localCat] = await Promise.all([
+      const [rows, localCat, bo] = await Promise.all([
         loadRequisitions(),
         loadOutletCatalog(false), // active items only
+        loadBackorders(profile.locationId || undefined),
       ]);
       setRequisitions(Array.isArray(rows) ? rows : []);
       setLocalCatalogItems(
@@ -208,10 +223,11 @@ function LocationManagerView({
             c.sourceType === 'local_vendor'
           )
       );
+      setBackorders(Array.isArray(bo) ? bo : []);
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [profile.locationId]);
 
   useEffect(() => { fetchReqs(); }, [fetchReqs]);
 
@@ -236,6 +252,23 @@ function LocationManagerView({
     }
     return true;
   });
+
+  const filteredBackorders = useMemo(() => {
+    return backorders.filter((bo) => {
+      if (boFilterStatus !== "all" && bo.status !== boFilterStatus) return false;
+      if (boSearchQuery) {
+        const q = boSearchQuery.toLowerCase();
+        if (
+          !String(bo.item_name).toLowerCase().includes(q) &&
+          !String(bo.item_id).toLowerCase().includes(q) &&
+          !String(bo.original_requisition_id).toLowerCase().includes(q)
+        ) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [backorders, boFilterStatus, boSearchQuery]);
 
   const catalogItems = useMemo(() => {
     // ── HQ items (FG mode or raw mode) ─────────────────────────────────────
@@ -759,62 +792,153 @@ function LocationManagerView({
             <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
               <div className="flex flex-col gap-3 border-b border-slate-200 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
                 <div>
-                  <h2 className="text-lg font-semibold text-slate-950">Recent Requisitions</h2>
-                  <p className="mt-1 text-sm text-slate-500">Review submitted orders and their current status.</p>
-                </div>
-                <div className="flex flex-col gap-2 sm:flex-row">
-                  <div className="relative sm:w-64">
-                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                    <input
-                      type="text"
-                      placeholder="Search requisitions"
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      className="min-h-11 w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm outline-none ring-emerald-600 focus:ring-2"
-                    />
+                  <div className="flex items-center gap-4">
+                    <button
+                      onClick={() => setActiveHistoryTab("orders")}
+                      className={`text-lg font-semibold border-b-2 px-1 pb-1 transition ${
+                        activeHistoryTab === "orders" ? "border-emerald-600 text-slate-955" : "border-transparent text-slate-500 hover:text-slate-800"
+                      }`}
+                    >
+                      Recent Requisitions
+                    </button>
+                    <button
+                      onClick={() => setActiveHistoryTab("backorders")}
+                      className={`text-lg font-semibold border-b-2 px-1 pb-1 transition flex items-center gap-1.5 ${
+                        activeHistoryTab === "backorders" ? "border-emerald-600 text-slate-955" : "border-transparent text-slate-500 hover:text-slate-800"
+                      }`}
+                    >
+                      Backorders
+                      {backorders.filter(b => b.status === 'open' || b.status === 'partially_fulfilled').length > 0 && (
+                        <span className="bg-rose-100 text-rose-700 text-[10px] font-bold px-1.5 py-0.5 rounded-full">
+                          {backorders.filter(b => b.status === 'open' || b.status === 'partially_fulfilled').length}
+                        </span>
+                      )}
+                    </button>
                   </div>
-                  <select
-                    value={filterStatus}
-                    onChange={(e) => setFilterStatus(e.target.value)}
-                    className="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none ring-emerald-600 focus:ring-2"
-                  >
-                    <option value="all">All Statuses</option>
-                    <option value="draft">Draft</option>
-                    <option value="submitted">Submitted</option>
-                    <option value="approved">Approved</option>
-                    <option value="rejected">Rejected</option>
-                    <option value="fulfilled">Fulfilled</option>
-                  </select>
+                  <p className="mt-2 text-sm text-slate-500">
+                    {activeHistoryTab === "orders"
+                      ? "Review submitted orders and their current status."
+                      : "Outstanding backorder items owed to your location."}
+                  </p>
                 </div>
+
+                {activeHistoryTab === "orders" ? (
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    <div className="relative sm:w-64">
+                      <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                      <input
+                        type="text"
+                        placeholder="Search requisitions"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        className="min-h-11 w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm outline-none ring-emerald-600 focus:ring-2"
+                      />
+                    </div>
+                    <select
+                      value={filterStatus}
+                      onChange={(e) => setFilterStatus(e.target.value)}
+                      className="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none ring-emerald-600 focus:ring-2"
+                    >
+                      <option value="all">All Statuses</option>
+                      <option value="draft">Draft</option>
+                      <option value="submitted">Submitted</option>
+                      <option value="approved">Approved</option>
+                      <option value="rejected">Rejected</option>
+                      <option value="fulfilled">Fulfilled</option>
+                    </select>
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    <div className="relative sm:w-64">
+                      <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                      <input
+                        type="text"
+                        placeholder="Search backorder items"
+                        value={boSearchQuery}
+                        onChange={(e) => setBoSearchQuery(e.target.value)}
+                        className="min-h-11 w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm outline-none ring-emerald-600 focus:ring-2"
+                      />
+                    </div>
+                    <select
+                      value={boFilterStatus}
+                      onChange={(e) => setBoFilterStatus(e.target.value)}
+                      className="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none ring-emerald-600 focus:ring-2"
+                    >
+                      <option value="all">All Statuses</option>
+                      <option value="open">Open</option>
+                      <option value="partially_fulfilled">Partially Fulfilled</option>
+                      <option value="fulfilled">Fulfilled</option>
+                      <option value="cancelled">Cancelled</option>
+                    </select>
+                  </div>
+                )}
               </div>
               <div className="overflow-x-auto">
                 <Table>
-                  <TableHeader className="bg-slate-50 text-xs uppercase tracking-[0.14em] text-slate-500">
-                    <TableRow>
-                      <TableHead className="px-5 py-3">Order</TableHead>
-                      <TableHead className="py-3">Date</TableHead>
-                      <TableHead className="py-3">Items</TableHead>
-                      <TableHead className="py-3">Total</TableHead>
-                      <TableHead className="py-3">Status</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {filtered.length > 0 ? filtered.map(req => (
-                      <TableRow key={req.id} className="cursor-pointer border-slate-100 hover:bg-slate-50" onClick={() => setSelectedReq(req)}>
-                        <TableCell className="px-5 py-4 font-semibold text-slate-950">{req.id}</TableCell>
-                        <TableCell className="py-4 text-sm text-slate-600">{req.date}</TableCell>
-                        <TableCell className="py-4 text-sm text-slate-600">{req.items}</TableCell>
-                        <TableCell className="py-4 text-sm font-semibold text-slate-900">
-                          {req.totalAmount > 0 ? `$${Number(req.totalAmount).toFixed(2)}` : "-"}
-                        </TableCell>
-                        <TableCell className="py-4"><StatusBadge status={req.status} /></TableCell>
-                      </TableRow>
-                    )) : (
-                      <TableRow>
-                        <TableCell colSpan={5} className="py-10 text-center text-sm text-slate-500">No requisitions found.</TableCell>
-                      </TableRow>
-                    )}
-                  </TableBody>
+                  {activeHistoryTab === "orders" ? (
+                    <>
+                      <TableHeader className="bg-slate-50 text-xs uppercase tracking-[0.14em] text-slate-500">
+                        <TableRow>
+                          <TableHead className="px-5 py-3">Order</TableHead>
+                          <TableHead className="py-3">Date</TableHead>
+                          <TableHead className="py-3">Items</TableHead>
+                          <TableHead className="py-3">Total</TableHead>
+                          <TableHead className="py-3">Status</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {filtered.length > 0 ? filtered.map(req => (
+                          <TableRow key={req.id} className="cursor-pointer border-slate-100 hover:bg-slate-50" onClick={() => setSelectedReq(req)}>
+                            <TableCell className="px-5 py-4 font-semibold text-slate-955">{req.id}</TableCell>
+                            <TableCell className="py-4 text-sm text-slate-600">{req.date}</TableCell>
+                            <TableCell className="py-4 text-sm text-slate-600">{req.items}</TableCell>
+                            <TableCell className="py-4 text-sm font-semibold text-slate-900">
+                              {req.totalAmount > 0 ? `$${Number(req.totalAmount).toFixed(2)}` : "-"}
+                            </TableCell>
+                            <TableCell className="py-4"><StatusBadge status={req.status} /></TableCell>
+                          </TableRow>
+                        )) : (
+                          <TableRow>
+                            <TableCell colSpan={5} className="py-10 text-center text-sm text-slate-500">No requisitions found.</TableCell>
+                          </TableRow>
+                        )}
+                      </TableBody>
+                    </>
+                  ) : (
+                    <>
+                      <TableHeader className="bg-slate-50 text-xs uppercase tracking-[0.14em] text-slate-500">
+                        <TableRow>
+                          <TableHead className="px-5 py-3">Original Requisition</TableHead>
+                          <TableHead className="py-3">Item Name / SKU</TableHead>
+                          <TableHead className="py-3 text-right">Requested</TableHead>
+                          <TableHead className="py-3 text-right">Fulfilled</TableHead>
+                          <TableHead className="py-3 text-right">Remaining</TableHead>
+                          <TableHead className="py-3 text-right">Unit Price</TableHead>
+                          <TableHead className="py-3">Status</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {filteredBackorders.length > 0 ? filteredBackorders.map(bo => (
+                          <TableRow key={bo.id} className="border-slate-100 hover:bg-slate-50">
+                            <TableCell className="px-5 py-4 font-semibold text-slate-955">{bo.original_requisition_id}</TableCell>
+                            <TableCell className="py-4 text-sm">
+                              <div className="font-semibold text-slate-900">{bo.item_name}</div>
+                              <div className="text-slate-500 text-xs mt-0.5">{bo.item_id} ({bo.source_type})</div>
+                            </TableCell>
+                            <TableCell className="py-4 text-right text-sm text-slate-700">{bo.requested_qty} {bo.unit}</TableCell>
+                            <TableCell className="py-4 text-right text-sm text-slate-700">{bo.fulfilled_qty} {bo.unit}</TableCell>
+                            <TableCell className="py-4 text-right text-sm font-semibold text-rose-600">{bo.remaining_qty} {bo.unit}</TableCell>
+                            <TableCell className="py-4 text-right text-sm text-slate-700">${Number(bo.unit_price).toFixed(2)}</TableCell>
+                            <TableCell className="py-4"><StatusBadge status={bo.status} /></TableCell>
+                          </TableRow>
+                        )) : (
+                          <TableRow>
+                            <TableCell colSpan={7} className="py-10 text-center text-sm text-slate-500">No backorders found.</TableCell>
+                          </TableRow>
+                        )}
+                      </TableBody>
+                    </>
+                  )}
                 </Table>
               </div>
             </section>
@@ -986,7 +1110,20 @@ function LocationManagerView({
                       const lineStatus = fulfilled >= requested ? "fulfilled" : fulfilled > 0 ? "partial" : "backordered";
                       return (
                         <TableRow key={li.id} className="hover:bg-neutral-50/50">
-                          <TableCell className="py-2 px-3 text-sm font-medium text-neutral-800">{li.itemName}</TableCell>
+                          <TableCell className="py-2 px-3">
+                            <div className="text-sm font-medium text-neutral-800">{li.itemName}</div>
+                            {(() => {
+                              const bo = backorders.find(b => b.original_requisition_item_id === li.id);
+                              if (!bo) return null;
+                              return (
+                                <div className="text-[10px] text-neutral-500 mt-1 border-t border-dashed border-neutral-200 pt-1 space-y-0.5">
+                                  <div className="font-semibold text-rose-600">Backordered: {bo.backorder_qty} {li.unit_snapshot || li.unitSnapshot || ''}</div>
+                                  <div className="font-medium text-amber-600">Remaining: {bo.remaining_qty} {li.unit_snapshot || li.unitSnapshot || ''}</div>
+                                  <div className="text-neutral-500 capitalize">Status: {bo.status.replace(/_/g, ' ')}</div>
+                                </div>
+                              );
+                            })()}
+                          </TableCell>
                           <TableCell className="py-2 text-right text-sm text-neutral-700">{requested}</TableCell>
                           <TableCell className="py-2 text-right">
                             {li.quantityFulfilled != null
@@ -1057,6 +1194,7 @@ function HQAdminView({
   finishedGoods: any[];
   profile: import("@/lib/auth").UserProfile | null;
 }) {
+  const router = useRouter();
   const [requisitions, setRequisitions] = useState<any[]>([]);
   const [finishedGoods, setFinishedGoods] = useState<any[]>(initialFG);
   const [searchQuery, setSearchQuery] = useState("");
@@ -1066,7 +1204,7 @@ function HQAdminView({
   const [filterToDate, setFilterToDate] = useState("");        // ISO date string "YYYY-MM-DD" or ""
   const [selectedReq, setSelectedReq] = useState<any>(null);
   const [selectedReqIds, setSelectedReqIds] = useState<string[]>([]);
-  const [activeTab, setActiveTab] = useState<"overview" | "hq-production">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "hq-production" | "backorders">("overview");
   const [activeCommissary, setActiveCommissary] = useState<string>("Commissary HQ");
   const [productionDate, setProductionDate] = useState<string>(
     new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
@@ -1076,8 +1214,25 @@ function HQAdminView({
   // Line items fetched from requisition_items table on drawer open
   const [hqReqItems, setHqReqItems] = useState<any[]>([]);
   const [hqItemsLoading, setHqItemsLoading] = useState(false);
+  const [deliveryTicketForReq, setDeliveryTicketForReq] = useState<any | null>(null);
+  const [deliveryTicketLoading, setDeliveryTicketLoading] = useState(false);
   // Cache line items per req id so table rows show real values once a req is opened
   const [reqItemsCache, setReqItemsCache] = useState<Map<string, any[]>>(new Map());
+
+  // Backorders state
+  const [backorders, setBackorders] = useState<any[]>([]);
+  const [backordersLoading, setBackordersLoading] = useState(false);
+  const [boSearchQuery, setBoSearchQuery] = useState("");
+  const [boFilterStatus, setBoFilterStatus] = useState("all");
+  const [boFilterLocation, setBoFilterLocation] = useState("all");
+
+  const [selectedFulfillBo, setSelectedFulfillBo] = useState<any>(null);
+  const [qtyToFulfill, setQtyToFulfill] = useState<number>(0);
+  const [fulfillNotes, setFulfillNotes] = useState<string>("");
+  const [isFulfillingBo, setIsFulfillingBo] = useState(false);
+  const [boFulfillError, setBoFulfillError] = useState<string | null>(null);
+  const [hqStock, setHqStock] = useState<number | null>(null);
+  const [hqStockLoading, setHqStockLoading] = useState(false);
 
   // ── HQ Production: pre-load line items for all requisitions matching  ─────
   // the selected production date. This avoids N+1 fetches when hqProductionDemand
@@ -1095,20 +1250,55 @@ function HQAdminView({
     async function fetchData() {
       setIsLoading(true);
       try {
-        const [reqs, fg, locs] = await Promise.all([
+        const [reqs, fg, locs, bo] = await Promise.all([
           loadRequisitions(),
           loadFinishedGoods(),
           loadLocations(),
+          loadBackorders(),
         ]);
         setRequisitions(Array.isArray(reqs) ? reqs : []);
         setFinishedGoods(Array.isArray(fg) ? fg : []);
         setLocations(Array.isArray(locs) ? locs : []);
+        setBackorders(Array.isArray(bo) ? bo : []);
       } finally {
         setIsLoading(false);
       }
     }
     fetchData();
   }, []);
+
+  // Fetch HQ stock details for the selected backorder item
+  useEffect(() => {
+    if (!selectedFulfillBo) {
+      setHqStock(null);
+      return;
+    }
+    setHqStockLoading(true);
+    const itemId = selectedFulfillBo.item_id;
+    if (selectedFulfillBo.source_type === "finished_good") {
+      supabase.from("hq_sale_items").select("instock").eq("id", itemId).single()
+        .then(({ data, error }) => {
+          if (error) {
+            console.error("Error fetching finished goods stock", error);
+            setHqStock(null);
+          } else {
+            setHqStock(data ? Number(data.instock ?? 0) : 0);
+          }
+          setHqStockLoading(false);
+        });
+    } else {
+      supabase.from("inventory_items").select("instock").eq("item_id", itemId).eq("location_id", "LOC-HQ").single()
+        .then(({ data, error }) => {
+          if (error) {
+            console.error("Error fetching raw item stock", error);
+            setHqStock(null);
+          } else {
+            setHqStock(data ? Number(data.instock ?? 0) : 0);
+          }
+          setHqStockLoading(false);
+        });
+    }
+  }, [selectedFulfillBo]);
 
   // Batch-load line items for production date whenever date or requisitions list changes
   useEffect(() => {
@@ -1135,12 +1325,19 @@ function HQAdminView({
 
   // Fetch line items from requisition_items whenever a requisition is opened
   useEffect(() => {
-    if (!selectedReq) { setHqReqItems([]); return; }
+    if (!selectedReq) { setHqReqItems([]); setDeliveryTicketForReq(null); return; }
+    let deliveryCancelled = false;
+    setDeliveryTicketLoading(true);
+    getDeliveryTicketForRequisition(selectedReq.id).then((res) => {
+      if (deliveryCancelled) return;
+      setDeliveryTicketForReq(res.success ? (res.data ?? null) : null);
+      setDeliveryTicketLoading(false);
+    });
     // Serve from cache immediately to avoid flicker on re-open
     if (reqItemsCache.has(selectedReq.id)) {
       setHqReqItems(reqItemsCache.get(selectedReq.id)!);
       setHqItemsLoading(false);
-      return;
+      return () => { deliveryCancelled = true; };
     }
     let cancelled = false;
     setHqItemsLoading(true);
@@ -1153,7 +1350,7 @@ function HQAdminView({
         setReqItemsCache(prev => new Map(prev).set(selectedReq.id, items));
       }
     });
-    return () => { cancelled = true; };
+    return () => { cancelled = true; deliveryCancelled = true; };
   }, [selectedReq]);
 
   // ── Fulfill-qty draft map ─────────────────────────────────────────────────────
@@ -1339,6 +1536,24 @@ function HQAdminView({
     return true;
   });
 
+  const filteredBackorders = useMemo(() => {
+    return backorders.filter((bo) => {
+      if (boFilterStatus !== "all" && bo.status !== boFilterStatus) return false;
+      if (boFilterLocation !== "all" && bo.location_id !== boFilterLocation) return false;
+      if (boSearchQuery) {
+        const q = boSearchQuery.toLowerCase();
+        if (
+          !String(bo.item_name).toLowerCase().includes(q) &&
+          !String(bo.item_id).toLowerCase().includes(q) &&
+          !String(bo.original_requisition_id).toLowerCase().includes(q)
+        ) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [backorders, boFilterStatus, boFilterLocation, boSearchQuery]);
+
   const createMockRequest = async () => {
     if (finishedGoods.length === 0) return;
     const loc = locations.length
@@ -1376,6 +1591,23 @@ function HQAdminView({
     const lower = newStatus.toLowerCase();
     setRequisitions((prev) => prev.map((r) => r.id === reqId ? { ...r, status: lower } : r));
     if (selectedReq?.id === reqId) setSelectedReq({ ...selectedReq, status: lower });
+  };
+
+  const handleDeliveryTicketAction = async () => {
+    if (!selectedReq) return;
+    if (deliveryTicketForReq) {
+      router.push("/deliveries");
+      return;
+    }
+    setDeliveryTicketLoading(true);
+    const res = await createDeliveryTicketFromRequisition(selectedReq.id);
+    setDeliveryTicketLoading(false);
+    if (!res.success) {
+      alert(`Delivery ticket failed: ${res.error?.message ?? "Unknown error"}`);
+      return;
+    }
+    setDeliveryTicketForReq(res.data ?? null);
+    router.push("/deliveries");
   };
 
   const handleToggleSelect = (reqId: string) =>
@@ -1570,10 +1802,19 @@ function HQAdminView({
             className={`flex items-center gap-2 rounded-md px-4 py-1.5 text-sm font-medium transition-colors ${activeTab === "hq-production" ? "bg-blue-600 text-white shadow-sm shadow-blue-600/20" : "text-zinc-400 hover:text-white"}`}>
             <ClipboardList className="h-4 w-4" /> HQ Production
           </button>
+          <button onClick={() => setActiveTab("backorders")}
+            className={`flex items-center gap-2 rounded-md px-4 py-1.5 text-sm font-medium transition-colors ${activeTab === "backorders" ? "bg-blue-600 text-white shadow-sm shadow-blue-600/20" : "text-zinc-400 hover:text-white"}`}>
+            <Warehouse className="h-4 w-4" /> Backorders
+            {backorders.filter(b => b.status === 'open' || b.status === 'partially_fulfilled').length > 0 && (
+              <span className="bg-rose-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">
+                {backorders.filter(b => b.status === 'open' || b.status === 'partially_fulfilled').length}
+              </span>
+            )}
+          </button>
         </div>
       </div>
 
-      {activeTab === "overview" ? (
+      {activeTab === "overview" && (
         <>
           <div className="flex flex-col items-start justify-between gap-4 print:hidden sm:flex-row sm:items-center">
             <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
@@ -1806,6 +2047,20 @@ function HQAdminView({
                     </span>
                   </div>
                   <div className="flex items-center gap-3">
+                    {["approved", "fulfilled"].includes((selectedReq?.status ?? "").toLowerCase()) && (
+                      <button
+                        onClick={handleDeliveryTicketAction}
+                        disabled={deliveryTicketLoading}
+                        className="px-4 py-2 text-sm font-medium bg-white border border-brand-200 text-brand-700 rounded-lg hover:bg-brand-50 transition-colors shadow-sm flex items-center gap-2 disabled:opacity-50"
+                      >
+                        <Truck className="h-4 w-4" />
+                        {deliveryTicketLoading
+                          ? "Checking Ticket..."
+                          : deliveryTicketForReq
+                            ? "View Delivery Ticket"
+                            : "Generate Delivery Ticket"}
+                      </button>
+                    )}
                     {/* Approve / Reject — only for submitted/draft */}
                     {["submitted", "draft"].includes((selectedReq?.status ?? "").toLowerCase()) && (
                       <>
@@ -2093,7 +2348,9 @@ function HQAdminView({
             </div>
           </Drawer>
         </>
-      ) : (
+      )}
+
+      {activeTab === "hq-production" && (
         <div className="space-y-6">
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-neutral-100 pb-4 print:border-none print:pb-0">
             <div>
@@ -2177,6 +2434,278 @@ function HQAdminView({
           </div>
         </div>
       )}
+
+      {activeTab === "backorders" && (
+        <div className="space-y-6">
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-white/10 pb-4">
+            <div>
+              <h3 className="text-xl font-bold tracking-tight text-white">HQ Backorder Queue</h3>
+              <p className="text-zinc-500 text-sm">Fulfill outstanding backorder shortages to locations.</p>
+            </div>
+          </div>
+
+          {/* Filters */}
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between bg-[#111111] border border-white/10 rounded-xl p-4">
+            <div className="relative flex-1 max-w-md">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
+              <input
+                type="text"
+                placeholder="Search items, requisitions..."
+                value={boSearchQuery}
+                onChange={(e) => setBoSearchQuery(e.target.value)}
+                className="w-full h-10 rounded-lg border border-white/10 bg-[#151515] py-2 pl-9 pr-3 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={boFilterStatus}
+                onChange={(e) => setBoFilterStatus(e.target.value)}
+                className="h-10 rounded-lg border border-white/10 bg-[#151515] px-3 text-sm text-zinc-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="all">All Statuses</option>
+                <option value="open">Open</option>
+                <option value="partially_fulfilled">Partially Fulfilled</option>
+                <option value="fulfilled">Fulfilled</option>
+                <option value="cancelled">Cancelled</option>
+              </select>
+
+              <select
+                value={boFilterLocation}
+                onChange={(e) => setBoFilterLocation(e.target.value)}
+                className="h-10 rounded-lg border border-white/10 bg-[#151515] px-3 text-sm text-zinc-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="all">All Locations</option>
+                {locations.map((loc) => (
+                  <option key={loc.id} value={loc.id}>
+                    {loc.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {/* List Table */}
+          <Card className="rounded-xl border-white/10 bg-[#111111] shadow-xl overflow-hidden">
+            <CardContent className="p-0 overflow-x-auto">
+              <Table>
+                <TableHeader className="bg-[#151515] text-xs uppercase tracking-[0.14em] text-zinc-400">
+                  <TableRow className="border-b border-white/5">
+                    <TableHead className="px-6 py-3.5">Location</TableHead>
+                    <TableHead className="py-3.5">Requisition</TableHead>
+                    <TableHead className="py-3.5">Item Name / SKU</TableHead>
+                    <TableHead className="py-3.5 text-right">Requested</TableHead>
+                    <TableHead className="py-3.5 text-right">Fulfilled</TableHead>
+                    <TableHead className="py-3.5 text-right">Remaining</TableHead>
+                    <TableHead className="py-3.5 text-right">Unit Price</TableHead>
+                    <TableHead className="py-3.5 text-right">Remaining Value</TableHead>
+                    <TableHead className="py-3.5">Status</TableHead>
+                    <TableHead className="px-6 py-3.5 text-right">Action</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {backordersLoading ? (
+                    <TableRow>
+                      <TableCell colSpan={10} className="py-10 text-center text-zinc-500 text-sm">
+                        <div className="flex items-center justify-center gap-2">
+                          <Loader2 className="h-4 w-4 animate-spin" /> Loading backorders...
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ) : filteredBackorders.length > 0 ? (
+                    filteredBackorders.map((bo) => {
+                      const remainingVal = Number(bo.remaining_qty ?? 0) * Number(bo.unit_price ?? 0);
+                      const isFulfillable = bo.status === "open" || bo.status === "partially_fulfilled";
+                      return (
+                        <TableRow key={bo.id} className="border-b border-white/5 hover:bg-[#151515]/50 transition-colors">
+                          <TableCell className="px-6 py-4 font-medium text-zinc-100">{bo.location_id}</TableCell>
+                          <TableCell className="py-4 text-sm text-zinc-400">{bo.original_requisition_id}</TableCell>
+                          <TableCell className="py-4 text-sm">
+                            <div className="font-semibold text-zinc-100">{bo.item_name}</div>
+                            <div className="text-zinc-500 text-xs mt-0.5">{bo.item_id} ({bo.source_type})</div>
+                          </TableCell>
+                          <TableCell className="py-4 text-right text-sm text-zinc-300">
+                            {bo.requested_qty} {bo.unit}
+                          </TableCell>
+                          <TableCell className="py-4 text-right text-sm text-zinc-300">
+                            {bo.fulfilled_qty} {bo.unit}
+                          </TableCell>
+                          <TableCell className="py-4 text-right text-sm font-semibold text-amber-400">
+                            {bo.remaining_qty} {bo.unit}
+                          </TableCell>
+                          <TableCell className="py-4 text-right text-sm text-zinc-400">
+                            ${Number(bo.unit_price).toFixed(2)}
+                          </TableCell>
+                          <TableCell className="py-4 text-right text-sm font-semibold text-zinc-200">
+                            ${remainingVal.toFixed(2)}
+                          </TableCell>
+                          <TableCell className="py-4">
+                            <StatusBadge status={bo.status} />
+                          </TableCell>
+                          <TableCell className="px-6 py-4 text-right">
+                            {isFulfillable ? (
+                              <button
+                                onClick={() => {
+                                  setSelectedFulfillBo(bo);
+                                  setQtyToFulfill(bo.remaining_qty);
+                                }}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 text-xs font-semibold text-white hover:bg-blue-500 transition-colors"
+                              >
+                                Fulfill
+                              </button>
+                            ) : (
+                              <span className="text-xs text-zinc-600">—</span>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })
+                  ) : (
+                    <TableRow>
+                      <TableCell colSpan={10} className="py-10 text-center text-sm text-zinc-500">
+                        No backorders found.
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* Fulfill Backorder Drawer — styled light-themed as per Drawer component styling */}
+      <Drawer
+        isOpen={!!selectedFulfillBo}
+        onClose={() => {
+          setSelectedFulfillBo(null);
+          setQtyToFulfill(0);
+          setFulfillNotes("");
+          setBoFulfillError(null);
+        }}
+        title="Fulfill Requisition Backorder"
+        description="Fulfill shortages to restaurant locations from HQ inventory."
+      >
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-4 rounded-xl border border-neutral-200 bg-white p-4 text-sm text-neutral-800">
+            <div>
+              <span className="text-xs text-neutral-500 uppercase font-semibold">Location</span>
+              <p className="mt-1 font-bold text-neutral-900">{selectedFulfillBo?.location_id}</p>
+            </div>
+            <div>
+              <span className="text-xs text-neutral-500 uppercase font-semibold">Item SKU/ID</span>
+              <p className="mt-1 font-bold text-neutral-900">{selectedFulfillBo?.item_id}</p>
+            </div>
+            <div className="col-span-2 border-t border-neutral-100 pt-2 mt-2">
+              <span className="text-xs text-neutral-500 uppercase font-semibold">Item Name</span>
+              <p className="mt-1 font-bold text-neutral-900">{selectedFulfillBo?.item_name}</p>
+            </div>
+            <div className="border-t border-neutral-100 pt-2 mt-2">
+              <span className="text-xs text-neutral-500 uppercase font-semibold">Requested / Fulfilled</span>
+              <p className="mt-1 text-neutral-900 font-medium">{selectedFulfillBo?.requested_qty} / {selectedFulfillBo?.fulfilled_qty} {selectedFulfillBo?.unit}</p>
+            </div>
+            <div className="border-t border-neutral-100 pt-2 mt-2">
+              <span className="text-xs text-neutral-500 uppercase font-semibold">Remaining Backorder</span>
+              <p className="mt-1 text-amber-600 font-bold">{selectedFulfillBo?.remaining_qty} {selectedFulfillBo?.unit}</p>
+            </div>
+            <div className="border-t border-neutral-100 pt-2 mt-2">
+              <span className="text-xs text-neutral-500 uppercase font-semibold">HQ Stock Available</span>
+              <p className="mt-1 font-bold">
+                {hqStockLoading ? (
+                  <span className="text-neutral-400">Loading...</span>
+                ) : hqStock === null ? (
+                  <span className="text-rose-600">Not found / Out of Stock</span>
+                ) : (
+                  <span className={hqStock <= 0 ? "text-rose-600" : hqStock < (selectedFulfillBo?.remaining_qty ?? 0) ? "text-amber-600" : "text-emerald-600"}>
+                    {hqStock} {selectedFulfillBo?.unit}
+                  </span>
+                )}
+              </p>
+            </div>
+            <div className="border-t border-neutral-100 pt-2 mt-2">
+              <span className="text-xs text-neutral-500 uppercase font-semibold">Unit Price</span>
+              <p className="mt-1 text-neutral-900 font-medium">${Number(selectedFulfillBo?.unit_price ?? 0).toFixed(2)}</p>
+            </div>
+          </div>
+
+          {boFulfillError && (
+            <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-600 flex items-start gap-2">
+              <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+              <span>{boFulfillError}</span>
+            </div>
+          )}
+
+          <div>
+            <label className="block text-xs font-bold uppercase tracking-wider text-neutral-500">Fulfill Quantity</label>
+            <input
+              type="number"
+              min={0.01}
+              step="any"
+              max={selectedFulfillBo?.remaining_qty}
+              value={qtyToFulfill || ""}
+              onChange={(e) => setQtyToFulfill(Number(e.target.value))}
+              placeholder={`Max ${selectedFulfillBo?.remaining_qty}`}
+              className="mt-2 w-full h-11 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold uppercase tracking-wider text-neutral-500">Notes / Remarks</label>
+            <textarea
+              rows={3}
+              value={fulfillNotes}
+              onChange={(e) => setFulfillNotes(e.target.value)}
+              placeholder="e.g., Sourced from reserve warehouse, delivered via van"
+              className="mt-2 w-full rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+            />
+          </div>
+
+          <div className="flex justify-end gap-3 pt-4 border-t border-neutral-200">
+            <button
+              type="button"
+              onClick={() => setSelectedFulfillBo(null)}
+              className="h-11 rounded-lg border border-neutral-300 bg-transparent px-4 text-sm font-semibold text-neutral-500 transition hover:bg-neutral-100 hover:text-neutral-700"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                if (qtyToFulfill <= 0 || qtyToFulfill > (selectedFulfillBo?.remaining_qty ?? 0)) {
+                  setBoFulfillError(`Fulfill quantity must be between 0.01 and ${selectedFulfillBo?.remaining_qty}.`);
+                  return;
+                }
+                if (hqStock !== null && hqStock < qtyToFulfill) {
+                  setBoFulfillError(`Cannot fulfill ${qtyToFulfill} — only ${hqStock} available in HQ stock.`);
+                  return;
+                }
+                setIsFulfillingBo(true);
+                setBoFulfillError(null);
+                try {
+                  const res = await fulfillBackorder(selectedFulfillBo.id, qtyToFulfill, fulfillNotes);
+                  if (res.success) {
+                    // Refresh backorders
+                    const updatedBo = await loadBackorders();
+                    setBackorders(updatedBo);
+                    setSelectedFulfillBo(null);
+                    setQtyToFulfill(0);
+                    setFulfillNotes("");
+                  } else {
+                    setBoFulfillError(res.error?.message || "Failed to fulfill backorder.");
+                  }
+                } catch (err: any) {
+                  setBoFulfillError(err?.message || "An unexpected error occurred.");
+                } finally {
+                  setIsFulfillingBo(false);
+                }
+              }}
+              disabled={isFulfillingBo || qtyToFulfill <= 0 || (hqStock !== null && hqStock < qtyToFulfill)}
+              className="h-11 rounded-lg bg-blue-600 px-4 text-sm font-semibold text-white transition hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isFulfillingBo ? "Fulfilling..." : "Submit Fulfillment"}
+            </button>
+          </div>
+        </div>
+      </Drawer>
     </DarkPageShell>
   );
 }

@@ -2333,6 +2333,14 @@ export async function saveRequisitions(data: any[]) {
   const cleanData = data.map(mapRequisitionToDB);
   const { error } = await supabase.from('requisitions').upsert(cleanData, { onConflict: 'id' });
   if (error) return { success: false, error };
+
+  // For any requisition that is now fulfilled, trigger backorders
+  for (const req of cleanData) {
+    if (req.status && req.status.toLowerCase() === 'fulfilled') {
+      await createBackordersFromRequisition(req.id);
+    }
+  }
+
   return { success: true };
 }
 
@@ -2345,14 +2353,352 @@ export async function updateRequisitionStatus(
   id: string,
   status: string
 ): Promise<{ success: boolean; error?: any }> {
+  const cleanStatus = status.toLowerCase();
   const { error } = await supabase
     .from('requisitions')
-    .update({ status: status.toLowerCase() })
+    .update({ status: cleanStatus })
     .eq('id', id);
   if (error) {
     console.error('updateRequisitionStatus:', error);
     return { success: false, error };
   }
+
+  if (cleanStatus === 'fulfilled') {
+    await createBackordersFromRequisition(id);
+  }
+
+  return { success: true };
+}
+
+// ----------------------------------------------------------------------------
+// REQUISITION BACKORDER SYSTEM OPERATIONS
+// ----------------------------------------------------------------------------
+
+export async function loadBackorders(locationId?: string): Promise<any[]> {
+  let query = supabase.from('requisition_backorders').select('*').order('created_at', { ascending: false });
+  if (locationId) {
+    query = query.eq('location_id', locationId);
+  }
+  const { data, error } = await query;
+  if (error) {
+    console.error('[Backorders] load error', error);
+    return [];
+  }
+  return data || [];
+}
+
+export async function loadBackorderFulfillments(backorderId: string): Promise<any[]> {
+  const { data, error } = await supabase
+    .from('requisition_backorder_fulfillments')
+    .select('*')
+    .eq('backorder_id', backorderId)
+    .order('created_at', { ascending: false });
+  if (error) {
+    console.error('[Backorders] load fulfillments error', error);
+    return [];
+  }
+  return data || [];
+}
+
+export async function createBackordersFromRequisition(requisitionId: string): Promise<{ success: boolean; error?: any }> {
+  console.log(`[Backorders] Checking requisition ${requisitionId} for backorders...`);
+  
+  // Fetch the requisition to get location_id
+  const { data: requisition, error: reqErr } = await supabase
+    .from('requisitions')
+    .select('location_id')
+    .eq('id', requisitionId)
+    .single();
+
+  if (reqErr || !requisition) {
+    console.error(`[Backorders] Error fetching requisition ${requisitionId}:`, reqErr);
+    return { success: false, error: reqErr || new Error('Requisition not found') };
+  }
+
+  // Fetch requisition items
+  const { data: items, error: itemsErr } = await supabase
+    .from('requisition_items')
+    .select('*')
+    .eq('requisition_id', requisitionId);
+
+  if (itemsErr || !items) {
+    console.error(`[Backorders] Error fetching items for requisition ${requisitionId}:`, itemsErr);
+    return { success: false, error: itemsErr };
+  }
+
+  for (const item of items) {
+    const requested = Number(item.quantity_requested ?? 0);
+    const fulfilled = Number(item.quantity_fulfilled ?? 0);
+    const backorderQty = requested - fulfilled;
+
+    if (backorderQty > 0) {
+      // Check if backorder already exists for this original_requisition_item_id
+      const { data: existing, error: existErr } = await supabase
+        .from('requisition_backorders')
+        .select('id')
+        .eq('original_requisition_item_id', item.id)
+        .maybeSingle();
+
+      if (existErr) {
+        console.error(`[Backorders] Error checking existing backorders for item ${item.id}:`, existErr);
+        continue;
+      }
+
+      // Determine item_id (which could be finished_good_id or item_id/legacy raw item id)
+      const itemId = item.finished_good_id || item.item_id;
+      const sourceType = item.finished_good_id ? 'finished_good' : 'raw_item';
+
+      if (existing) {
+        // Update existing backorder record if needed
+        console.log(`[Backorders] Backorder already exists for item ${item.id}, updating quantities...`);
+        const { error: updateErr } = await supabase
+          .from('requisition_backorders')
+          .update({
+            requested_qty: requested,
+            fulfilled_qty: fulfilled,
+            backorder_qty: backorderQty,
+            remaining_qty: backorderQty,
+            unit_price: Number(item.unit_price ?? 0),
+          })
+          .eq('id', existing.id);
+
+        if (updateErr) {
+          console.error(`[Backorders] Error updating backorder for item ${item.id}:`, updateErr);
+        }
+      } else {
+        // Create new backorder record
+        console.log(`[Backorders] Creating new backorder for item ${item.id} (Qty: ${backorderQty})...`);
+        const { error: insertErr } = await supabase
+          .from('requisition_backorders')
+          .insert({
+            original_requisition_id: requisitionId,
+            original_requisition_item_id: item.id,
+            location_id: requisition.location_id,
+            item_id: itemId,
+            item_name: item.item_name_snapshot || 'Unknown Item',
+            requested_qty: requested,
+            fulfilled_qty: fulfilled,
+            backorder_qty: backorderQty,
+            remaining_qty: backorderQty,
+            unit: item.unit_snapshot,
+            unit_price: Number(item.unit_price ?? 0),
+            source_type: sourceType,
+            supplier_name: item.supplier_snapshot || null,
+            status: 'open',
+          });
+
+        if (insertErr) {
+          console.error(`[Backorders] Error inserting backorder for item ${item.id}:`, insertErr);
+        }
+      }
+    }
+  }
+
+  return { success: true };
+}
+
+export async function fulfillBackorder(
+  backorderId: string,
+  qtyToFulfill: number,
+  notes?: string
+): Promise<{ success: boolean; error?: any }> {
+  console.log(`[Backorders] Fulfilling backorderId=${backorderId} qty=${qtyToFulfill}`);
+
+  // Fetch backorder row
+  const { data: backorder, error: boFetchError } = await supabase
+    .from('requisition_backorders')
+    .select('*')
+    .eq('id', backorderId)
+    .single();
+
+  if (boFetchError || !backorder) {
+    console.error('[Backorders] ✗ Could not fetch backorder row', boFetchError);
+    return { success: false, error: boFetchError ?? { message: 'Backorder not found' } };
+  }
+
+  const remaining = Number(backorder.remaining_qty ?? 0);
+  if (qtyToFulfill <= 0 || qtyToFulfill > remaining) {
+    return { success: false, error: { message: `Invalid quantity. Remaining: ${remaining}, attempting: ${qtyToFulfill}` } };
+  }
+
+  const itemId = backorder.item_id;
+  const isFinishedGood = backorder.source_type === 'finished_good';
+
+  if (isFinishedGood) {
+    // ── 1. FG mode ──
+    const { data: fg, error: fgFetchError } = await supabase
+      .from('hq_sale_items')
+      .select('instock, name')
+      .eq('id', itemId)
+      .single();
+
+    if (fgFetchError || !fg) {
+      return { success: false, error: fgFetchError ?? { message: `Finished Good SKU ${itemId} not found at HQ.` } };
+    }
+
+    const hqStock = Number(fg.instock ?? 0);
+    if (hqStock < qtyToFulfill) {
+      return { success: false, error: { message: `Insufficient HQ stock. Available: ${hqStock}, needed: ${qtyToFulfill}.` } };
+    }
+
+    // Deduct stock
+    const stockRes = await updateSaleItemStock(itemId, -qtyToFulfill);
+    if (!stockRes.success) {
+      return { success: false, error: stockRes.error };
+    }
+  } else {
+    // ── 2. Raw item mode ──
+    // Fetch HQ inventory item
+    const { data: hqRows, error: hqFetchError } = await supabase
+      .from('inventory_items')
+      .select('*')
+      .eq('item_id', itemId)
+      .eq('location_id', HQ_LOCATION_ID);
+
+    if (hqFetchError || !hqRows || hqRows.length === 0) {
+      return { success: false, error: hqFetchError ?? { message: `Raw item ${itemId} not found in HQ inventory.` } };
+    }
+
+    const hqRow = hqRows[0];
+    const hqStock = Number(hqRow.instock ?? 0);
+    if (hqStock < qtyToFulfill) {
+      return { success: false, error: { message: `Insufficient HQ stock. Available: ${hqStock}, needed: ${qtyToFulfill}.` } };
+    }
+
+    // Fetch dest inventory item
+    const destLocationId = backorder.location_id;
+    const { data: destRows, error: destFetchError } = await supabase
+      .from('inventory_items')
+      .select('id, instock')
+      .eq('item_id', itemId)
+      .eq('location_id', destLocationId);
+
+    if (destFetchError) {
+      return { success: false, error: destFetchError };
+    }
+
+    const destRow = destRows?.[0] ?? null;
+    const destStockBefore = destRow ? Number(destRow.instock ?? 0) : 0;
+
+    const hqStockAfter = hqStock - qtyToFulfill;
+    const destStockAfter = destStockBefore + qtyToFulfill;
+
+    // Update HQ stock
+    const { error: hqDeductError } = await supabase
+      .from('inventory_items')
+      .update({ instock: hqStockAfter })
+      .eq('id', hqRow.id)
+      .eq('location_id', HQ_LOCATION_ID);
+
+    if (hqDeductError) {
+      return { success: false, error: hqDeductError };
+    }
+
+    // Update or Insert dest stock
+    if (destRow) {
+      const { error: destUpdateError } = await supabase
+        .from('inventory_items')
+        .update({ instock: destStockAfter })
+        .eq('id', destRow.id)
+        .eq('location_id', destLocationId);
+
+      if (destUpdateError) {
+        return { success: false, error: destUpdateError };
+      }
+    } else {
+      const { error: insertError } = await supabase
+        .from('inventory_items')
+        .insert({
+          id: crypto.randomUUID(),
+          item_id: itemId,
+          location_id: destLocationId,
+          instock: destStockAfter,
+          name: hqRow.name,
+          category: hqRow.category,
+          itemtype: hqRow.itemtype,
+          baseunit: hqRow.baseunit,
+          unit: hqRow.unit,
+          parlevel: hqRow.parlevel,
+          cost: hqRow.cost,
+          supplierid: hqRow.supplierid,
+          pricetrend: hqRow.pricetrend,
+          priceincrease: hqRow.priceincrease,
+          purchaseunits: hqRow.purchaseunits,
+        });
+
+      if (insertError) {
+        return { success: false, error: insertError };
+      }
+    }
+
+    // Log movement ledger
+    const unitCost = Number(hqRow.cost ?? 0);
+    await Promise.all([
+      logMovement({
+        locationId: HQ_LOCATION_ID,
+        itemId,
+        movementType: 'transfer_out',
+        quantity: qtyToFulfill,
+        unitCost,
+        referenceType: 'requisition',
+        referenceId: backorder.original_requisition_id,
+        notes: `Backorder fulfillment → ${destLocationId}. ${notes ?? ''}`,
+      }),
+      logMovement({
+        locationId: destLocationId,
+        itemId,
+        movementType: 'transfer_in',
+        quantity: qtyToFulfill,
+        unitCost,
+        referenceType: 'requisition',
+        referenceId: backorder.original_requisition_id,
+        notes: `Received backorder from HQ. ${notes ?? ''}`,
+      }),
+    ]);
+  }
+
+  // ── 3. Record backorder fulfillment event ──
+  const { error: bfInsertError } = await supabase
+    .from('requisition_backorder_fulfillments')
+    .insert({
+      backorder_id: backorderId,
+      quantity_fulfilled: qtyToFulfill,
+      notes: notes || null,
+    });
+
+  if (bfInsertError) {
+    console.error('[Backorders] ✗ Failed to insert backorder fulfillment log', bfInsertError);
+    return { success: false, error: bfInsertError };
+  }
+
+  // ── 4. Update backorder remaining qty and status ──
+  const newFulfilledQty = Number(backorder.fulfilled_qty ?? 0) + qtyToFulfill;
+  const newRemainingQty = remaining - qtyToFulfill;
+  let newStatus = 'partially_fulfilled';
+  let fulfilledAt = null;
+
+  if (newRemainingQty <= 0) {
+    newStatus = 'fulfilled';
+    fulfilledAt = new Date().toISOString();
+  }
+
+  const { error: boUpdateError } = await supabase
+    .from('requisition_backorders')
+    .update({
+      fulfilled_qty: newFulfilledQty,
+      remaining_qty: newRemainingQty,
+      status: newStatus,
+      fulfilled_at: fulfilledAt,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', backorderId);
+
+  if (boUpdateError) {
+    console.error('[Backorders] ✗ Failed to update backorder totals', boUpdateError);
+    return { success: false, error: boUpdateError };
+  }
+
+  console.log(`[Backorders] Successfully fulfilled backorderId=${backorderId}. remaining=${newRemainingQty} status=${newStatus}`);
   return { success: true };
 }
 
@@ -3371,6 +3717,484 @@ function mapReqItemRow(row: any) {
 
 
 
+
+// ----------------------------------------------------------------------------
+// 5B. DELIVERY MANAGEMENT
+// ----------------------------------------------------------------------------
+export type DeliveryTicketStatus =
+  | 'draft'
+  | 'assigned'
+  | 'loaded'
+  | 'out_for_delivery'
+  | 'delivered'
+  | 'issue_reported'
+  | 'cancelled';
+
+export type DeliveryRunStatus =
+  | 'draft'
+  | 'assigned'
+  | 'loaded'
+  | 'in_progress'
+  | 'completed'
+  | 'cancelled';
+
+const mapDriverToFrontend = (db: any) => ({
+  id: db.id,
+  name: db.name,
+  phone: db.phone ?? '',
+  email: db.email ?? '',
+  active: db.active ?? true,
+  hourlyRate: db.hourly_rate != null ? Number(db.hourly_rate) : null,
+  notes: db.notes ?? '',
+  createdAt: db.created_at,
+  updatedAt: db.updated_at,
+});
+
+const mapVehicleToFrontend = (db: any) => ({
+  id: db.id,
+  vehicleName: db.vehicle_name,
+  plateNumber: db.plate_number ?? '',
+  active: db.active ?? true,
+  notes: db.notes ?? '',
+  createdAt: db.created_at,
+  updatedAt: db.updated_at,
+});
+
+const mapDeliveryTicketItemToFrontend = (db: any) => ({
+  id: db.id,
+  deliveryTicketId: db.delivery_ticket_id,
+  requisitionItemId: db.requisition_item_id ?? null,
+  inventoryItemId: db.inventory_item_id ?? null,
+  itemName: db.item_name_snapshot,
+  unit: db.unit_snapshot ?? '',
+  requestedQty: Number(db.requested_qty ?? 0),
+  approvedQty: Number(db.approved_qty ?? 0),
+  shippedQty: Number(db.shipped_qty ?? 0),
+  deliveredQty: Number(db.delivered_qty ?? 0),
+  issueQty: Number(db.issue_qty ?? 0),
+  issueReason: db.issue_reason ?? '',
+  createdAt: db.created_at,
+});
+
+const mapDeliveryRunToFrontend = (db: any): any => ({
+  id: db.id,
+  runNumber: db.run_number,
+  runDate: db.run_date,
+  driverId: db.driver_id ?? null,
+  vehicleId: db.vehicle_id ?? null,
+  status: db.status as DeliveryRunStatus,
+  estimatedDistanceKm: Number(db.estimated_distance_km ?? 0),
+  estimatedDurationMinutes: Number(db.estimated_duration_minutes ?? 0),
+  actualStartTime: db.actual_start_time ?? '',
+  actualEndTime: db.actual_end_time ?? '',
+  notes: db.notes ?? '',
+  createdBy: db.created_by ?? null,
+  createdAt: db.created_at,
+  updatedAt: db.updated_at,
+  driver: db.drivers ? mapDriverToFrontend(db.drivers) : null,
+  vehicle: db.vehicles ? mapVehicleToFrontend(db.vehicles) : null,
+  tickets: Array.isArray(db.delivery_tickets)
+    ? db.delivery_tickets.map(mapDeliveryTicketToFrontend)
+    : [],
+});
+
+const mapDeliveryTicketToFrontend = (db: any): any => ({
+  id: db.id,
+  ticketNumber: db.ticket_number,
+  deliveryRunId: db.delivery_run_id ?? null,
+  requisitionId: db.requisition_id ?? null,
+  locationId: db.location_id ?? null,
+  status: db.status as DeliveryTicketStatus,
+  stopSequence: db.stop_sequence ?? null,
+  destinationName: db.destination_name ?? '',
+  destinationAddress: db.destination_address ?? '',
+  destinationContact: db.destination_contact ?? '',
+  destinationPhone: db.destination_phone ?? '',
+  estimatedArrivalTime: db.estimated_arrival_time ?? '',
+  deliveredAt: db.delivered_at ?? '',
+  receivedBy: db.received_by ?? '',
+  proofPhotoUrl: db.proof_photo_url ?? '',
+  signatureUrl: db.signature_url ?? '',
+  notes: db.notes ?? '',
+  createdBy: db.created_by ?? null,
+  createdAt: db.created_at,
+  updatedAt: db.updated_at,
+  deliveryRun: db.delivery_runs ? mapDeliveryRunToFrontend(db.delivery_runs) : null,
+  items: Array.isArray(db.delivery_ticket_items)
+    ? db.delivery_ticket_items.map(mapDeliveryTicketItemToFrontend)
+    : [],
+});
+
+async function getCurrentAuthUserId() {
+  const { data } = await supabase.auth.getUser();
+  return data.user?.id ?? null;
+}
+
+async function generateDeliveryNumber(
+  table: 'delivery_tickets' | 'delivery_runs',
+  column: 'ticket_number' | 'run_number',
+  prefix: 'DT' | 'RUN'
+) {
+  const year = new Date().getFullYear();
+  const like = `${prefix}-${year}-%`;
+  const { data, error } = await supabase
+    .from(table)
+    .select(column)
+    .like(column, like)
+    .order(column, { ascending: false })
+    .limit(1);
+  if (error) throw error;
+  const latest = String((data?.[0] as any)?.[column] ?? '');
+  const lastSeq = Number(latest.split('-').pop() ?? 0);
+  const next = Number.isFinite(lastSeq) ? lastSeq + 1 : 1;
+  return `${prefix}-${year}-${String(next).padStart(4, '0')}`;
+}
+
+function mapDeliveryTicketPatchToDB(patch: any) {
+  const out: any = {};
+  if ('deliveryRunId' in patch) out.delivery_run_id = patch.deliveryRunId;
+  if ('status' in patch) out.status = patch.status;
+  if ('stopSequence' in patch) out.stop_sequence = patch.stopSequence;
+  if ('estimatedArrivalTime' in patch) out.estimated_arrival_time = patch.estimatedArrivalTime || null;
+  if ('deliveredAt' in patch) out.delivered_at = patch.deliveredAt || null;
+  if ('receivedBy' in patch) out.received_by = patch.receivedBy ?? '';
+  if ('notes' in patch) out.notes = patch.notes ?? '';
+  return out;
+}
+
+function mapDeliveryRunPatchToDB(patch: any) {
+  const out: any = {};
+  if ('runDate' in patch) out.run_date = patch.runDate;
+  if ('driverId' in patch) out.driver_id = patch.driverId || null;
+  if ('vehicleId' in patch) out.vehicle_id = patch.vehicleId || null;
+  if ('status' in patch) out.status = patch.status;
+  if ('estimatedDistanceKm' in patch) out.estimated_distance_km = Number(patch.estimatedDistanceKm ?? 0);
+  if ('estimatedDurationMinutes' in patch) out.estimated_duration_minutes = Number(patch.estimatedDurationMinutes ?? 0);
+  if ('actualStartTime' in patch) out.actual_start_time = patch.actualStartTime || null;
+  if ('actualEndTime' in patch) out.actual_end_time = patch.actualEndTime || null;
+  if ('notes' in patch) out.notes = patch.notes ?? '';
+  return out;
+}
+
+export async function getDeliveryTickets(filters: { status?: string; locationId?: string; fromDate?: string; toDate?: string } = {}) {
+  let query = supabase
+    .from('delivery_tickets')
+    .select('*, delivery_runs(run_number, run_date, status, drivers(name), vehicles(vehicle_name, plate_number)), delivery_ticket_items(*)')
+    .order('created_at', { ascending: false });
+  if (filters.status && filters.status !== 'all') query = query.eq('status', filters.status);
+  if (filters.locationId && filters.locationId !== 'all') query = query.eq('location_id', filters.locationId);
+  if (filters.fromDate) query = query.gte('created_at', `${filters.fromDate}T00:00:00`);
+  if (filters.toDate) query = query.lte('created_at', `${filters.toDate}T23:59:59`);
+  const { data, error } = await query;
+  if (error) {
+    console.error('getDeliveryTickets:', error);
+    return [];
+  }
+  return (data ?? []).map(mapDeliveryTicketToFrontend);
+}
+
+export async function getDeliveryTicketById(id: string) {
+  const { data, error } = await supabase
+    .from('delivery_tickets')
+    .select('*, delivery_runs(run_number, run_date, status, drivers(name), vehicles(vehicle_name, plate_number)), delivery_ticket_items(*)')
+    .eq('id', id)
+    .single();
+  if (error) return { success: false, error };
+  return { success: true, data: mapDeliveryTicketToFrontend(data) };
+}
+
+export async function getDeliveryTicketForRequisition(requisitionId: string) {
+  const { data, error } = await supabase
+    .from('delivery_tickets')
+    .select('*, delivery_ticket_items(*)')
+    .eq('requisition_id', requisitionId)
+    .maybeSingle();
+  if (error) return { success: false, error };
+  return { success: true, data: data ? mapDeliveryTicketToFrontend(data) : null };
+}
+
+export async function createDeliveryTicketFromRequisition(requisitionId: string) {
+  const existing = await getDeliveryTicketForRequisition(requisitionId);
+  if (existing.success && existing.data) return { success: true, data: existing.data, alreadyExists: true };
+
+  const { data: req, error: reqError } = await supabase
+    .from('requisitions')
+    .select('*')
+    .eq('id', requisitionId)
+    .single();
+  if (reqError || !req) return { success: false, error: reqError ?? { message: 'Requisition not found.' } };
+
+  const reqStatus = String(req.status ?? '').toLowerCase();
+  if (!['approved', 'fulfilled'].includes(reqStatus)) {
+    return { success: false, error: { message: 'Delivery tickets can only be generated from approved or fulfilled requisitions.' } };
+  }
+
+  const itemsRes = await loadRequisitionItems(requisitionId);
+  if (!itemsRes.success) return { success: false, error: itemsRes.error };
+  const reqItems = itemsRes.data ?? [];
+  if (reqItems.length === 0) return { success: false, error: { message: 'Cannot create a delivery ticket without requisition items.' } };
+
+  let location: any = null;
+  if (req.location_id) {
+    const { data: loc } = await supabase.from('locations').select('*').eq('id', req.location_id).maybeSingle();
+    location = loc;
+  }
+
+  const userId = await getCurrentAuthUserId();
+  const ticketNumber = await generateDeliveryNumber('delivery_tickets', 'ticket_number', 'DT');
+  const address = [
+    location?.address,
+    location?.street,
+    location?.city,
+    location?.province ?? location?.state,
+    location?.postal_code ?? location?.postalCode,
+  ].filter(Boolean).join(', ');
+
+  const { data: ticket, error: ticketError } = await supabase
+    .from('delivery_tickets')
+    .insert({
+      ticket_number: ticketNumber,
+      requisition_id: req.id,
+      location_id: req.location_id ?? null,
+      status: 'draft',
+      destination_name: location?.name ?? req.location ?? '',
+      destination_address: address,
+      destination_contact: location?.contact_name ?? location?.contact ?? null,
+      destination_phone: location?.phone ?? location?.contact_phone ?? null,
+      notes: req.notes ?? '',
+      created_by: userId,
+    })
+    .select()
+    .single();
+  if (ticketError || !ticket) return { success: false, error: ticketError };
+
+  const itemRows = reqItems.map((item: any) => {
+    const requestedQty = Number(item.quantityRequested ?? 0);
+    const approvedQty = Number(item.quantityApproved ?? item.quantityFulfilled ?? requestedQty);
+    const shippedQty = approvedQty || requestedQty;
+    return {
+      delivery_ticket_id: ticket.id,
+      requisition_item_id: item.id,
+      inventory_item_id: item.itemId ?? null,
+      item_name_snapshot: item.itemName ?? 'Unnamed Item',
+      unit_snapshot: item.unit ?? '',
+      requested_qty: requestedQty,
+      approved_qty: approvedQty,
+      shipped_qty: shippedQty,
+      delivered_qty: 0,
+      issue_qty: 0,
+      issue_reason: null,
+    };
+  });
+
+  const { error: itemError } = await supabase.from('delivery_ticket_items').insert(itemRows);
+  if (itemError) return { success: false, error: itemError };
+  return await getDeliveryTicketById(ticket.id);
+}
+
+export async function updateDeliveryTicket(id: string, patch: any) {
+  const { data, error } = await supabase
+    .from('delivery_tickets')
+    .update(mapDeliveryTicketPatchToDB(patch))
+    .eq('id', id)
+    .select()
+    .single();
+  if (error) return { success: false, error };
+  return { success: true, data: mapDeliveryTicketToFrontend(data) };
+}
+
+export async function updateDeliveryTicketStatus(id: string, status: DeliveryTicketStatus) {
+  return updateDeliveryTicket(id, { status });
+}
+
+export async function updateDeliveryTicketItems(ticketId: string, items: any[]) {
+  const results = await Promise.all(items.map((item) => supabase
+    .from('delivery_ticket_items')
+    .update({
+      delivered_qty: Number(item.deliveredQty ?? 0),
+      issue_qty: Number(item.issueQty ?? 0),
+      issue_reason: item.issueReason || null,
+    })
+    .eq('id', item.id)
+    .eq('delivery_ticket_id', ticketId)));
+  const failed = results.find((res) => res.error);
+  if (failed?.error) return { success: false, error: failed.error };
+  return { success: true };
+}
+
+export async function markDeliveryTicketDelivered(id: string, receivedBy: string, items: any[]) {
+  const normalized = items.map((item) => ({
+    ...item,
+    deliveredQty: Math.max(0, Number(item.shippedQty ?? 0) - Number(item.issueQty ?? 0)),
+  }));
+  const itemRes = await updateDeliveryTicketItems(id, normalized);
+  if (!itemRes.success) return itemRes;
+  const hasIssue = normalized.some((item) => Number(item.issueQty ?? 0) > 0);
+  return updateDeliveryTicket(id, {
+    status: hasIssue ? 'issue_reported' : 'delivered',
+    deliveredAt: new Date().toISOString(),
+    receivedBy,
+  });
+}
+
+export async function getDeliveryRuns(filters: { status?: string; runDate?: string } = {}) {
+  let query = supabase
+    .from('delivery_runs')
+    .select('*, drivers(*), vehicles(*), delivery_tickets(*, delivery_ticket_items(*))')
+    .order('run_date', { ascending: false })
+    .order('created_at', { ascending: false });
+  if (filters.status && filters.status !== 'all') query = query.eq('status', filters.status);
+  if (filters.runDate) query = query.eq('run_date', filters.runDate);
+  const { data, error } = await query;
+  if (error) {
+    console.error('getDeliveryRuns:', error);
+    return [];
+  }
+  return (data ?? []).map(mapDeliveryRunToFrontend);
+}
+
+export async function getDeliveryRunById(id: string) {
+  const { data, error } = await supabase
+    .from('delivery_runs')
+    .select('*, drivers(*), vehicles(*), delivery_tickets(*, delivery_ticket_items(*))')
+    .eq('id', id)
+    .single();
+  if (error) return { success: false, error };
+  return { success: true, data: mapDeliveryRunToFrontend(data) };
+}
+
+export async function createDeliveryRun(payload: any) {
+  const userId = await getCurrentAuthUserId();
+  const runNumber = await generateDeliveryNumber('delivery_runs', 'run_number', 'RUN');
+  const { data, error } = await supabase
+    .from('delivery_runs')
+    .insert({
+      run_number: runNumber,
+      run_date: payload.runDate,
+      driver_id: payload.driverId || null,
+      vehicle_id: payload.vehicleId || null,
+      status: payload.status ?? 'draft',
+      estimated_distance_km: Number(payload.estimatedDistanceKm ?? 0),
+      estimated_duration_minutes: Number(payload.estimatedDurationMinutes ?? 0),
+      notes: payload.notes ?? '',
+      created_by: userId,
+    })
+    .select()
+    .single();
+  if (error) return { success: false, error };
+  return { success: true, data: mapDeliveryRunToFrontend(data) };
+}
+
+export async function updateDeliveryRun(id: string, patch: any) {
+  const { data, error } = await supabase
+    .from('delivery_runs')
+    .update(mapDeliveryRunPatchToDB(patch))
+    .eq('id', id)
+    .select()
+    .single();
+  if (error) return { success: false, error };
+  return { success: true, data: mapDeliveryRunToFrontend(data) };
+}
+
+export async function addTicketsToDeliveryRun(runId: string, ticketIds: string[]) {
+  const uniqueIds = Array.from(new Set(ticketIds.filter(Boolean)));
+  const results = await Promise.all(uniqueIds.map((ticketId, index) => supabase
+    .from('delivery_tickets')
+    .update({ delivery_run_id: runId, status: 'assigned', stop_sequence: index + 1 })
+    .eq('id', ticketId)
+    .not('status', 'in', '(delivered,cancelled)')));
+  const failed = results.find((res) => res.error);
+  if (failed?.error) return { success: false, error: failed.error };
+  return { success: true };
+}
+
+export async function removeTicketFromDeliveryRun(ticketId: string) {
+  const { error } = await supabase
+    .from('delivery_tickets')
+    .update({ delivery_run_id: null, stop_sequence: null, status: 'draft' })
+    .eq('id', ticketId);
+  if (error) return { success: false, error };
+  return { success: true };
+}
+
+export async function reorderDeliveryRunStops(runId: string, orderedTicketIds: string[]) {
+  const results = await Promise.all(orderedTicketIds.map((ticketId, index) => supabase
+    .from('delivery_tickets')
+    .update({ stop_sequence: index + 1 })
+    .eq('id', ticketId)
+    .eq('delivery_run_id', runId)));
+  const failed = results.find((res) => res.error);
+  if (failed?.error) return { success: false, error: failed.error };
+  return { success: true };
+}
+
+export async function getDrivers() {
+  const { data, error } = await supabase.from('drivers').select('*').order('active', { ascending: false }).order('name');
+  if (error) return [];
+  return (data ?? []).map(mapDriverToFrontend);
+}
+
+export async function createDriver(payload: any) {
+  const { data, error } = await supabase
+    .from('drivers')
+    .insert({
+      name: payload.name,
+      phone: payload.phone ?? '',
+      email: payload.email ?? '',
+      active: payload.active ?? true,
+      hourly_rate: payload.hourlyRate === '' || payload.hourlyRate == null ? null : Number(payload.hourlyRate),
+      notes: payload.notes ?? '',
+    })
+    .select()
+    .single();
+  if (error) return { success: false, error };
+  return { success: true, data: mapDriverToFrontend(data) };
+}
+
+export async function updateDriver(id: string, patch: any) {
+  const payload: any = {};
+  if ('name' in patch) payload.name = patch.name;
+  if ('phone' in patch) payload.phone = patch.phone ?? '';
+  if ('email' in patch) payload.email = patch.email ?? '';
+  if ('active' in patch) payload.active = Boolean(patch.active);
+  if ('hourlyRate' in patch) payload.hourly_rate = patch.hourlyRate === '' || patch.hourlyRate == null ? null : Number(patch.hourlyRate);
+  if ('notes' in patch) payload.notes = patch.notes ?? '';
+  const { data, error } = await supabase.from('drivers').update(payload).eq('id', id).select().single();
+  if (error) return { success: false, error };
+  return { success: true, data: mapDriverToFrontend(data) };
+}
+
+export async function getVehicles() {
+  const { data, error } = await supabase.from('vehicles').select('*').order('active', { ascending: false }).order('vehicle_name');
+  if (error) return [];
+  return (data ?? []).map(mapVehicleToFrontend);
+}
+
+export async function createVehicle(payload: any) {
+  const { data, error } = await supabase
+    .from('vehicles')
+    .insert({
+      vehicle_name: payload.vehicleName,
+      plate_number: payload.plateNumber ?? '',
+      active: payload.active ?? true,
+      notes: payload.notes ?? '',
+    })
+    .select()
+    .single();
+  if (error) return { success: false, error };
+  return { success: true, data: mapVehicleToFrontend(data) };
+}
+
+export async function updateVehicle(id: string, patch: any) {
+  const payload: any = {};
+  if ('vehicleName' in patch) payload.vehicle_name = patch.vehicleName;
+  if ('plateNumber' in patch) payload.plate_number = patch.plateNumber ?? '';
+  if ('active' in patch) payload.active = Boolean(patch.active);
+  if ('notes' in patch) payload.notes = patch.notes ?? '';
+  const { data, error } = await supabase.from('vehicles').update(payload).eq('id', id).select().single();
+  if (error) return { success: false, error };
+  return { success: true, data: mapVehicleToFrontend(data) };
+}
 
 /**
  * Batch-load line items for multiple requisitions in a single query.

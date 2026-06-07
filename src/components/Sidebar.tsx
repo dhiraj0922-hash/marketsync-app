@@ -53,6 +53,7 @@ const navigation: NavItem[] = [
   { name: "Counts",           href: "/counts",         icon: ClipboardList },
   { name: "Orders",           href: "/orders",         icon: ShoppingCart },
   { name: "Requisitions",     href: "/requisitions",   icon: Inbox },
+  { name: "Deliveries",       href: "/deliveries",     icon: Truck },
   { name: "Suppliers",        href: "/suppliers",      icon: Truck },
   { name: "Finished Goods",   href: "/hq-sale-items",  icon: PackageCheck,   hqOnly: true },
   { name: "FG Count",         href: "/fg-count",       icon: ClipboardCheck, hqOnly: true },
