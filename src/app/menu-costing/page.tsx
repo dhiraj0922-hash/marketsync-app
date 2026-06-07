@@ -134,16 +134,54 @@ export default function MenuCostingPage() {
     loadData();
   }, [loadData]);
 
+  // ── Normalize Sale Items (Finished Goods) ──
+  const saleItemsNormalized = useMemo(() => {
+    return saleItems.map((item) => {
+      const stableId = String(item.id || "");
+      const costVal = Number(item.effectivePrice) || Number(item.manualPrice) || Number(item.suggestedPrice) || Number(item.makingCost) || 0;
+      const unitVal = String(item.baseUnit || "ea").trim();
+
+      return {
+        ...item,
+        id: stableId,
+        name: item.name,
+        baseUnit: unitVal,
+        effectivePrice: costVal,
+      };
+    });
+  }, [saleItems]);
+
   // ── Map Inventory Items with Overrides ────
   const inventoryItemsMerged = useMemo(() => {
     return localInventory.map((item) => {
+      const stableId = String(item.itemId || item.id || "");
+      const costVal = [
+        item.cost,
+        item.unitCost,
+        item.effectivePrice,
+        item.price,
+        item.purchasePrice,
+        item.lastCost,
+        item.averageCost
+      ].map(v => Number(v)).find(v => !isNaN(v) && v > 0) ?? 0;
+
+      const unitVal = [
+        item.baseUomNew,
+        item.baseUnit,
+        item.unit,
+        item.uom,
+        item.purchaseUnit,
+        item.packUnit
+      ].map(v => String(v ?? "").trim()).find(v => v !== "") ?? "ea";
+
       return {
         ...item,
-        itemId: item.itemId || item.id,
+        itemId: stableId,
+        id: stableId,
         name: item.name,
         category: item.category || "General",
-        uom: item.baseUnit || item.unit || "ea",
-        effectivePrice: item.cost || 0,
+        uom: unitVal,
+        effectivePrice: costVal,
       };
     });
   }, [localInventory]);
@@ -152,7 +190,7 @@ export default function MenuCostingPage() {
   const getItemSuggestions = useCallback((sourceType: "finished_good" | "inventory_item", searchStr: string) => {
     const query = (searchStr ?? "").toLowerCase().trim();
     if (sourceType === "finished_good") {
-      return saleItems
+      return saleItemsNormalized
         .filter((item) => !query || item.name.toLowerCase().includes(query) || item.id.toLowerCase().includes(query))
         .slice(0, 10);
     } else {
@@ -160,7 +198,7 @@ export default function MenuCostingPage() {
         .filter((item) => !query || item.name.toLowerCase().includes(query) || item.itemId.toLowerCase().includes(query))
         .slice(0, 10);
     }
-  }, [saleItems, inventoryItemsMerged]);
+  }, [saleItemsNormalized, inventoryItemsMerged]);
 
   // ── Calculate Line Cost ───────────────────
   const calculateComponentCost = useCallback((
@@ -173,9 +211,19 @@ export default function MenuCostingPage() {
       return { lineCost: 0, unitCost: 0, error: null };
     }
 
+    const targetId = String(itemId).trim();
+
     if (sourceType === "finished_good") {
-      const fg = saleItems.find((s) => s.id === itemId);
+      const fg = saleItemsNormalized.find((s) => s.id === targetId);
       if (!fg) return { lineCost: 0, unitCost: 0, error: "Item not found" };
+
+      if (fg.effectivePrice == null || fg.effectivePrice <= 0) {
+        return { lineCost: 0, unitCost: 0, error: "Missing cost for this finished good" };
+      }
+
+      if (!fg.baseUnit || !fg.baseUnit.trim()) {
+        return { lineCost: 0, unitCost: 0, error: "Missing unit for this finished good" };
+      }
 
       // Build target object for computeIngredientLineCost
       const invItemObj = {
@@ -193,8 +241,16 @@ export default function MenuCostingPage() {
         return { lineCost: 0, unitCost: 0, error: result.error };
       }
     } else {
-      const inv = inventoryItemsMerged.find((i) => i.itemId === itemId);
+      const inv = inventoryItemsMerged.find((i) => i.itemId === targetId);
       if (!inv) return { lineCost: 0, unitCost: 0, error: "Item not found" };
+
+      if (inv.effectivePrice == null || inv.effectivePrice <= 0) {
+        return { lineCost: 0, unitCost: 0, error: "Missing cost for this inventory item" };
+      }
+
+      if (!inv.uom || !inv.uom.trim()) {
+        return { lineCost: 0, unitCost: 0, error: "Missing unit for this inventory item" };
+      }
 
       const invItemObj = {
         ...inv,
@@ -211,7 +267,7 @@ export default function MenuCostingPage() {
         return { lineCost: 0, unitCost: 0, error: result.error };
       }
     }
-  }, [saleItems, inventoryItemsMerged]);
+  }, [saleItemsNormalized, inventoryItemsMerged]);
 
   // ── Unified Costing Totals with Validation ──
   const getCostingTotalsWithValidation = useCallback((
@@ -988,14 +1044,15 @@ export default function MenuCostingPage() {
                       let baseUnit = "—";
                       let baseUnitCostVal = 0;
                       if (comp.sourceItemId) {
+                        const targetId = String(comp.sourceItemId).trim();
                         if (comp.sourceType === "finished_good") {
-                          const fg = saleItems.find((s) => s.id === comp.sourceItemId);
+                          const fg = saleItemsNormalized.find((s) => s.id === targetId);
                           if (fg) {
                             baseUnit = fg.baseUnit || "ea";
                             baseUnitCostVal = fg.effectivePrice || 0;
                           }
                         } else {
-                          const inv = inventoryItemsMerged.find((i) => i.itemId === comp.sourceItemId);
+                          const inv = inventoryItemsMerged.find((i) => i.itemId === targetId);
                           if (inv) {
                             baseUnit = inv.uom || "ea";
                             const structuredCost = computeBaseUnitCostFromPack(inv);
@@ -1074,7 +1131,7 @@ export default function MenuCostingPage() {
                               {rowShowSuggestions[idx] && suggestions.length > 0 && (
                                 <div className="absolute left-0 right-0 top-12 mt-1 bg-white border border-neutral-200 rounded-md shadow-lg z-20 max-h-48 overflow-y-auto divide-y divide-neutral-100">
                                   {suggestions.map((option: any) => {
-                                    const optId = option.id || option.itemId;
+                                    const optId = String(option.id || option.itemId || "");
                                     return (
                                       <button
                                         key={optId}
@@ -1083,7 +1140,7 @@ export default function MenuCostingPage() {
                                           updateComponentRow(idx, {
                                             sourceItemId: optId,
                                             itemNameSnapshot: option.name,
-                                            unit: option.baseUnit || option.uom,
+                                            unit: option.uom || option.baseUnit || "ea",
                                             unitCostSnapshot: option.effectivePrice || 0,
                                           });
                                           setRowSearchTerm((prev) => ({ ...prev, [idx]: option.name }));
@@ -1093,7 +1150,7 @@ export default function MenuCostingPage() {
                                       >
                                         <span className="font-semibold text-neutral-800">{option.name}</span>
                                         <span className="text-[10px] text-neutral-400 font-mono">
-                                          ${(option.effectivePrice || 0).toFixed(2)} / {option.baseUnit || option.uom}
+                                          ${(option.effectivePrice || 0).toFixed(2)} / {option.uom || option.baseUnit}
                                         </span>
                                       </button>
                                     );
