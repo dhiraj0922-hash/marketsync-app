@@ -155,6 +155,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     async function bootstrap() {
       try {
+        const isLocalDev = process.env.NODE_ENV === "development" &&
+          typeof window !== "undefined" &&
+          window.location.hostname === "localhost";
+
+        if (isLocalDev && localStorage.getItem("dev_mock_user") === "hq_admin") {
+          console.log("[AuthProvider] Using dev mock user hq_admin");
+          setUser({
+            id: "dev-mock-admin-uuid",
+            email: "admin@stockdharma.com",
+            name: "Dev Mock Admin",
+            role: "hq_admin",
+            locationId: "LOC-HQ",
+            isActive: true,
+            profileLoaded: true,
+            profileError: false,
+          });
+          bootstrapDone.current = true;
+          markLoadingFalse();
+          return;
+        }
+
         if (!supabaseConfigured) {
           console.error("[AuthProvider] Supabase env vars missing — check NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY.");
           setUser(null);
@@ -282,6 +303,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signOut = async () => {
     try {
+      const isLocalDev = process.env.NODE_ENV === "development" &&
+        typeof window !== "undefined" &&
+        window.location.hostname === "localhost";
+
+      if (isLocalDev) {
+        localStorage.removeItem("dev_mock_user");
+      }
       lastGoodUser.current = null;
       await supabase.auth.signOut();
       setUser(null);

@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import {
   finalizeInvoice,
+  generateInvoices,
   generateMonthlyInvoices,
   loadInvoiceItems,
   loadInvoices,
@@ -31,6 +32,18 @@ import {
 function monthLabel(value: string) {
   const date = new Date(`${value.slice(0, 7)}-01T00:00:00`);
   return date.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+}
+
+function formatPeriod(invoice: Invoice) {
+  const start = new Date(invoice.periodStart + "T00:00:00");
+  const end = new Date(invoice.periodEnd + "T00:00:00");
+  
+  const opt: Intl.DateTimeFormatOptions = { month: "short", day: "numeric", year: "numeric" };
+  
+  if (invoice.billingFrequency === "daily") {
+    return start.toLocaleDateString("en-US", opt);
+  }
+  return `${start.toLocaleDateString("en-US", { month: "short", day: "numeric" })} - ${end.toLocaleDateString("en-US", opt)}`;
 }
 
 function money(value: number) {
@@ -155,7 +168,10 @@ async function saveInvoicePdf(
   y += 22;
   setBodyStyle(10, "normal");
   doc.setTextColor(100, 116, 139);
-  doc.text("Monthly Location Invoice", left, y);
+  const frequencyLabel = invoice.billingFrequency
+    ? invoice.billingFrequency.charAt(0).toUpperCase() + invoice.billingFrequency.slice(1)
+    : "Monthly";
+  doc.text(`${frequencyLabel} Location Invoice`, left, y);
   y += 18;
   drawRule();
 
@@ -170,7 +186,10 @@ async function saveInvoicePdf(
   setBodyStyle(9, "normal");
   doc.text(`Invoice Number: ${invoice.invoiceNumber}`, left, detailsY);
   detailsY += 14;
-  doc.text(`Invoice Month: ${monthLabel(invoice.invoiceMonth)}`, left, detailsY);
+  const periodStr = invoice.billingFrequency === "daily"
+    ? new Date(invoice.periodStart + "T00:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })
+    : `${new Date(invoice.periodStart + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })} - ${new Date(invoice.periodEnd + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`;
+  doc.text(`Billing Period: ${periodStr}`, left, detailsY);
   detailsY += 14;
   doc.text(`Status: ${invoice.status.toUpperCase()}`, left, detailsY);
   detailsY += 14;
@@ -318,8 +337,19 @@ async function saveInvoicePdf(
 
 function MonthlyInvoicesContent() {
   const defaultMonth = new Date().toISOString().slice(0, 7);
-  const [month, setMonth] = useState(defaultMonth);
+  const defaultDate = new Date().toISOString().slice(0, 10);
+
+  // Filtering state
+  const [filterFrequency, setFilterFrequency] = useState<"all" | "daily" | "biweekly" | "monthly">("all");
+  const [filterMonth, setFilterMonth] = useState(defaultMonth);
+  const [filterDate, setFilterDate] = useState(defaultDate);
   const [locationId, setLocationId] = useState("all");
+
+  // Generation state
+  const [genFrequency, setGenFrequency] = useState<"daily" | "biweekly" | "monthly">("monthly");
+  const [genMonth, setGenMonth] = useState(defaultMonth);
+  const [genDate, setGenDate] = useState(defaultDate);
+
   const [locations, setLocations] = useState<Array<{ id: string; name: string }>>([]);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
@@ -343,12 +373,17 @@ function MonthlyInvoicesContent() {
   const fetchInvoices = useCallback(async () => {
     setIsLoading(true);
     try {
-      const rows = await loadInvoices({ month, locationId: selectedLocationFilter });
+      const rows = await loadInvoices({
+        month: filterMonth,
+        date: filterDate,
+        locationId: selectedLocationFilter,
+        billingFrequency: filterFrequency,
+      });
       setInvoices(rows);
     } finally {
       setIsLoading(false);
     }
-  }, [month, selectedLocationFilter]);
+  }, [filterMonth, filterDate, selectedLocationFilter, filterFrequency]);
 
   useEffect(() => {
     (async () => {
@@ -401,7 +436,11 @@ function MonthlyInvoicesContent() {
     setNotice(null);
     setLastSummary([]);
     try {
-      const result = await generateMonthlyInvoices(month, selectedLocationFilter);
+      const periodStart = genFrequency === "monthly"
+        ? `${genMonth.slice(0, 7)}-01`
+        : genDate;
+
+      const result = await generateInvoices(genFrequency, periodStart, selectedLocationFilter);
       if (!result.success) {
         setNotice({ type: "warning", message: result.error?.message ?? "Invoice generation failed." });
         return;
@@ -412,7 +451,7 @@ function MonthlyInvoicesContent() {
         type: generated.length > 0 ? "success" : "warning",
         message: generated.length > 0
           ? `Generated ${generated.length} draft invoice${generated.length === 1 ? "" : "s"}.`
-          : "No eligible fulfilled or partial requisitions found for this month.",
+          : "No eligible fulfilled or partial requisitions found for this period.",
       });
       await fetchInvoices();
     } finally {
@@ -436,7 +475,12 @@ function MonthlyInvoicesContent() {
       });
       await fetchInvoices();
       if (selectedInvoice?.id === invoice.id) {
-        const refreshed = await loadInvoices({ month, locationId: selectedLocationFilter });
+        const refreshed = await loadInvoices({
+          month: filterMonth,
+          date: filterDate,
+          locationId: selectedLocationFilter,
+          billingFrequency: filterFrequency,
+        });
         setSelectedInvoice(refreshed.find((row) => row.id === invoice.id) ?? null);
       }
     } finally {
@@ -479,29 +523,74 @@ function MonthlyInvoicesContent() {
           <div className="flex flex-col justify-between gap-5 lg:flex-row lg:items-start">
             <div className="max-w-3xl">
               <p className="text-xs font-bold uppercase tracking-[0.24em] text-emerald-700">STOCK DHARMA</p>
-              <h1 className="mt-3 text-3xl font-semibold tracking-tight text-slate-950 sm:text-5xl">Monthly Location Invoices</h1>
+              <h1 className="mt-3 text-3xl font-semibold tracking-tight text-slate-950 sm:text-5xl">HQ Location Invoices</h1>
               <p className="mt-3 text-base text-slate-600">
-                Generate draft monthly invoices from fulfilled requisition quantities only.
+                Generate draft daily, biweekly, and monthly invoices from fulfilled requisition quantities.
               </p>
             </div>
+          </div>
+          
+          <div className="flex flex-col gap-4 border-t border-emerald-100/50 pt-5 mt-5 xl:flex-row xl:items-end xl:justify-between">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 flex-1 max-w-2xl">
+              <label className="block">
+                <span className="text-xs font-bold uppercase tracking-wider text-emerald-800">Billing Cycle</span>
+                <select
+                  value={genFrequency}
+                  onChange={(e) => setGenFrequency(e.target.value as any)}
+                  className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none ring-emerald-600 focus:ring-2"
+                >
+                  <option value="daily">Daily</option>
+                  <option value="biweekly">Biweekly (14 Days)</option>
+                  <option value="monthly">Monthly</option>
+                </select>
+              </label>
+
+              <label className="block">
+                <span className="text-xs font-bold uppercase tracking-wider text-emerald-800">
+                  {genFrequency === "monthly" ? "Invoice Month" : "Period Start Date"}
+                </span>
+                <input
+                  type={genFrequency === "monthly" ? "month" : "date"}
+                  value={genFrequency === "monthly" ? genMonth : genDate}
+                  onChange={(e) => genFrequency === "monthly" ? setGenMonth(e.target.value) : setGenDate(e.target.value)}
+                  className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none ring-emerald-600 focus:ring-2"
+                />
+              </label>
+            </div>
+
             <button
               onClick={handleGenerate}
               disabled={isGenerating}
-              className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-60"
+              className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-60 xl:mb-0.5"
             >
               {isGenerating ? <Loader2 className="h-4 w-4 animate-spin" /> : <ReceiptText className="h-4 w-4" />}
-              {isGenerating ? "Generating..." : "Generate Monthly Invoices"}
+              {isGenerating ? "Generating..." : `Generate ${genFrequency.charAt(0).toUpperCase() + genFrequency.slice(1)} Invoices`}
             </button>
           </div>
         </section>
 
-        <section className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_1fr_auto]">
+        <section className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-[1fr_1fr_1fr_auto]">
           <label className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-            <span className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Invoice month</span>
+            <span className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Billing Cycle Filter</span>
+            <select
+              value={filterFrequency}
+              onChange={(e) => setFilterFrequency(e.target.value as any)}
+              className="mt-2 min-h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none ring-emerald-600 focus:ring-2"
+            >
+              <option value="all">All Cycles</option>
+              <option value="daily">Daily</option>
+              <option value="biweekly">Biweekly</option>
+              <option value="monthly">Monthly</option>
+            </select>
+          </label>
+          <label className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+            <span className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">
+              {filterFrequency === "daily" || filterFrequency === "biweekly" ? "Period Start Date" : "Invoice Month"}
+            </span>
             <input
-              type="month"
-              value={month}
-              onChange={(e) => setMonth(e.target.value)}
+              type={filterFrequency === "daily" || filterFrequency === "biweekly" ? "date" : "month"}
+              value={filterFrequency === "daily" || filterFrequency === "biweekly" ? filterDate : filterMonth}
+              onChange={(e) => filterFrequency === "daily" || filterFrequency === "biweekly" ? setFilterDate(e.target.value) : setFilterMonth(e.target.value)}
               className="mt-2 min-h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none ring-emerald-600 focus:ring-2"
             />
           </label>
@@ -518,7 +607,7 @@ function MonthlyInvoicesContent() {
               ))}
             </select>
           </label>
-          <div className="grid grid-cols-3 gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm lg:min-w-[360px]">
+          <div className="grid grid-cols-3 gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm xl:min-w-[360px]">
             <div>
               <p className="text-xs font-semibold text-slate-500">Subtotal</p>
               <p className="mt-2 text-lg font-semibold text-slate-950">{money(totals.subtotal)}</p>
@@ -563,7 +652,7 @@ function MonthlyInvoicesContent() {
             <div>
               <h2 className="text-lg font-semibold text-slate-950">Invoice Summary</h2>
               <p className="mt-1 text-sm text-slate-500">
-                {monthLabel(month)} · {locationId === "all" ? "All Locations" : locationNameById.get(locationId) ?? locationId}
+                {filterFrequency === "all" ? "All Cycles" : filterFrequency.toUpperCase()} · {filterFrequency === "daily" || filterFrequency === "biweekly" ? filterDate : monthLabel(filterMonth)} · {locationId === "all" ? "All Locations" : locationNameById.get(locationId) ?? locationId}
               </p>
             </div>
             <div className="inline-flex items-center gap-2 text-sm text-slate-500">
@@ -578,7 +667,7 @@ function MonthlyInvoicesContent() {
                 <tr>
                   <th className="px-5 py-3 text-left font-semibold">Invoice #</th>
                   <th className="px-3 py-3 text-left font-semibold">Location</th>
-                  <th className="px-3 py-3 text-left font-semibold">Month</th>
+                  <th className="px-3 py-3 text-left font-semibold">Billing Period</th>
                   <th className="px-3 py-3 text-left font-semibold">Status</th>
                   <th className="px-3 py-3 text-right font-semibold">Subtotal</th>
                   <th className="px-3 py-3 text-right font-semibold">Tax</th>
@@ -597,7 +686,7 @@ function MonthlyInvoicesContent() {
                 ) : invoices.length === 0 ? (
                   <tr>
                     <td colSpan={9} className="px-5 py-12 text-center text-sm text-slate-500">
-                      No invoices for this month yet.
+                      No invoices found for this selection.
                     </td>
                   </tr>
                 ) : invoices.map((invoice) => (
@@ -609,7 +698,16 @@ function MonthlyInvoicesContent() {
                         {locationNameById.get(invoice.locationId) ?? invoice.locationId}
                       </span>
                     </td>
-                    <td className="px-3 py-4 text-slate-600">{monthLabel(invoice.invoiceMonth)}</td>
+                    <td className="px-3 py-4 text-slate-600">
+                      <div className="flex flex-col">
+                        <span className="font-semibold text-slate-900 capitalize">
+                          {invoice.billingFrequency || "monthly"}
+                        </span>
+                        <span className="text-xs text-slate-500">
+                          {formatPeriod(invoice)}
+                        </span>
+                      </div>
+                    </td>
                     <td className="px-3 py-4">
                       <span className={`rounded-full border px-2 py-0.5 text-xs font-semibold capitalize ${statusClass(invoice.status)}`}>
                         {invoice.status}
@@ -663,7 +761,7 @@ function MonthlyInvoicesContent() {
           isOpen={!!selectedInvoice}
           onClose={() => setSelectedInvoice(null)}
           title={selectedInvoice ? `Invoice ${selectedInvoice.invoiceNumber}` : "Invoice"}
-          description={selectedInvoice ? `${locationNameById.get(selectedInvoice.locationId) ?? selectedInvoice.locationId} · ${monthLabel(selectedInvoice.invoiceMonth)}` : undefined}
+          description={selectedInvoice ? `${locationNameById.get(selectedInvoice.locationId) ?? selectedInvoice.locationId} · ${selectedInvoice.billingFrequency.toUpperCase()} (${formatPeriod(selectedInvoice)})` : undefined}
         >
           {selectedInvoice && (
             <div className="space-y-5">
@@ -684,8 +782,8 @@ function MonthlyInvoicesContent() {
                   <p className="mt-1 font-semibold text-slate-950">{locationNameById.get(selectedInvoice.locationId) ?? selectedInvoice.locationId}</p>
                 </div>
                 <div>
-                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Month</p>
-                  <p className="mt-1 font-semibold text-slate-950">{monthLabel(selectedInvoice.invoiceMonth)}</p>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Billing Period</p>
+                  <p className="mt-1 font-semibold text-slate-950">{formatPeriod(selectedInvoice)}</p>
                 </div>
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Status</p>

@@ -5078,6 +5078,9 @@ export interface Invoice {
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
+  billingFrequency: "daily" | "biweekly" | "monthly";
+  periodStart: string;
+  periodEnd: string;
 }
 
 export interface InvoiceItem {
@@ -5121,6 +5124,9 @@ const mapInvoiceToFrontend = (db: any): Invoice => ({
   createdBy: db.created_by ?? null,
   createdAt: db.created_at,
   updatedAt: db.updated_at,
+  billingFrequency: db.billing_frequency ?? 'monthly',
+  periodStart: db.period_start ?? db.invoice_month,
+  periodEnd: db.period_end ?? db.invoice_month,
 });
 
 const mapInvoiceItemToFrontend = (db: any): InvoiceItem => ({
@@ -5138,19 +5144,40 @@ const mapInvoiceItemToFrontend = (db: any): InvoiceItem => ({
 
 export async function loadInvoices(filters?: {
   month?: string | null;
+  date?: string | null;
   locationId?: string | null;
+  billingFrequency?: "daily" | "biweekly" | "monthly" | "all" | null;
 }): Promise<Invoice[]> {
   let query = supabase
     .from('invoices')
     .select('*')
     .order('generated_at', { ascending: false });
 
-  if (filters?.month) {
-    const monthStart = `${filters.month.slice(0, 7)}-01`;
-    query = query.eq('invoice_month', monthStart);
+  if (filters?.billingFrequency && filters.billingFrequency !== 'all') {
+    query = query.eq('billing_frequency', filters.billingFrequency);
   }
   if (filters?.locationId) {
     query = query.eq('location_id', filters.locationId);
+  }
+  
+  if (filters?.billingFrequency === 'monthly') {
+    if (filters?.month) {
+      const monthStart = `${filters.month.slice(0, 7)}-01`;
+      query = query.eq('period_start', monthStart);
+    }
+  } else if (filters?.billingFrequency === 'daily' || filters?.billingFrequency === 'biweekly') {
+    if (filters?.date) {
+      query = query.eq('period_start', filters.date);
+    }
+  } else {
+    // If 'all' or undefined frequency, but filters have month/date
+    if (filters?.month && !filters?.date) {
+      const monthStart = `${filters.month.slice(0, 7)}-01`;
+      const nextMonthStart = new Date(new Date(`${filters.month.slice(0, 7)}-01T00:00:00`).setMonth(new Date(`${filters.month.slice(0, 7)}-01T00:00:00`).getMonth() + 1)).toISOString().slice(0, 10);
+      query = query.gte('period_start', monthStart).lt('period_start', nextMonthStart);
+    } else if (filters?.date) {
+      query = query.eq('period_start', filters.date);
+    }
   }
 
   const { data, error } = await query;
@@ -5175,18 +5202,19 @@ export async function loadInvoiceItems(invoiceId: string): Promise<InvoiceItem[]
   return Array.isArray(data) ? data.map(mapInvoiceItemToFrontend) : [];
 }
 
-export async function generateMonthlyInvoices(
-  month: string,
+export async function generateInvoices(
+  frequency: "daily" | "biweekly" | "monthly",
+  periodStart: string,
   locationId?: string | null
 ): Promise<{ success: boolean; data?: MonthlyInvoiceSummary[]; error?: any }> {
-  const invoiceMonth = `${month.slice(0, 7)}-01`;
-  const { data, error } = await supabase.rpc('generate_monthly_invoices', {
-    p_invoice_month: invoiceMonth,
+  const { data, error } = await supabase.rpc('generate_invoices', {
+    p_billing_frequency: frequency,
+    p_period_start: periodStart,
     p_location_id: locationId || null,
   } as any);
 
   if (error) {
-    console.error('[generateMonthlyInvoices]', error);
+    console.error('[generateInvoices]', error);
     return { success: false, error };
   }
 
@@ -5203,6 +5231,14 @@ export async function generateMonthlyInvoices(
   }));
 
   return { success: true, data: summaries };
+}
+
+export async function generateMonthlyInvoices(
+  month: string,
+  locationId?: string | null
+): Promise<{ success: boolean; data?: MonthlyInvoiceSummary[]; error?: any }> {
+  const invoiceMonth = `${month.slice(0, 7)}-01`;
+  return generateInvoices("monthly", invoiceMonth, locationId);
 }
 
 export async function finalizeInvoice(invoiceId: string): Promise<{ success: boolean; error?: any }> {

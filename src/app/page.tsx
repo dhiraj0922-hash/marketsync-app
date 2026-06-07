@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { Fragment, useState, useEffect, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -100,10 +100,193 @@ import { CheckSquare } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
 import { isHqAdmin, resolveLocationId } from "@/lib/roles";
 import HQLocationReview from "@/components/HQLocationReview";
+import { useActiveLocation } from "@/components/LocationContext";
+
+type DashboardInventoryStatus = "Out of Stock" | "Low Stock" | "In Stock";
+
+type DashboardInventoryLocationBreakdown = {
+  rowId: string;
+  locationId: string;
+  locationName: string;
+  currentStock: number;
+  parLevel: number;
+  suggestedQty: number;
+  status: DashboardInventoryStatus;
+};
+
+type DashboardInventoryGroup = {
+  id: string;
+  groupKey: string;
+  representative: any;
+  name: string;
+  supplier: string;
+  category: string;
+  unit: string;
+  currentStock: number;
+  parLevel: number;
+  suggestedQty: number;
+  value: number;
+  locationCount: number;
+  locations: DashboardInventoryLocationBreakdown[];
+  rawRows: any[];
+  hasDuplicateRows: boolean;
+  status: DashboardInventoryStatus;
+  inStock: number;
+  cost: number;
+  _value: number;
+  _isLow: boolean;
+  _isNeg: boolean;
+  _isDead: boolean;
+};
+
+const normalizeDashboardInventoryKey = (value: any) =>
+  String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+
+const numberOrZero = (value: any) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const getDashboardInventoryGroupKey = (item: any) => {
+  const catalogId = String(item?.catalogItemId ?? item?.catalog_item_id ?? "").trim();
+  if (catalogId) return `catalog:${catalogId}`;
+
+  const sharedItemId = String(item?.itemId ?? item?.item_id ?? "").trim();
+  if (sharedItemId && sharedItemId !== String(item?.id ?? "")) return `item:${sharedItemId}`;
+
+  const name = normalizeDashboardInventoryKey(item?.name ?? item?.item_name ?? item?.product_name);
+  const unit = normalizeDashboardInventoryKey(item?.unit ?? item?.uom ?? item?.baseUnit ?? item?.base_unit);
+  return unit ? `name-unit:${name}:${unit}` : `name:${name}`;
+};
+
+const getDashboardStatus = (stock: number, par: number): DashboardInventoryStatus => {
+  if (stock <= 0) return "Out of Stock";
+  if (stock < par) return "Low Stock";
+  return "In Stock";
+};
+
+const statusSortRank: Record<DashboardInventoryStatus, number> = {
+  "Out of Stock": 0,
+  "Low Stock": 1,
+  "In Stock": 2,
+};
+
+const buildGroupedDashboardInventory = (rows: any[], locations: any[]): DashboardInventoryGroup[] => {
+  const locationNameById = new Map(
+    locations.map((loc: any) => [String(loc?.id ?? ""), String(loc?.name ?? loc?.locationName ?? "Unknown Location")])
+  );
+  const groupedMap = new Map<string, DashboardInventoryGroup>();
+
+  rows.forEach((row: any) => {
+    if (row?.archived) return;
+
+    const groupKey = getDashboardInventoryGroupKey(row);
+    const name = String(row?.name ?? row?.item_name ?? row?.product_name ?? "Unnamed Item");
+    const unit = String(row?.unit ?? row?.uom ?? row?.baseUnit ?? row?.base_unit ?? "");
+    const stock = numberOrZero(row?.current_stock ?? row?.inStock ?? row?.stock ?? row?.instock);
+    const par = numberOrZero(row?.par_level ?? row?.parLevel ?? row?.min_on_hand ?? row?.parlevel);
+    const cost = numberOrZero(row?.cost ?? row?.unit_cost ?? row?.local_price);
+    const suggested = Math.max(par - stock, 0);
+    const locationId = String(row?.locationId ?? row?.location_id ?? "");
+    const locationName = String(
+      row?.locationName ??
+      row?.location_name ??
+      row?.location?.name ??
+      locationNameById.get(locationId) ??
+      (locationId || "Unknown Location")
+    );
+
+    if (!groupedMap.has(groupKey)) {
+      groupedMap.set(groupKey, {
+        id: String(row?.id ?? groupKey),
+        groupKey,
+        representative: row,
+        name,
+        supplier: String(row?.preferredSupplierName ?? row?.supplier ?? row?.supplierName ?? "System Vendor"),
+        category: String(row?.category ?? "Uncategorised"),
+        unit,
+        currentStock: 0,
+        parLevel: 0,
+        suggestedQty: 0,
+        value: 0,
+        locationCount: 0,
+        locations: [],
+        rawRows: [],
+        hasDuplicateRows: false,
+        status: "In Stock",
+        inStock: 0,
+        cost,
+        _value: 0,
+        _isLow: false,
+        _isNeg: false,
+        _isDead: false,
+      });
+    }
+
+    const group = groupedMap.get(groupKey)!;
+    group.currentStock += stock;
+    group.parLevel += par;
+    group.suggestedQty += suggested;
+    group.value += stock >= 0 ? stock * cost : 0;
+    group.rawRows.push(row);
+    group.locations.push({
+      rowId: String(row?.id ?? `${groupKey}:${group.locations.length}`),
+      locationId,
+      locationName,
+      currentStock: stock,
+      parLevel: par,
+      suggestedQty: suggested,
+      status: getDashboardStatus(stock, par),
+    });
+
+    if (!group.unit && unit) group.unit = unit;
+    if (!group.category && row?.category) group.category = String(row.category);
+  });
+
+  const groups = Array.from(groupedMap.values()).map((group) => {
+    const uniqueLocationIds = new Set(group.locations.map((loc) => loc.locationId).filter(Boolean));
+    group.locationCount = uniqueLocationIds.size || group.locations.length;
+
+    const rowCountsByLocation = new Map<string, number>();
+    group.rawRows.forEach((row: any) => {
+      const loc = String(row?.locationId ?? row?.location_id ?? "unknown");
+      rowCountsByLocation.set(loc, (rowCountsByLocation.get(loc) ?? 0) + 1);
+    });
+    group.hasDuplicateRows = Array.from(rowCountsByLocation.values()).some((count) => count > 1);
+    group.status = getDashboardStatus(group.currentStock, group.parLevel);
+    group.inStock = group.currentStock;
+    group.cost = group.currentStock > 0 ? group.value / group.currentStock : numberOrZero(group.representative?.cost);
+    group._value = group.value;
+    group._isLow = group.currentStock < group.parLevel;
+    group._isNeg = group.currentStock < 0;
+    group._isDead = group.currentStock === 0;
+    return group;
+  });
+
+  const seen = new Set<string>();
+  const duplicates = groups.filter((group) => {
+    if (seen.has(group.groupKey)) return true;
+    seen.add(group.groupKey);
+    return false;
+  });
+  if (process.env.NODE_ENV !== "production" && duplicates.length > 0) {
+    console.warn("[DashboardInventoryGrouping] Duplicate grouped display keys before render:", duplicates.map((group) => group.groupKey));
+  }
+
+  return groups.sort((a, b) => {
+    const statusDiff = statusSortRank[a.status] - statusSortRank[b.status];
+    if (statusDiff !== 0) return statusDiff;
+    return a.name.localeCompare(b.name);
+  });
+};
 
 export default function Dashboard() {
   const router = useRouter();
   const { user } = useAuth();
+  const { activeLocation } = useActiveLocation();
   const isHQAdmin = user?.role === "hq_admin";
 
   const [inventoryItems, setInventoryItems] = useState<any[]>([]);
@@ -126,6 +309,7 @@ export default function Dashboard() {
   const [snapFilter,   setSnapFilter]     = useState<'instock'|'low'|'negative'|'dead'|'highval'>('instock');
   const [snapSort,     setSnapSort]       = useState<'value_desc'|'value_asc'|'alpha'|'stock_asc'|'updated'>('value_desc');
   const [snapGroupOpen, setSnapGroupOpen] = useState<Record<string,boolean>>({});
+  const [expandedInventoryGroups, setExpandedInventoryGroups] = useState<Record<string, boolean>>({});
 
 
   useEffect(() => {
@@ -152,7 +336,7 @@ export default function Dashboard() {
           const hqAdmin = isHqAdmin(user);
           const userLocId = resolveLocationId(user);
           const scopedInventory = hqAdmin
-            ? loadedInventory
+            ? (activeLocation?.id ? loadedInventory.filter((i: any) => i.locationId === activeLocation.id) : loadedInventory)
             : loadedInventory.filter((i: any) => i.locationId === userLocId);
           setInventoryItems(scopedInventory);
           // ── Debug: inventory value audit ———————————————————————————
@@ -167,7 +351,7 @@ export default function Dashboard() {
             .sort((a: any, b: any) => b.value - a.value)
             .slice(0, 10);
           console.group('[DashboardValueAudit]');
-          console.log(`Scope: ${hqAdmin ? 'ALL locations (HQ admin)' : `location=${userLocId}`}`);
+          console.log(`Scope: ${hqAdmin ? (activeLocation?.id ? `location=${activeLocation.id}` : 'ALL locations (HQ admin)') : `location=${userLocId}`}`);
           console.log(`Rows: ${scopedInventory.length} (raw from DB: ${loadedInventory.length})`);
           console.log('Top 10 highest value rows:');
           console.table(top10);
@@ -213,13 +397,18 @@ export default function Dashboard() {
     }
     
     fetchData();
-  }, []);
+  }, [user, activeLocation?.id]);
+
+  const groupedDashboardInventory = useMemo(
+    () => buildGroupedDashboardInventory(inventoryItems, locations),
+    [inventoryItems, locations]
+  );
 
   if (isLoading) {
      return <div className="animate-pulse flex items-center justify-center p-12 text-sm text-neutral-400">Loading Dashboard Context...</div>;
   }
 
-  const lowStockItems = inventoryItems.filter(item => item.inStock < item.parLevel);
+  const lowStockItems = groupedDashboardInventory.filter(item => item.status !== "In Stock");
   const recentOrdersRender = orders.slice(0, 4);
   // ── Inventory Value — always use item.cost (per-base-unit cost) ──────────
   // NEVER use preferredCost here — preferredCost = purchase_options.unit_price
@@ -351,9 +540,9 @@ export default function Dashboard() {
     const suggestions: any[] = [];
     
     // 1. Auto PO Suggestions (Low Stock + No Open PO)
-    const lowStockRawItems = inventoryItems.filter(item => item.inStock < item.parLevel);
+    const lowStockRawItems = groupedDashboardInventory.filter(item => item.status !== "In Stock");
     const itemsWithoutPO = lowStockRawItems.filter(item => {
-      return !orders.some(o => o.status !== "Delivered" && o.lineItems?.some((li:any) => li.id === item.id));
+      return !orders.some(o => o.status !== "Delivered" && o.lineItems?.some((li:any) => li.id === item.id || li.id === item.representative?.id));
     });
 
     if (itemsWithoutPO.length > 0) {
@@ -442,11 +631,11 @@ export default function Dashboard() {
      }
 
      // 2. Low Stock Risk (stock < par && no open PO)
-     inventoryItems.forEach(item => {
-        if (item.inStock < item.parLevel) {
-           const hasOpenPO = orders.some(o => o.status !== "Delivered" && o.lineItems?.some((li:any) => li.id === item.id));
+     groupedDashboardInventory.forEach(item => {
+        if (item.status !== "In Stock") {
+           const hasOpenPO = orders.some(o => o.status !== "Delivered" && o.lineItems?.some((li:any) => li.id === item.id || li.id === item.representative?.id));
            if (!hasOpenPO) {
-              alerts.push({ id: `stock-${item.id}`, type: 'Stock Risk', title: `Urgent Reorder: ${item.name}`, desc: `Stock is below par (${item.inStock}/${item.parLevel}) with 0 open orders natively tracking this item.`, severity: 'Critical', group: 'stock', actionLink: '/inventory', date: `Detected Today (${formattedDate})` });
+              alerts.push({ id: `stock-${item.groupKey}`, type: 'Stock Risk', title: `Urgent Reorder: ${item.name}`, desc: `Grouped stock is below par (${item.currentStock}/${item.parLevel}) across ${item.locationCount} location${item.locationCount !== 1 ? 's' : ''} with 0 open orders natively tracking this item.`, severity: 'Critical', group: 'stock', actionLink: '/inventory', date: `Detected Today (${formattedDate})` });
            }
         }
      });
@@ -522,9 +711,9 @@ export default function Dashboard() {
   const approvedCounts = counts.filter(c => c.status === 'Approved').length;
   const pendingCounts = counts.filter(c => c.status === 'Submitted').length;
   const inventoryCategoryData = Object.entries(
-    inventoryItems.reduce((acc: Record<string, number>, item: any) => {
+    groupedDashboardInventory.reduce((acc: Record<string, number>, item: any) => {
       const category = item.category || "Uncategorised";
-      acc[category] = (acc[category] || 0) + ((item.inStock || 0) * (item.cost || 0));
+      acc[category] = (acc[category] || 0) + (item.value || 0);
       return acc;
     }, {})
   )
@@ -828,14 +1017,19 @@ export default function Dashboard() {
           {topLowStock.length > 0 && (
             <div className="grid grid-cols-1 gap-3 border-b border-white/5 bg-[#0d0d0d] p-4 md:grid-cols-5">
               {topLowStock.map(item => {
-                const stockRatio = item.parLevel > 0 ? Math.max(0, Math.min(100, (item.inStock / item.parLevel) * 100)) : 0;
+                const stockRatio = item.parLevel > 0 ? Math.max(0, Math.min(100, (item.currentStock / item.parLevel) * 100)) : 0;
                 return (
-                  <div key={item.id} className="rounded-lg border border-white/10 bg-[#181818] p-3">
-                    <p className="truncate text-xs font-semibold text-white">{item.name}</p>
+                  <div key={item.groupKey} className="rounded-lg border border-white/10 bg-[#181818] p-3">
+                    <div className="flex items-center gap-2">
+                      <p className="min-w-0 flex-1 truncate text-xs font-semibold text-white">{item.name}</p>
+                      {item.hasDuplicateRows && (
+                        <span className="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-bold uppercase text-amber-300">Duplicate rows</span>
+                      )}
+                    </div>
                     <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10">
                       <div className={stockRatio < 30 ? "h-full rounded-full bg-rose-500" : "h-full rounded-full bg-amber-500"} style={{ width: `${stockRatio}%` }} />
                     </div>
-                    <p className="mt-2 text-[10px] font-medium text-zinc-500">{item.inStock} / {item.parLevel} {item.unit}</p>
+                    <p className="mt-2 text-[10px] font-medium text-zinc-500">{item.currentStock.toLocaleString()} / {item.parLevel.toLocaleString()} {item.unit}</p>
                   </div>
                 );
               })}
@@ -849,42 +1043,103 @@ export default function Dashboard() {
                 <TableHead className="font-semibold text-zinc-500">Current Stock</TableHead>
                 <TableHead className="font-semibold text-zinc-500">Par Level</TableHead>
                 <TableHead className="font-semibold text-zinc-500">Suggested Reorder</TableHead>
+                <TableHead className="font-semibold text-zinc-500">Locations</TableHead>
                 <TableHead className="text-right font-semibold text-zinc-500">Action</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {lowStockItems.length > 0 ? (
                 lowStockItems.map((item) => {
-                  const stockRatio = item.inStock / item.parLevel;
+                  const stockRatio = item.parLevel > 0 ? item.currentStock / item.parLevel : 0;
                   const isCritical = stockRatio < 0.3;
-                  const suggestedReorder = item.parLevel - item.inStock;
+                  const suggestedReorder = item.suggestedQty;
+                  const isExpanded = expandedInventoryGroups[item.groupKey] === true;
                   
                   return (
-                    <TableRow key={item.id} className="border-white/5 transition-colors hover:bg-white/[0.03]">
-                      <TableCell className="font-semibold text-white">{item.name}</TableCell>
-                      <TableCell>
-                        <Badge variant={item.inStock === 0 ? 'danger' : isCritical ? 'danger' : 'warning'} className="px-2">
-                          {item.inStock === 0 ? "Out of Stock" : isCritical ? "Critical" : "Low"}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="font-medium text-zinc-500">{item.inStock} {item.unit}</TableCell>
-                      <TableCell className="text-zinc-500">{item.parLevel} {item.unit}</TableCell>
-                      <TableCell className="font-semibold text-amber-400">{suggestedReorder} {item.unit}</TableCell>
-                      <TableCell className="text-right">
-                        <button 
-                          onClick={() => handleAddToPO(item)}
-                          className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-white/5 px-3 py-1.5 text-sm font-semibold text-zinc-200 transition-colors hover:bg-blue-600 hover:text-white"
-                        >
-                          <Plus className="h-3.5 w-3.5" />
-                          Add to PO
-                        </button>
-                      </TableCell>
-                    </TableRow>
+                    <Fragment key={item.groupKey}>
+                      <TableRow className="border-white/5 transition-colors hover:bg-white/[0.03]">
+                        <TableCell>
+                          <div className="flex flex-col gap-1">
+                            <span className="font-semibold text-white">{item.name}</span>
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="text-[10px] text-zinc-500">{item.supplier}</span>
+                              {item.hasDuplicateRows && (
+                                <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-bold uppercase text-amber-300">Duplicate rows detected</span>
+                              )}
+                            </div>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={item.status === "Out of Stock" ? 'danger' : isCritical ? 'danger' : 'warning'} className="px-2">
+                            {item.status === "Out of Stock" ? "Out of Stock" : isCritical ? "Critical" : "Low"}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="font-medium text-zinc-500">{item.currentStock.toLocaleString()} {item.unit}</TableCell>
+                        <TableCell className="text-zinc-500">{item.parLevel.toLocaleString()} {item.unit}</TableCell>
+                        <TableCell className="font-semibold text-amber-400">{suggestedReorder.toLocaleString()} {item.unit}</TableCell>
+                        <TableCell>
+                          <button
+                            type="button"
+                            onClick={() => setExpandedInventoryGroups(prev => ({ ...prev, [item.groupKey]: !isExpanded }))}
+                            className="rounded-md border border-white/10 bg-white/5 px-2.5 py-1 text-xs font-semibold text-zinc-300 hover:bg-white/10 hover:text-white"
+                          >
+                            {item.locationCount} location{item.locationCount !== 1 ? "s" : ""} · {isExpanded ? "Hide" : "View"}
+                          </button>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <button 
+                            onClick={() => handleAddToPO(item)}
+                            className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-white/5 px-3 py-1.5 text-sm font-semibold text-zinc-200 transition-colors hover:bg-blue-600 hover:text-white"
+                          >
+                            <Plus className="h-3.5 w-3.5" />
+                            Add to PO
+                          </button>
+                        </TableCell>
+                      </TableRow>
+                      {isExpanded && (
+                        <TableRow className="border-white/5 bg-[#0c0c0c]">
+                          <TableCell colSpan={7} className="p-0">
+                            <div className="overflow-x-auto px-4 py-3">
+                              <table className="w-full text-xs">
+                                <thead>
+                                  <tr className="border-b border-white/5 text-left text-[10px] uppercase tracking-[0.14em] text-zinc-600">
+                                    <th className="py-2 font-semibold">Location</th>
+                                    <th className="py-2 font-semibold">Current</th>
+                                    <th className="py-2 font-semibold">Par</th>
+                                    <th className="py-2 font-semibold">Suggested</th>
+                                    <th className="py-2 font-semibold">Status</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {item.locations.map((loc) => (
+                                    <tr key={loc.rowId} className="border-b border-white/5 last:border-0">
+                                      <td className="py-2 font-medium text-zinc-300">{loc.locationName}</td>
+                                      <td className="py-2 text-zinc-500">{loc.currentStock.toLocaleString()} {item.unit}</td>
+                                      <td className="py-2 text-zinc-500">{loc.parLevel.toLocaleString()} {item.unit}</td>
+                                      <td className="py-2 text-amber-300">{loc.suggestedQty.toLocaleString()} {item.unit}</td>
+                                      <td className="py-2">
+                                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                                          loc.status === "Out of Stock" ? "bg-red-500/15 text-red-300" :
+                                          loc.status === "Low Stock" ? "bg-amber-500/15 text-amber-300" :
+                                          "bg-emerald-500/15 text-emerald-300"
+                                        }`}>
+                                          {loc.status}
+                                        </span>
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </Fragment>
                   );
                 })
               ) : (
                 <TableRow className="border-white/5">
-                  <TableCell colSpan={6} className="text-center py-6 text-sm text-zinc-500">
+                  <TableCell colSpan={7} className="text-center py-6 text-sm text-zinc-500">
                     All inventory items are fully stocked above par.
                   </TableCell>
                 </TableRow>
@@ -1000,7 +1255,7 @@ export default function Dashboard() {
           'Finished Goods':'#a855f7','Other':'#71717a',
         };
 
-        const activeItems = inventoryItems.filter((i:any) => !i.archived);
+        const activeItems = groupedDashboardInventory;
 
         // Compute value per item
         const withVal = activeItems.map((i:any) => ({
@@ -1028,7 +1283,8 @@ export default function Dashboard() {
         const searched = searchLower
           ? tabFiltered.filter((i:any) =>
               (i.name||'').toLowerCase().includes(searchLower) ||
-              (i.preferredSupplierName||i.supplier||'').toLowerCase().includes(searchLower)
+              (i.preferredSupplierName||i.supplier||'').toLowerCase().includes(searchLower) ||
+              i.locations.some((loc: DashboardInventoryLocationBreakdown) => loc.locationName.toLowerCase().includes(searchLower))
             )
           : tabFiltered;
 
@@ -1038,7 +1294,7 @@ export default function Dashboard() {
             case 'value_desc': return b._value - a._value;
             case 'value_asc':  return a._value - b._value;
             case 'alpha':      return (a.name||'').localeCompare(b.name||'');
-            case 'stock_asc':  return (a.inStock||0) - (b.inStock||0);
+            case 'stock_asc':  return (a.currentStock||0) - (b.currentStock||0);
             case 'updated':    return (b.updatedAt||0) - (a.updatedAt||0);
             default:           return 0;
           }
@@ -1070,7 +1326,7 @@ export default function Dashboard() {
         // Donut data by category
         const catTotals = activeItems.reduce((acc:Record<string,number>, i:any) => {
           const c = i.category || 'Other';
-          acc[c] = (acc[c]||0) + (Number(i.inStock)||0)*(Number(i.cost)||0);
+          acc[c] = (acc[c]||0) + (Number(i.value)||0);
           return acc;
         }, {});
         const donutData = Object.entries(catTotals)
@@ -1170,7 +1426,7 @@ export default function Dashboard() {
                   </div>
                 </div>
 
-                <p className="text-[10px] text-zinc-600">{sorted.length} item{sorted.length !== 1 ? 's' : ''} shown</p>
+                <p className="text-[10px] text-zinc-600">{sorted.length} grouped item{sorted.length !== 1 ? 's' : ''} shown</p>
               </div>
 
               {/* ── Scrollable body ───────────────────────────────────── */}
@@ -1212,7 +1468,7 @@ export default function Dashboard() {
                               const supplierLabel = item.preferredSupplierName || item.supplier || '—';
                               const valueLabel = `$${item._value.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
                               return (
-                                <div key={item.id} className={`px-4 py-2.5 flex items-center justify-between gap-3 ${item._isNeg ? 'bg-red-950/20' : item._isLow ? 'bg-amber-950/20' : 'bg-[#121212]'}`}>
+                                <div key={item.groupKey} className={`px-4 py-2.5 flex items-center justify-between gap-3 ${item._isNeg ? 'bg-red-950/20' : item._isLow ? 'bg-amber-950/20' : 'bg-[#121212]'}`}>
                                   <div className="min-w-0 flex-1">
                                     <div className="flex items-center gap-2 flex-wrap">
                                       <span className="text-xs font-semibold text-white truncate">{item.name}</span>
@@ -1222,12 +1478,17 @@ export default function Dashboard() {
                                       {item._isLow && !item._isNeg && (
                                         <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-900/60 text-amber-400 border border-amber-700/50">Low Stock</span>
                                       )}
+                                      {item.hasDuplicateRows && (
+                                        <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-violet-900/50 text-violet-300 border border-violet-700/40">Duplicate rows</span>
+                                      )}
                                     </div>
-                                    <p className="text-[10px] text-zinc-600 mt-0.5 truncate">{supplierLabel}</p>
+                                    <p className="text-[10px] text-zinc-600 mt-0.5 truncate">
+                                      {supplierLabel} · {item.locationCount} location{item.locationCount !== 1 ? 's' : ''}
+                                    </p>
                                   </div>
                                   <div className="text-right shrink-0">
                                     <p className={`text-xs font-bold ${item._isNeg ? 'text-red-400' : 'text-white'}`}>
-                                      {Number(item.inStock||0).toLocaleString()} {item.baseUnit||item.unit}
+                                      {Number(item.currentStock||0).toLocaleString()} {item.unit}
                                     </p>
                                     <p className="text-[10px] text-zinc-500">{valueLabel}</p>
                                   </div>
@@ -1247,7 +1508,7 @@ export default function Dashboard() {
                     <p className="text-xs font-bold text-white mb-3">Top 10 by Inventory Value</p>
                     <div className="space-y-2">
                       {top10.map((item:any, i:number) => (
-                        <div key={item.id} className="flex items-center gap-2">
+                        <div key={item.groupKey} className="flex items-center gap-2">
                           <span className="text-[9px] text-zinc-600 w-4 text-right shrink-0">{i+1}</span>
                           <span className="text-[10px] text-zinc-300 w-28 truncate shrink-0">{item.name}</span>
                           <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
