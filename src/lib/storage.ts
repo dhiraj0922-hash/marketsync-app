@@ -1170,6 +1170,7 @@ export interface SaleItem {
   effectivePrice:       number;          // COALESCE(manualPrice, suggestedPrice)
   stockStatus:          'in_stock' | 'low_stock' | 'out_of_stock';
   packQty:              number;          // how many base units make up one sellable pack/case; default 1
+  locationAvailabilityMode: 'all' | 'selected' | 'hq_only';
   /**
    * Optional HQ-controlled override for the availability badge shown to outlet users.
    * When null, the system calculates from instock / par_level.
@@ -1228,6 +1229,7 @@ const mapSaleItemToFrontend = (db: any): SaleItem => ({
                           Number(db.instock ?? 0) <= Number(db.par_level ?? 0) ? 'low_stock' :
                           'in_stock'
                         )) as SaleItem['stockStatus'],
+  locationAvailabilityMode: (db.location_availability_mode ?? 'all') as SaleItem['locationAvailabilityMode'],
   availabilityOverride: (db.availability_override ?? null) as SaleItem['availabilityOverride'],
   packQty:              Number(db.pack_qty ?? 1) || 1,  // default 1 if null/0
   createdAt:            db.created_at ?? null,
@@ -1252,6 +1254,7 @@ const mapSaleItemToDB = (item: Partial<SaleItem> & { id: string }) => ({
   pack_qty:                (item.packQty != null && !isNaN(Number(item.packQty)) && Number(item.packQty) > 0)
                              ? Number(item.packQty)
                              : 1,
+  location_availability_mode: item.locationAvailabilityMode ?? 'all',
   availability_override:   item.availabilityOverride ?? null,
   // suggested_price is a generated column — never write it
   updated_at:              new Date().toISOString(),
@@ -1408,7 +1411,7 @@ const SALE_ITEM_COLS = [
   'source_recipe_id', 'source_recipe_yield_qty',
   'making_cost', 'making_cost_updated_at',
   'suggested_price', 'manual_price',
-  'pack_qty',
+  'pack_qty', 'location_availability_mode', 'availability_override',
   'created_at', 'updated_at',
 ].join(',');
 
@@ -1421,7 +1424,49 @@ export async function loadSaleItems(): Promise<SaleItem[]> {
 
   if (error) { console.error('[loadSaleItems]', error); return []; }
   console.log(`[loadSaleItems] fetched ${data?.length ?? 0} rows`);
-  return Array.isArray(data) ? data.map(mapSaleItemToFrontend) : [];
+  
+  if (!Array.isArray(data)) return [];
+
+  try {
+    const { data: authData } = await supabase.auth.getUser();
+    const user = authData?.user;
+    if (user) {
+      const { data: profile } = await supabase
+        .from('user_profiles')
+        .select('role, location_id')
+        .eq('user_id', user.id)
+        .single();
+      
+      if (profile) {
+        const role = (profile.role ?? '').toLowerCase().trim();
+        const isHq = role === 'hq_admin' || role === 'hq admin' || role === 'admin';
+        const isLocMgr = role === 'location_manager' || role === 'location manager';
+        const locationId = profile.location_id;
+
+        if (!isHq && isLocMgr && locationId) {
+          // Fetch availability mappings for this location
+          const { data: availRows } = await supabase
+            .from('finished_good_location_availability')
+            .select('finished_good_id, is_available')
+            .eq('location_id', locationId)
+            .eq('is_available', true);
+          const allowedFgIds = new Set(availRows?.map(r => r.finished_good_id) || []);
+
+          const filtered = data.filter((item: any) => {
+            const mode = item.location_availability_mode ?? 'all';
+            if (mode === 'all') return true;
+            if (mode === 'selected') return allowedFgIds.has(item.id);
+            return false; // hq_only
+          });
+          return filtered.map(mapSaleItemToFrontend);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[loadSaleItems] dynamic filtering failed:', err);
+  }
+
+  return data.map(mapSaleItemToFrontend);
 }
 
 /** Upsert a single HQ sale item (create or update). */
@@ -1433,6 +1478,70 @@ export async function upsertSaleItem(
     .from('hq_sale_items')
     .upsert(row, { onConflict: 'id' });
   if (error) { console.error('[upsertSaleItem]', error); return { success: false, error }; }
+  return { success: true };
+}
+
+/** Load location availability mappings for a single Finished Good */
+export async function loadFinishedGoodLocationAvailability(finishedGoodId: string): Promise<string[]> {
+  const { data, error } = await supabase
+    .from('finished_good_location_availability')
+    .select('location_id')
+    .eq('finished_good_id', finishedGoodId)
+    .eq('is_available', true);
+
+  if (error) {
+    console.error('[loadFinishedGoodLocationAvailability] error:', error);
+    return [];
+  }
+  return (data ?? []).map((r: any) => r.location_id);
+}
+
+/** Save location availability mappings for a Finished Good */
+export async function saveFinishedGoodLocationAvailability(
+  finishedGoodId: string,
+  mode: 'all' | 'selected' | 'hq_only',
+  selectedLocationIds: string[]
+): Promise<{ success: boolean; error?: any }> {
+  // First, update the mode in hq_sale_items
+  const { error: updateErr } = await supabase
+    .from('hq_sale_items')
+    .update({ location_availability_mode: mode })
+    .eq('id', finishedGoodId);
+
+  if (updateErr) {
+    console.error('[saveFinishedGoodLocationAvailability] update mode error:', updateErr);
+    return { success: false, error: updateErr };
+  }
+
+  // Delete all existing mappings for this finished good
+  const { error: deleteErr } = await supabase
+    .from('finished_good_location_availability')
+    .delete()
+    .eq('finished_good_id', finishedGoodId);
+
+  if (deleteErr) {
+    console.error('[saveFinishedGoodLocationAvailability] delete error:', deleteErr);
+    return { success: false, error: deleteErr };
+  }
+
+  // If mode is 'selected' and there are locations selected, insert them
+  if (mode === 'selected' && selectedLocationIds.length > 0) {
+    const rows = selectedLocationIds.map(locId => ({
+      finished_good_id: finishedGoodId,
+      location_id: locId,
+      is_available: true
+    }));
+
+    const { error: insertErr } = await supabase
+      .from('finished_good_location_availability')
+      .insert(rows);
+
+    if (insertErr) {
+      console.error('[saveFinishedGoodLocationAvailability] insert error:', insertErr);
+      return { success: false, error: insertErr };
+    }
+  }
+
   return { success: true };
 }
 
@@ -3773,6 +3882,8 @@ export type DeliveryRunStatus =
   | 'completed'
   | 'cancelled';
 
+export type VehicleDailyLogStatus = 'open' | 'closed' | 'cancelled';
+
 const mapDriverToFrontend = (db: any) => ({
   id: db.id,
   name: db.name,
@@ -3820,8 +3931,14 @@ const mapDeliveryRunToFrontend = (db: any): any => ({
   status: db.status as DeliveryRunStatus,
   estimatedDistanceKm: Number(db.estimated_distance_km ?? 0),
   estimatedDurationMinutes: Number(db.estimated_duration_minutes ?? 0),
+  actualDistanceKm: Number(db.actual_distance_km ?? 0),
+  actualDurationMinutes: Number(db.actual_duration_minutes ?? 0),
   actualStartTime: db.actual_start_time ?? '',
   actualEndTime: db.actual_end_time ?? '',
+  startLocationName: db.start_location_name ?? '',
+  startAddress: db.start_address ?? '',
+  odometerStartKm: db.odometer_start_km != null ? Number(db.odometer_start_km) : null,
+  odometerEndKm: db.odometer_end_km != null ? Number(db.odometer_end_km) : null,
   notes: db.notes ?? '',
   createdBy: db.created_by ?? null,
   createdAt: db.created_at,
@@ -3846,8 +3963,11 @@ const mapDeliveryTicketToFrontend = (db: any): any => ({
   destinationContact: db.destination_contact ?? '',
   destinationPhone: db.destination_phone ?? '',
   estimatedArrivalTime: db.estimated_arrival_time ?? '',
+  arrivedAt: db.arrived_at ?? '',
   deliveredAt: db.delivered_at ?? '',
   receivedBy: db.received_by ?? '',
+  deliveryNotes: db.delivery_notes ?? '',
+  driverDepartedPreviousStopAt: db.driver_departed_previous_stop_at ?? '',
   proofPhotoUrl: db.proof_photo_url ?? '',
   signatureUrl: db.signature_url ?? '',
   notes: db.notes ?? '',
@@ -3858,6 +3978,33 @@ const mapDeliveryTicketToFrontend = (db: any): any => ({
   items: Array.isArray(db.delivery_ticket_items)
     ? db.delivery_ticket_items.map(mapDeliveryTicketItemToFrontend)
     : [],
+});
+
+const mapVehicleDailyLogToFrontend = (db: any): any => ({
+  id: db.id,
+  vehicleId: db.vehicle_id,
+  logDate: db.log_date,
+  driverId: db.driver_id ?? null,
+  odometerStartKm: Number(db.odometer_start_km ?? 0),
+  odometerEndKm: db.odometer_end_km != null ? Number(db.odometer_end_km) : null,
+  totalOdometerKm: db.total_odometer_km != null ? Number(db.total_odometer_km) : null,
+  totalRunKm: db.total_run_km != null ? Number(db.total_run_km) : null,
+  varianceKm: db.variance_km != null ? Number(db.variance_km) : null,
+  fuelStartLevel: db.fuel_start_level ?? '',
+  fuelEndLevel: db.fuel_end_level ?? '',
+  startConditionNotes: db.start_condition_notes ?? '',
+  endConditionNotes: db.end_condition_notes ?? '',
+  damageReported: Boolean(db.damage_reported),
+  damageNotes: db.damage_notes ?? '',
+  status: db.status as VehicleDailyLogStatus,
+  createdBy: db.created_by ?? null,
+  openedAt: db.opened_at ?? '',
+  closedAt: db.closed_at ?? '',
+  createdAt: db.created_at,
+  updatedAt: db.updated_at,
+  driver: db.drivers ? mapDriverToFrontend(db.drivers) : null,
+  vehicle: db.vehicles ? mapVehicleToFrontend(db.vehicles) : null,
+  runs: Array.isArray(db.delivery_runs) ? db.delivery_runs.map(mapDeliveryRunToFrontend) : [],
 });
 
 async function getCurrentAuthUserId() {
@@ -3891,8 +4038,10 @@ function mapDeliveryTicketPatchToDB(patch: any) {
   if ('status' in patch) out.status = patch.status;
   if ('stopSequence' in patch) out.stop_sequence = patch.stopSequence;
   if ('estimatedArrivalTime' in patch) out.estimated_arrival_time = patch.estimatedArrivalTime || null;
+  if ('arrivedAt' in patch) out.arrived_at = patch.arrivedAt || null;
   if ('deliveredAt' in patch) out.delivered_at = patch.deliveredAt || null;
   if ('receivedBy' in patch) out.received_by = patch.receivedBy ?? '';
+  if ('deliveryNotes' in patch) out.delivery_notes = patch.deliveryNotes ?? '';
   if ('notes' in patch) out.notes = patch.notes ?? '';
   return out;
 }
@@ -3905,8 +4054,14 @@ function mapDeliveryRunPatchToDB(patch: any) {
   if ('status' in patch) out.status = patch.status;
   if ('estimatedDistanceKm' in patch) out.estimated_distance_km = Number(patch.estimatedDistanceKm ?? 0);
   if ('estimatedDurationMinutes' in patch) out.estimated_duration_minutes = Number(patch.estimatedDurationMinutes ?? 0);
+  if ('actualDistanceKm' in patch) out.actual_distance_km = Number(patch.actualDistanceKm ?? 0);
+  if ('actualDurationMinutes' in patch) out.actual_duration_minutes = Number(patch.actualDurationMinutes ?? 0);
   if ('actualStartTime' in patch) out.actual_start_time = patch.actualStartTime || null;
   if ('actualEndTime' in patch) out.actual_end_time = patch.actualEndTime || null;
+  if ('startLocationName' in patch) out.start_location_name = patch.startLocationName ?? '';
+  if ('startAddress' in patch) out.start_address = patch.startAddress ?? '';
+  if ('odometerStartKm' in patch) out.odometer_start_km = patch.odometerStartKm == null || patch.odometerStartKm === '' ? null : Number(patch.odometerStartKm);
+  if ('odometerEndKm' in patch) out.odometer_end_km = patch.odometerEndKm == null || patch.odometerEndKm === '' ? null : Number(patch.odometerEndKm);
   if ('notes' in patch) out.notes = patch.notes ?? '';
   return out;
 }
@@ -3914,7 +4069,7 @@ function mapDeliveryRunPatchToDB(patch: any) {
 export async function getDeliveryTickets(filters: { status?: string; locationId?: string; fromDate?: string; toDate?: string } = {}) {
   let query = supabase
     .from('delivery_tickets')
-    .select('*, delivery_runs(run_number, run_date, status, drivers(name), vehicles(vehicle_name, plate_number)), delivery_ticket_items(*)')
+    .select('*, delivery_runs(*, drivers(*), vehicles(*)), delivery_ticket_items(*)')
     .order('created_at', { ascending: false });
   if (filters.status && filters.status !== 'all') query = query.eq('status', filters.status);
   if (filters.locationId && filters.locationId !== 'all') query = query.eq('location_id', filters.locationId);
@@ -3931,7 +4086,7 @@ export async function getDeliveryTickets(filters: { status?: string; locationId?
 export async function getDeliveryTicketById(id: string) {
   const { data, error } = await supabase
     .from('delivery_tickets')
-    .select('*, delivery_runs(run_number, run_date, status, drivers(name), vehicles(vehicle_name, plate_number)), delivery_ticket_items(*)')
+    .select('*, delivery_runs(*, drivers(*), vehicles(*)), delivery_ticket_items(*)')
     .eq('id', id)
     .single();
   if (error) return { success: false, error };
@@ -4161,6 +4316,261 @@ export async function reorderDeliveryRunStops(runId: string, orderedTicketIds: s
   const failed = results.find((res) => res.error);
   if (failed?.error) return { success: false, error: failed.error };
   return { success: true };
+}
+
+export async function startDeliveryRun(runId: string, payload: { odometerStartKm?: number | string; startLocationName?: string; startAddress?: string } = {}) {
+  const now = new Date().toISOString();
+  const patch: any = {
+    status: 'in_progress',
+    actualStartTime: now,
+    startLocationName: payload.startLocationName ?? '',
+    startAddress: payload.startAddress ?? '',
+  };
+  if (payload.odometerStartKm !== undefined && payload.odometerStartKm !== '') {
+    patch.odometerStartKm = Number(payload.odometerStartKm);
+  }
+  const runRes = await updateDeliveryRun(runId, patch);
+  if (!runRes.success) return runRes;
+
+  const { error } = await supabase
+    .from('delivery_tickets')
+    .update({ status: 'out_for_delivery' })
+    .eq('delivery_run_id', runId)
+    .in('status', ['draft', 'assigned', 'loaded']);
+  if (error) return { success: false, error };
+  return getDeliveryRunById(runId);
+}
+
+export async function completeDeliveryRun(runId: string, payload: { odometerEndKm?: number | string } = {}) {
+  const runRes = await getDeliveryRunById(runId);
+  if (!runRes.success) return runRes;
+  const run = runRes.data;
+  const incomplete = (run.tickets ?? []).some((ticket: any) => !['delivered', 'issue_reported', 'cancelled'].includes(ticket.status));
+  if (incomplete) return { success: false, error: { message: 'All tickets must be delivered, issue reported, or cancelled before completing the run.' } };
+
+  const odometerStart = run.odometerStartKm != null ? Number(run.odometerStartKm) : null;
+  const odometerEnd = payload.odometerEndKm !== undefined && payload.odometerEndKm !== '' ? Number(payload.odometerEndKm) : run.odometerEndKm;
+  if (odometerStart != null && odometerEnd != null && Number(odometerEnd) < odometerStart) {
+    return { success: false, error: { message: 'Ending odometer cannot be less than starting odometer.' } };
+  }
+
+  const now = new Date();
+  const started = run.actualStartTime ? new Date(run.actualStartTime) : now;
+  const actualDurationMinutes = Math.max(0, Math.round((now.getTime() - started.getTime()) / 60000));
+  const actualDistanceKm = odometerStart != null && odometerEnd != null
+    ? Math.max(0, Number(odometerEnd) - odometerStart)
+    : Number(run.actualDistanceKm ?? 0);
+
+  return updateDeliveryRun(runId, {
+    status: 'completed',
+    actualEndTime: now.toISOString(),
+    odometerEndKm: odometerEnd,
+    actualDistanceKm,
+    actualDurationMinutes,
+  });
+}
+
+export async function updateDeliveryRunOdometer(runId: string, startKm: number | null, endKm: number | null) {
+  const actualDistanceKm = startKm != null && endKm != null ? Math.max(0, Number(endKm) - Number(startKm)) : 0;
+  return updateDeliveryRun(runId, { odometerStartKm: startKm, odometerEndKm: endKm, actualDistanceKm });
+}
+
+export async function calculateDeliveryRunActuals(runId: string) {
+  const res = await getDeliveryRunById(runId);
+  if (!res.success) return res;
+  const run = res.data;
+  const start = run.actualStartTime ? new Date(run.actualStartTime) : null;
+  const end = run.actualEndTime ? new Date(run.actualEndTime) : null;
+  const actualDurationMinutes = start && end ? Math.max(0, Math.round((end.getTime() - start.getTime()) / 60000)) : Number(run.actualDurationMinutes ?? 0);
+  const actualDistanceKm = run.odometerStartKm != null && run.odometerEndKm != null
+    ? Math.max(0, Number(run.odometerEndKm) - Number(run.odometerStartKm))
+    : Number(run.actualDistanceKm ?? 0);
+  return updateDeliveryRun(runId, { actualDurationMinutes, actualDistanceKm });
+}
+
+export async function markDeliveryTicketArrived(ticketId: string) {
+  return updateDeliveryTicket(ticketId, {
+    arrivedAt: new Date().toISOString(),
+    status: 'out_for_delivery',
+  });
+}
+
+export async function reportDeliveryTicketIssue(ticketId: string, payload: { items: any[]; deliveryNotes?: string; receivedBy?: string }) {
+  const itemRes = await updateDeliveryTicketItems(ticketId, payload.items);
+  if (!itemRes.success) return itemRes;
+  return updateDeliveryTicket(ticketId, {
+    status: 'issue_reported',
+    deliveryNotes: payload.deliveryNotes ?? '',
+    receivedBy: payload.receivedBy ?? '',
+    deliveredAt: new Date().toISOString(),
+  });
+}
+
+export async function updateDeliveryTicketStopSequence(ticketId: string, sequence: number) {
+  return updateDeliveryTicket(ticketId, { stopSequence: sequence });
+}
+
+export async function getVehicleDailyLogs(filters: { vehicleId?: string; driverId?: string; status?: string; date?: string } = {}) {
+  let query = supabase
+    .from('vehicle_daily_logs')
+    .select('*, drivers(*), vehicles(*)')
+    .order('log_date', { ascending: false })
+    .order('created_at', { ascending: false });
+  if (filters.vehicleId) query = query.eq('vehicle_id', filters.vehicleId);
+  if (filters.driverId) query = query.eq('driver_id', filters.driverId);
+  if (filters.status && filters.status !== 'all') query = query.eq('status', filters.status);
+  if (filters.date) query = query.eq('log_date', filters.date);
+  const { data, error } = await query;
+  if (error) {
+    console.error('getVehicleDailyLogs:', error);
+    return [];
+  }
+  return (data ?? []).map(mapVehicleDailyLogToFrontend);
+}
+
+export async function getVehicleDailyLogById(id: string) {
+  const { data, error } = await supabase
+    .from('vehicle_daily_logs')
+    .select('*, drivers(*), vehicles(*)')
+    .eq('id', id)
+    .single();
+  if (error) return { success: false, error };
+  const log = mapVehicleDailyLogToFrontend(data);
+  const runsRes = await getDeliveryRuns({ runDate: log.logDate });
+  log.runs = runsRes.filter((run: any) => run.vehicleId === log.vehicleId);
+  return { success: true, data: log };
+}
+
+export async function getVehicleDailyLogByVehicleDate(vehicleId: string, date: string) {
+  const { data, error } = await supabase
+    .from('vehicle_daily_logs')
+    .select('*, drivers(*), vehicles(*)')
+    .eq('vehicle_id', vehicleId)
+    .eq('log_date', date)
+    .maybeSingle();
+  if (error) return { success: false, error };
+  return { success: true, data: data ? mapVehicleDailyLogToFrontend(data) : null };
+}
+
+export async function createVehicleDailyLog(payload: any) {
+  const userId = await getCurrentAuthUserId();
+  const { data, error } = await supabase
+    .from('vehicle_daily_logs')
+    .insert({
+      vehicle_id: payload.vehicleId,
+      log_date: payload.logDate,
+      driver_id: payload.driverId || null,
+      odometer_start_km: Number(payload.odometerStartKm ?? 0),
+      fuel_start_level: payload.fuelStartLevel ?? '',
+      start_condition_notes: payload.startConditionNotes ?? '',
+      status: 'open',
+      created_by: userId,
+      opened_at: new Date().toISOString(),
+    })
+    .select('*, drivers(*), vehicles(*)')
+    .single();
+  if (error) return { success: false, error };
+  return { success: true, data: mapVehicleDailyLogToFrontend(data) };
+}
+
+export async function updateVehicleDailyLog(id: string, patch: any) {
+  const payload: any = {};
+  if ('driverId' in patch) payload.driver_id = patch.driverId || null;
+  if ('odometerStartKm' in patch) payload.odometer_start_km = Number(patch.odometerStartKm ?? 0);
+  if ('odometerEndKm' in patch) payload.odometer_end_km = patch.odometerEndKm === '' || patch.odometerEndKm == null ? null : Number(patch.odometerEndKm);
+  if ('totalOdometerKm' in patch) payload.total_odometer_km = patch.totalOdometerKm == null ? null : Number(patch.totalOdometerKm);
+  if ('totalRunKm' in patch) payload.total_run_km = patch.totalRunKm == null ? null : Number(patch.totalRunKm);
+  if ('varianceKm' in patch) payload.variance_km = patch.varianceKm == null ? null : Number(patch.varianceKm);
+  if ('fuelStartLevel' in patch) payload.fuel_start_level = patch.fuelStartLevel ?? '';
+  if ('fuelEndLevel' in patch) payload.fuel_end_level = patch.fuelEndLevel ?? '';
+  if ('startConditionNotes' in patch) payload.start_condition_notes = patch.startConditionNotes ?? '';
+  if ('endConditionNotes' in patch) payload.end_condition_notes = patch.endConditionNotes ?? '';
+  if ('damageReported' in patch) payload.damage_reported = Boolean(patch.damageReported);
+  if ('damageNotes' in patch) payload.damage_notes = patch.damageNotes ?? '';
+  if ('status' in patch) payload.status = patch.status;
+  if ('closedAt' in patch) payload.closed_at = patch.closedAt || null;
+  const { data, error } = await supabase.from('vehicle_daily_logs').update(payload).eq('id', id).select('*, drivers(*), vehicles(*)').single();
+  if (error) return { success: false, error };
+  return { success: true, data: mapVehicleDailyLogToFrontend(data) };
+}
+
+export async function calculateVehicleDailyLogVariance(vehicleId: string, date: string, odometerStartKm?: number, odometerEndKm?: number) {
+  const runs = (await getDeliveryRuns({ runDate: date })).filter((run: any) => run.vehicleId === vehicleId);
+  const totalRunKm = runs.reduce((sum: number, run: any) => sum + Number(run.actualDistanceKm ?? 0), 0);
+  const totalOdometerKm = odometerStartKm != null && odometerEndKm != null
+    ? Math.max(0, Number(odometerEndKm) - Number(odometerStartKm))
+    : null;
+  return {
+    totalRunKm,
+    totalOdometerKm,
+    varianceKm: totalOdometerKm != null ? totalOdometerKm - totalRunKm : null,
+    runs,
+  };
+}
+
+export async function closeVehicleDailyLog(id: string, payload: any) {
+  const current = await getVehicleDailyLogById(id);
+  if (!current.success) return current;
+  const log = current.data;
+  const odometerEndKm = Number(payload.odometerEndKm ?? log.odometerEndKm ?? 0);
+  if (odometerEndKm < Number(log.odometerStartKm ?? 0)) {
+    return { success: false, error: { message: 'Ending odometer cannot be less than starting odometer.' } };
+  }
+  const totals = await calculateVehicleDailyLogVariance(log.vehicleId, log.logDate, Number(log.odometerStartKm), odometerEndKm);
+  return updateVehicleDailyLog(id, {
+    odometerEndKm,
+    totalOdometerKm: totals.totalOdometerKm,
+    totalRunKm: totals.totalRunKm,
+    varianceKm: totals.varianceKm,
+    fuelEndLevel: payload.fuelEndLevel ?? '',
+    endConditionNotes: payload.endConditionNotes ?? '',
+    damageReported: payload.damageReported ?? false,
+    damageNotes: payload.damageNotes ?? '',
+    status: 'closed',
+    closedAt: new Date().toISOString(),
+  });
+}
+
+export async function getVehicleDailyLogReport(id: string) {
+  return getVehicleDailyLogById(id);
+}
+
+export async function getDeliveryRunReport(runId: string) {
+  const runRes = await getDeliveryRunById(runId);
+  if (!runRes.success) return runRes;
+  const run = runRes.data;
+  const vehicleLog = run.vehicleId ? await getVehicleDailyLogByVehicleDate(run.vehicleId, run.runDate) : { success: true, data: null };
+  const vehicleTotals = run.vehicleId
+    ? await calculateVehicleDailyLogVariance(run.vehicleId, run.runDate, vehicleLog.data?.odometerStartKm, vehicleLog.data?.odometerEndKm)
+    : { totalRunKm: 0, totalOdometerKm: null, varianceKm: null, runs: [] };
+  return {
+    success: true,
+    data: {
+      run,
+      vehicleDailyLog: vehicleLog.success ? vehicleLog.data : null,
+      vehicleTotals,
+      totals: {
+        stops: (run.tickets ?? []).length,
+        tickets: (run.tickets ?? []).length,
+        itemLines: (run.tickets ?? []).reduce((sum: number, ticket: any) => sum + (ticket.items?.length ?? 0), 0),
+        shippedQty: (run.tickets ?? []).reduce((sum: number, ticket: any) => sum + (ticket.items ?? []).reduce((s: number, item: any) => s + Number(item.shippedQty ?? 0), 0), 0),
+        deliveredQty: (run.tickets ?? []).reduce((sum: number, ticket: any) => sum + (ticket.items ?? []).reduce((s: number, item: any) => s + Number(item.deliveredQty ?? 0), 0), 0),
+        issueQty: (run.tickets ?? []).reduce((sum: number, ticket: any) => sum + (ticket.items ?? []).reduce((s: number, item: any) => s + Number(item.issueQty ?? 0), 0), 0),
+        estimatedKm: Number(run.estimatedDistanceKm ?? 0),
+        actualKm: Number(run.actualDistanceKm ?? 0),
+        estimatedMinutes: Number(run.estimatedDurationMinutes ?? 0),
+        actualMinutes: Number(run.actualDurationMinutes ?? 0),
+      },
+    },
+  };
+}
+
+export async function estimateDeliveryRunRoute(_runId: string) {
+  return { success: true, data: null, message: 'Route estimate unavailable. Enter km/minutes manually.' };
+}
+
+export async function estimateRouteFromStops(_startAddress: string, _stops: string[]) {
+  return { success: true, data: null, message: 'Route estimate unavailable. Enter km/minutes manually.' };
 }
 
 export async function getDrivers() {
@@ -5303,7 +5713,57 @@ export async function loadOutletCatalog(all: boolean = false): Promise<OutletCat
     console.error('[loadOutletCatalog] error:', error);
     return [];
   }
-  return (data ?? []).map(mapCatalogItem);
+  
+  if (!Array.isArray(data)) return [];
+
+  try {
+    const { data: authData } = await supabase.auth.getUser();
+    const user = authData?.user;
+    if (user) {
+      const { data: profile } = await supabase
+        .from('user_profiles')
+        .select('role, location_id')
+        .eq('user_id', user.id)
+        .single();
+      
+      if (profile) {
+        const role = (profile.role ?? '').toLowerCase().trim();
+        const isHq = role === 'hq_admin' || role === 'hq admin' || role === 'admin';
+        const isLocMgr = role === 'location_manager' || role === 'location manager';
+        const locationId = profile.location_id;
+
+        if (!isHq && isLocMgr && locationId) {
+          // Fetch finished goods visibility modes
+          const { data: fgs } = await supabase
+            .from('hq_sale_items')
+            .select('id, location_availability_mode');
+          
+          const { data: availRows } = await supabase
+            .from('finished_good_location_availability')
+            .select('finished_good_id, is_available')
+            .eq('location_id', locationId)
+            .eq('is_available', true);
+          
+          const allowedFgIds = new Set(availRows?.map(r => r.finished_good_id) || []);
+          const fgModes = new Map(fgs?.map(f => [f.id, f.location_availability_mode ?? 'all']) || []);
+
+          const mapped = data.map(mapCatalogItem);
+          const filtered = mapped.filter(c => {
+            if (!c.hqSaleItemId) return true; // not a finished good
+            const mode = fgModes.get(c.hqSaleItemId) ?? 'all';
+            if (mode === 'all') return true;
+            if (mode === 'selected') return allowedFgIds.has(c.hqSaleItemId);
+            return false; // hq_only
+          });
+          return filtered;
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[loadOutletCatalog] dynamic filtering failed:', err);
+  }
+
+  return data.map(mapCatalogItem);
 }
 
 /** HQ-only: upsert a catalog item */

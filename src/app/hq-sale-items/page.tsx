@@ -7,12 +7,14 @@ import { Drawer } from "@/components/ui/drawer";
 import {
   PackageCheck, Search, Plus, Edit2, ToggleLeft, ToggleRight,
   TrendingUp, AlertCircle, Loader2, ChevronRight, DollarSign, Factory,
-  CheckCircle2, XCircle, Layers, MapPin, Trash2, PlusCircle, Tag, Upload
+  CheckCircle2, XCircle, Layers, MapPin, Trash2, PlusCircle, Tag, Upload,
+  Users
 } from "lucide-react";
 import {
   loadSaleItems, upsertSaleItem, loadRecipes, loadLocations,
   loadFgLocationPricing, upsertFgLocationPricing, deleteFgLocationPricing,
   loadCategories, addCategory, convertYieldToBaseUnit,
+  loadFinishedGoodLocationAvailability, saveFinishedGoodLocationAvailability,
   type SaleItem, type FgLocationPricing
 } from "@/lib/storage";
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
@@ -219,7 +221,7 @@ function computeLiveCost(item: SaleItem, recipes: any[]): LiveCost {
 function HQSaleItemsContent() {
   const [items, setItems]       = useState<SaleItem[]>([]);
   const [recipes, setRecipes]   = useState<any[]>([]);
-  const [locations, setLocations] = useState<{ id: string; name: string }[]>([]);
+  const [locations, setLocations] = useState<{ id: string; name: string; type?: string }[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [search, setSearch]     = useState("");
   const [filterCategory, setFilterCategory] = useState("All");
@@ -264,6 +266,8 @@ function HQSaleItemsContent() {
   const [formActive, setFormActive]           = useState(true);
   const [formRequisitionable, setFormRequisitionable] = useState(true);
   const [formAvailabilityOverride, setFormAvailabilityOverride] = useState<SaleItem['availabilityOverride']>(null);
+  const [formAvailabilityMode, setFormAvailabilityMode] = useState<'all' | 'selected' | 'hq_only'>('all');
+  const [formSelectedLocations, setFormSelectedLocations] = useState<string[]>([]);
 
   // ── Load data ────────────────────────────────────────────────────────────────
   const fetchData = useCallback(async () => {
@@ -277,7 +281,7 @@ function HQSaleItemsContent() {
       setRecipes(Array.isArray(rec) ? rec : []);
       setLocations(
         Array.isArray(locs)
-          ? locs.filter((l: any) => !l.status || l.status === "active").map((l: any) => ({ id: l.id, name: l.name }))
+          ? locs.filter((l: any) => !l.status || l.status === "active").map((l: any) => ({ id: l.id, name: l.name, type: l.type }))
           : []
       );
       // DB categories — if empty (pre-migration), UI falls back to CATEGORY_OPTIONS
@@ -306,13 +310,15 @@ function HQSaleItemsContent() {
     setFormName(""); setFormCategory(""); setFormCommissary("Commissary HQ"); setFormDesc(""); setFormUnit("ea");
     setFormParLevel(0); setFormManualPrice(""); setFormRecipeId(""); setFormPackQty(1);
     setFormActive(true); setFormRequisitionable(true); setFormAvailabilityOverride(null);
+    setFormAvailabilityMode('all');
+    setFormSelectedLocations([]);
     setLocationPricing([]);
     setNewPricingLocId(""); setNewPricingPrice(""); setNewPricingNotes("");
     setSaveError(null); setPricingError(null);
     setIsDrawerOpen(true);
   };
 
-  const openEdit = (item: SaleItem) => {
+  const openEdit = async (item: SaleItem) => {
     setEditing(item);
     setFormName(item.name);
     setFormCategory(item.category ?? "");
@@ -326,10 +332,19 @@ function HQSaleItemsContent() {
     setFormActive(item.isActive);
     setFormRequisitionable(item.isRequisitionable);
     setFormAvailabilityOverride(item.availabilityOverride ?? null);
+    setFormAvailabilityMode(item.locationAvailabilityMode ?? 'all');
+    setFormSelectedLocations([]);
     setNewPricingLocId(""); setNewPricingPrice(""); setNewPricingNotes("");
     setSaveError(null); setPricingError(null);
     loadPricing(item.id);
     setIsDrawerOpen(true);
+
+    try {
+      const selected = await loadFinishedGoodLocationAvailability(item.id);
+      setFormSelectedLocations(selected);
+    } catch (err) {
+      console.error("[openEdit] Failed to load visibility mappings:", err);
+    }
   };
 
   // ── Add category inline ───────────────────────────────────────────────────────
@@ -404,6 +419,7 @@ function HQSaleItemsContent() {
         makingCost,
         manualPrice,
         packQty:              formPackQty > 0 ? formPackQty : 1,
+        locationAvailabilityMode: formAvailabilityMode,
         instock:              editing?.instock ?? 0,
         suggestedPrice:       0,
         effectivePrice:       0,
@@ -418,6 +434,19 @@ function HQSaleItemsContent() {
         setSaveError(res.error?.message ?? "Save failed.");
         return;
       }
+
+      // Save availability mapping table
+      const availabilityRes = await saveFinishedGoodLocationAvailability(
+        id,
+        formAvailabilityMode,
+        formSelectedLocations
+      );
+
+      if (!availabilityRes.success) {
+        setSaveError(availabilityRes.error?.message ?? "Failed to save location visibility settings.");
+        return;
+      }
+
       setIsDrawerOpen(false);
       await fetchData();
     } finally {
@@ -473,6 +502,18 @@ function HQSaleItemsContent() {
   // allCategories = DB-managed list (sort_order respected) UNION any legacy
   // category strings already on items but not yet in the categories table.
   // This keeps the filter backward-compatible with pre-migration data.
+  const activeSellableLocations = locations.filter(l => {
+    const type = (l.type ?? '').toLowerCase().trim();
+    return l.id !== 'LOC-HQ' && type !== 'hq' && type !== 'warehouse' && type !== 'internal';
+  });
+
+  const dropdownLocations = activeSellableLocations.filter(loc => {
+    if (formAvailabilityMode === 'selected') {
+      return formSelectedLocations.includes(loc.id);
+    }
+    return true;
+  });
+
   const legacyCats = items.map(i => i.category).filter(Boolean) as string[];
   const allCategories = Array.from(
     new Set([...(dbCategories.length > 0 ? dbCategories : CATEGORY_OPTIONS), ...legacyCats])
@@ -624,6 +665,7 @@ function HQSaleItemsContent() {
                 <TableHead className="py-3">Effective Pack Price</TableHead>
                 <TableHead className="py-3">Stock</TableHead>
                 <TableHead className="py-3">Status</TableHead>
+                <TableHead className="py-3">Visibility</TableHead>
                 <TableHead className="py-3 text-right px-6">Actions</TableHead>
               </TableRow>
             </TableHeader>
@@ -736,6 +778,30 @@ function HQSaleItemsContent() {
                           : <span className="text-xs text-neutral-400">Hidden from locations</span>}
                       </div>
                     </TableCell>
+                    <TableCell className="py-4">
+                      {(() => {
+                        const mode = item.locationAvailabilityMode ?? 'all';
+                        if (mode === 'all') {
+                          return (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                              All Locations
+                            </span>
+                          );
+                        } else if (mode === 'selected') {
+                          return (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200">
+                              Selected Locations
+                            </span>
+                          );
+                        } else {
+                          return (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-neutral-100 text-neutral-600 border border-neutral-300">
+                              HQ Only
+                            </span>
+                          );
+                        }
+                      })()}
+                    </TableCell>
                     <TableCell className="py-4 px-6 text-right">
                       <div className="flex items-center justify-end gap-2">
                         <button
@@ -757,7 +823,7 @@ function HQSaleItemsContent() {
                 );
               }) : (
                 <TableRow>
-                  <TableCell colSpan={11} className="text-center py-12 text-neutral-400 text-sm">
+                  <TableCell colSpan={12} className="text-center py-12 text-neutral-400 text-sm">
                     {search || filterCategory !== "All" || filterCommissary !== "All"
                       ? "No finished goods match your filters."
                       : "No finished goods yet. Create your first one to make it available for franchise locations to requisition."}
@@ -1140,6 +1206,76 @@ function HQSaleItemsContent() {
                 Controls the availability badge shown to outlet users. When set, overrides auto-calculated status. Outlets never see exact HQ stock quantities.
               </p>
             </div>
+
+            {/* Location Visibility Assignment */}
+            <div className="space-y-3 p-3 bg-neutral-50 border border-neutral-200 rounded-lg">
+              <label className="block text-xs font-semibold text-neutral-600 uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
+                <Users className="h-3.5 w-3.5 text-neutral-500" /> Location Visibility
+              </label>
+              <select
+                value={formAvailabilityMode}
+                onChange={(e) => {
+                  const mode = e.target.value as 'all' | 'selected' | 'hq_only';
+                  setFormAvailabilityMode(mode);
+                }}
+                className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-brand-500"
+              >
+                <option value="all">Available to all locations</option>
+                <option value="selected">Available to selected locations only</option>
+                <option value="hq_only">HQ only / not visible to locations</option>
+              </select>
+
+              {formAvailabilityMode === 'selected' && (
+                <div className="space-y-2 pt-2 border-t border-neutral-200">
+                  <div className="flex items-center justify-between text-xs mb-1">
+                    <span className="font-semibold text-neutral-500">Select Locations:</span>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setFormSelectedLocations(activeSellableLocations.map(l => l.id))}
+                        className="text-[10px] text-brand-600 hover:underline font-semibold"
+                      >
+                        Select All
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setFormSelectedLocations([])}
+                        className="text-[10px] text-neutral-500 hover:underline font-semibold"
+                      >
+                        Clear All
+                      </button>
+                    </div>
+                  </div>
+                  <div className="max-h-48 overflow-y-auto space-y-1.5 border border-neutral-200 rounded-md p-2 bg-white">
+                    {activeSellableLocations.map(loc => (
+                      <label key={loc.id} className="flex items-center gap-2 text-xs text-neutral-700 cursor-pointer hover:bg-neutral-50 p-1 rounded">
+                        <input
+                          type="checkbox"
+                          checked={formSelectedLocations.includes(loc.id)}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setFormSelectedLocations(prev => [...prev, loc.id]);
+                            } else {
+                              setFormSelectedLocations(prev => prev.filter(id => id !== loc.id));
+                            }
+                          }}
+                          className="rounded border-neutral-300 text-brand-600 focus:ring-brand-500 h-3.5 w-3.5"
+                        />
+                        <span>{loc.name} <span className="text-neutral-400 font-mono">({loc.id})</span></span>
+                      </label>
+                    ))}
+                    {activeSellableLocations.length === 0 && (
+                      <p className="text-xs text-neutral-400 text-center py-2">No active branch/sellable locations found.</p>
+                    )}
+                  </div>
+                </div>
+              )}
+              <p className="text-[11px] text-neutral-400 font-medium">
+                {formAvailabilityMode === 'all' && "This finished good is visible to all active franchise locations."}
+                {formAvailabilityMode === 'selected' && "This finished good is only visible to the checked locations."}
+                {formAvailabilityMode === 'hq_only' && "This finished good is hidden from all franchise locations (HQ only)."}
+              </p>
+            </div>
           </div>
 
           {/* Pricing info box for existing items — always recomputed from linked recipe */}
@@ -1267,25 +1403,30 @@ function HQSaleItemsContent() {
                   )}
 
                   {/* Add pricing row form */}
-                  <div className="bg-neutral-50 border border-neutral-200 rounded-lg p-3 space-y-3">
-                    <p className="text-xs font-semibold text-neutral-600 uppercase tracking-wider">Add / Update Location Price</p>
-                    {pricingError && (
-                      <div className="flex items-center gap-2 bg-danger-50 border border-danger-200 rounded px-2 py-1 text-xs text-danger-700">
-                        <AlertCircle className="h-3.5 w-3.5 shrink-0" />{pricingError}
-                      </div>
-                    )}
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <label className="text-[10px] font-semibold text-neutral-500 uppercase tracking-wider">Location</label>
-                        <select
-                          value={newPricingLocId}
-                          onChange={e => setNewPricingLocId(e.target.value)}
-                          className="w-full mt-1 px-2 py-1.5 text-sm border border-neutral-200 rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-brand-500"
-                        >
-                          <option value="">— Select —</option>
-                          {locations.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
-                        </select>
-                      </div>
+                  {formAvailabilityMode === 'hq_only' ? (
+                    <div className="bg-neutral-50 border border-neutral-200 border-dashed rounded-lg p-4 text-center">
+                      <p className="text-xs text-neutral-400">Location pricing is not applicable for HQ-only items.</p>
+                    </div>
+                  ) : (
+                    <div className="bg-neutral-50 border border-neutral-200 rounded-lg p-3 space-y-3">
+                      <p className="text-xs font-semibold text-neutral-600 uppercase tracking-wider">Add / Update Location Price</p>
+                      {pricingError && (
+                        <div className="flex items-center gap-2 bg-danger-50 border border-danger-200 rounded px-2 py-1 text-xs text-danger-700">
+                          <AlertCircle className="h-3.5 w-3.5 shrink-0" />{pricingError}
+                        </div>
+                      )}
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-[10px] font-semibold text-neutral-500 uppercase tracking-wider">Location</label>
+                          <select
+                            value={newPricingLocId}
+                            onChange={e => setNewPricingLocId(e.target.value)}
+                            className="w-full mt-1 px-2 py-1.5 text-sm border border-neutral-200 rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-brand-500"
+                          >
+                            <option value="">— Select —</option>
+                            {dropdownLocations.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+                          </select>
+                        </div>
                       <div>
                         <label className="text-[10px] font-semibold text-neutral-500 uppercase tracking-wider">Sales Price</label>
                         <div className="relative mt-1">
@@ -1336,6 +1477,7 @@ function HQSaleItemsContent() {
                       {isPricingSaving ? "Saving…" : "Save Location Price"}
                     </button>
                   </div>
+                )}
                 </>
               )}
             </div>
