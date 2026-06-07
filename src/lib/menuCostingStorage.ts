@@ -34,7 +34,9 @@ export interface MenuCostingComponent {
   createdAt: string | null;
 }
 
-function mapMenuCostingToFrontend(db: any): MenuCosting {
+// ── Mappers ──────────────────────────────────────────────────────────────────
+
+export function fromDbMenuCosting(db: any): MenuCosting {
   return {
     id: db.id,
     locationId: db.location_id,
@@ -50,7 +52,23 @@ function mapMenuCostingToFrontend(db: any): MenuCosting {
   };
 }
 
-function mapMenuCostingComponentToFrontend(db: any): MenuCostingComponent {
+export function toDbMenuCosting(fe: Partial<MenuCosting>): any {
+  const db: any = {};
+  if (fe.id !== undefined) db.id = fe.id;
+  if (fe.locationId !== undefined) db.location_id = fe.locationId;
+  if (fe.itemName !== undefined) db.item_name = fe.itemName;
+  if (fe.category !== undefined) db.category = fe.category;
+  if (fe.sellingPrice !== undefined) db.selling_price = fe.sellingPrice;
+  if (fe.targetFoodCostPercent !== undefined) db.target_food_cost_percent = fe.targetFoodCostPercent;
+  if (fe.status !== undefined) db.status = fe.status;
+  if (fe.notes !== undefined) db.notes = fe.notes;
+  if (fe.createdAt !== undefined) db.created_at = fe.createdAt;
+  if (fe.updatedAt !== undefined) db.updated_at = fe.updatedAt;
+  if (fe.createdBy !== undefined) db.created_by = fe.createdBy;
+  return db;
+}
+
+export function fromDbMenuCostingComponent(db: any): MenuCostingComponent {
   return {
     id: db.id,
     costingId: db.costing_id,
@@ -67,6 +85,25 @@ function mapMenuCostingComponentToFrontend(db: any): MenuCostingComponent {
   };
 }
 
+export function toDbMenuCostingComponent(fe: Partial<MenuCostingComponent>): any {
+  const db: any = {};
+  if (fe.id !== undefined) db.id = fe.id;
+  if (fe.costingId !== undefined) db.costing_id = fe.costingId;
+  if (fe.sourceType !== undefined) db.source_type = fe.sourceType;
+  if (fe.sourceItemId !== undefined) db.source_item_id = fe.sourceItemId;
+  if (fe.itemNameSnapshot !== undefined) db.item_name_snapshot = fe.itemNameSnapshot;
+  if (fe.componentType !== undefined) db.component_type = fe.componentType;
+  if (fe.qtyUsed !== undefined) db.qty_used = fe.qtyUsed;
+  if (fe.unit !== undefined) db.unit = fe.unit;
+  if (fe.unitCostSnapshot !== undefined) db.unit_cost_snapshot = fe.unitCostSnapshot;
+  if (fe.lineCost !== undefined) db.line_cost = fe.lineCost;
+  if (fe.sortOrder !== undefined) db.sort_order = fe.sortOrder;
+  if (fe.createdAt !== undefined) db.created_at = fe.createdAt;
+  return db;
+}
+
+// ── Database Queries ─────────────────────────────────────────────────────────
+
 export async function loadMenuCostings(locationId?: string): Promise<MenuCosting[]> {
   let query = supabase.from('outlet_menu_costings').select('*');
   if (locationId) {
@@ -77,7 +114,7 @@ export async function loadMenuCostings(locationId?: string): Promise<MenuCosting
     console.error('[loadMenuCostings] error:', error);
     return [];
   }
-  return (data ?? []).map(mapMenuCostingToFrontend);
+  return (data ?? []).map(fromDbMenuCosting);
 }
 
 export async function loadMenuCostingById(id: string): Promise<MenuCosting | null> {
@@ -102,8 +139,8 @@ export async function loadMenuCostingById(id: string): Promise<MenuCosting | nul
     console.error('[loadMenuCostingById] error fetching components:', err2);
   }
 
-  const result = mapMenuCostingToFrontend(costing);
-  result.components = (comps ?? []).map(mapMenuCostingComponentToFrontend);
+  const result = fromDbMenuCosting(costing);
+  result.components = (comps ?? []).map(fromDbMenuCostingComponent);
   return result;
 }
 
@@ -111,17 +148,11 @@ export async function saveMenuCosting(
   costing: Omit<MenuCosting, 'id' | 'createdAt' | 'updatedAt' | 'createdBy'>,
   components: Omit<MenuCostingComponent, 'id' | 'costingId' | 'createdAt'>[]
 ): Promise<{ success: boolean; id?: string; error?: string }> {
+  const dbCosting = toDbMenuCosting(costing);
+  
   const { data: newCosting, error: err1 } = await supabase
     .from('outlet_menu_costings')
-    .insert({
-      location_id: costing.locationId,
-      item_name: costing.itemName,
-      category: costing.category,
-      selling_price: costing.sellingPrice,
-      target_food_cost_percent: costing.targetFoodCostPercent,
-      status: costing.status,
-      notes: costing.notes,
-    })
+    .insert(dbCosting)
     .select('id')
     .single();
 
@@ -133,18 +164,14 @@ export async function saveMenuCosting(
   const costingId = newCosting.id;
 
   if (components.length > 0) {
-    const childRows = components.map((c, index) => ({
-      costing_id: costingId,
-      source_type: c.sourceType,
-      source_item_id: c.sourceItemId,
-      item_name_snapshot: c.itemNameSnapshot,
-      component_type: c.componentType,
-      qty_used: c.qtyUsed,
-      unit: c.unit,
-      unit_cost_snapshot: c.unitCostSnapshot,
-      line_cost: c.lineCost,
-      sort_order: c.sortOrder || index,
-    }));
+    const childRows = components.map((c, index) => {
+      const dbComp = toDbMenuCostingComponent(c);
+      dbComp.costing_id = costingId;
+      if (dbComp.sort_order === undefined) {
+        dbComp.sort_order = index;
+      }
+      return dbComp;
+    });
 
     const { error: err2 } = await supabase
       .from('outlet_menu_costing_components')
@@ -165,12 +192,12 @@ export async function updateMenuCosting(
   costing: Partial<Omit<MenuCosting, 'id' | 'createdAt' | 'updatedAt' | 'createdBy'>>,
   components: Omit<MenuCostingComponent, 'id' | 'costingId' | 'createdAt'>[]
 ): Promise<{ success: boolean; error?: string }> {
+  const dbCosting = toDbMenuCosting(costing);
+  dbCosting.updated_at = new Date().toISOString();
+
   const { error: err1 } = await supabase
     .from('outlet_menu_costings')
-    .update({
-      ...costing,
-      updated_at: new Date().toISOString(),
-    })
+    .update(dbCosting)
     .eq('id', id);
 
   if (err1) {
@@ -189,18 +216,14 @@ export async function updateMenuCosting(
   }
 
   if (components.length > 0) {
-    const childRows = components.map((c, index) => ({
-      costing_id: id,
-      source_type: c.sourceType,
-      source_item_id: c.sourceItemId,
-      item_name_snapshot: c.itemNameSnapshot,
-      component_type: c.componentType,
-      qty_used: c.qtyUsed,
-      unit: c.unit,
-      unit_cost_snapshot: c.unitCostSnapshot,
-      line_cost: c.lineCost,
-      sort_order: c.sortOrder || index,
-    }));
+    const childRows = components.map((c, index) => {
+      const dbComp = toDbMenuCostingComponent(c);
+      dbComp.costing_id = id;
+      if (dbComp.sort_order === undefined) {
+        dbComp.sort_order = index;
+      }
+      return dbComp;
+    });
 
     const { error: err3 } = await supabase
       .from('outlet_menu_costing_components')
