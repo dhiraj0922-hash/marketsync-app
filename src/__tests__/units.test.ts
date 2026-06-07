@@ -592,3 +592,79 @@ describe('Recipe ingredient replacement flow', () => {
     expect(round(cost, 4)).toBe(round(expectedItemB + expectedItemA, 4));
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 10. Requirement: Menu Costing / Flexible Recipe Conversions & Count Units
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('Menu Costing & Flexible Recipe Costing count units & weight/volume warning', () => {
+  test('pc recipe unit with case base unit converts using packQty', () => {
+    const invItem = {
+      name: 'Paper Cups',
+      cost: 150.00,
+      baseUnit: 'case',
+      unit: 'case',
+      purchaseCost: 150.00,
+      packQty: 150,
+      innerUnitSize: 1,
+      innerUnitUom: 'ea',
+    };
+
+    // Recipe uses 1 pc. Case contains 150 pc. Cost should be $1.00.
+    const result = computeIngredientLineCost(1, 'pc', invItem);
+    expect(result.ok).toBe(true);
+    expect(result.cost).toBe(1.00);
+    expect(result.normalizedQty).toBe(1 / 150);
+  });
+
+  test('case recipe unit with ea base unit converts using packQty', () => {
+    const invItem = {
+      name: 'Benne Dosa Box',
+      cost: 1.00,
+      baseUnit: 'ea',
+      unit: 'ea',
+      purchaseCost: 150.00,
+      packQty: 150,
+      innerUnitSize: 1,
+      innerUnitUom: 'ea',
+    };
+
+    // Recipe uses 1 case. Case contains 150 pc. Cost should be $150.00.
+    const result = computeIngredientLineCost(1, 'case', invItem);
+    expect(result.ok).toBe(true);
+    expect(result.cost).toBe(150.00);
+    expect(result.normalizedQty).toBe(150);
+  });
+
+  test('structured pack costing works when base unit is ea', () => {
+    const invItem = {
+      name: 'Burger Bun',
+      purchaseCost: 12.00,
+      packQty: 24,
+      innerUnitSize: 1,
+      innerUnitUom: 'ea',
+      baseUnit: 'ea',
+      unit: 'ea',
+    };
+
+    // Cost per bun = $12.00 / 24 = $0.50
+    const result = computeIngredientLineCost(2, 'ea', invItem);
+    expect(result.ok).toBe(true);
+    expect(result.cost).toBe(1.00);
+  });
+
+  test('weight-to-volume conversion throws custom setup warning', () => {
+    const invItem = {
+      name: 'Oil',
+      cost: 10.00,
+      baseUnit: 'L',
+      unit: 'L',
+    };
+
+    const result = computeIngredientLineCost(100, 'g', invItem);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain('Cannot convert weight to volume for this item without density/yield setup');
+    }
+  });
+});

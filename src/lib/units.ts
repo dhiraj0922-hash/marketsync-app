@@ -227,6 +227,7 @@ export function canonicalizeUnit(raw: string | null | undefined): string | null 
  * IMPORTANT: prefer convertQuantity() at call-sites that want a { qty, error }
  * result instead of a thrown exception.
  */
+
 export function normalizeUnit(qty: number, fromUnitRaw: string, toUnitRaw: string): number {
   if (qty === 0) return 0;
 
@@ -239,14 +240,19 @@ export function normalizeUnit(qty: number, fromUnitRaw: string, toUnitRaw: strin
   const toDef   = UNIT_FAMILIES[toCanon];
 
   if (!fromDef || !toDef || fromDef.family !== toDef.family) {
-    const hint =
-      !fromDef
-        ? `"${fromUnitRaw}" is not a recognised unit`
-        : !toDef
-        ? `"${toUnitRaw}" is not a recognised unit`
-        : `"${fromUnitRaw}" (${FAMILY_TO_DIMENSION[fromDef.family] ?? fromDef.family}) ` +
-          `cannot convert to "${toUnitRaw}" (${FAMILY_TO_DIMENSION[toDef.family] ?? toDef.family}) — ` +
-          `incompatible dimensions`;
+    const isWeightVolumeIncompatibility =
+      (fromDef?.family === 'mass' && toDef?.family === 'volume') ||
+      (fromDef?.family === 'volume' && toDef?.family === 'mass');
+
+    const hint = isWeightVolumeIncompatibility
+      ? `Cannot convert weight to volume for this item without density/yield setup — incompatible dimensions`
+      : !fromDef
+      ? `"${fromUnitRaw}" is not a recognised unit`
+      : !toDef
+      ? `"${toUnitRaw}" is not a recognised unit`
+      : `"${fromUnitRaw}" (${FAMILY_TO_DIMENSION[fromDef.family] ?? fromDef.family}) ` +
+        `cannot convert to "${toUnitRaw}" (${FAMILY_TO_DIMENSION[toDef.family] ?? toDef.family}) — ` +
+        `incompatible dimensions`;
     throw new Error(`Unit conversion error: ${hint}`);
   }
 
@@ -327,10 +333,37 @@ export function resolveEffectiveBaseUom(item: {
 // ─── 8. computeBaseUnitCostFromPack — Path 1 cost ────────────────────────────
 
 /**
+ * Helper to convert quantity from one unit to another, with count-to-pack
+ * awareness if one is an each/pc unit and the other is a pack/case unit.
+ */
+function convertQtyWithPackQty(
+  qty: number,
+  fromUnitRaw: string,
+  toUnitRaw: string,
+  packQty: number | null | undefined,
+): number {
+  const fromCanon = canonicalizeUnit(fromUnitRaw);
+  const toCanon   = canonicalizeUnit(toUnitRaw);
+
+  const isFromEach = fromCanon === 'ea';
+  const isToEach   = toCanon === 'ea';
+  const isFromPack = ['case', 'box', 'pack', 'bag', 'bottle', 'can'].includes(fromCanon || '');
+  const isToPack   = ['case', 'box', 'pack', 'bag', 'bottle', 'can'].includes(toCanon || '');
+
+  if (isFromEach && isToPack && packQty && packQty > 0) {
+    return qty / packQty;
+  }
+  if (isFromPack && isToEach && packQty && packQty > 0) {
+    return qty * packQty;
+  }
+  return normalizeUnit(qty, fromUnitRaw, toUnitRaw);
+}
+
+/**
  * Compute cost per base unit from the structured pack fields (read-time only).
  *
  * Formula:
- *   totalBaseUnits = normalizeUnit(packQty × innerUnitSize, innerUnitUom → baseUom)
+ *   totalBaseUnits = convertQtyWithPackQty(packQty × innerUnitSize, innerUnitUom → baseUom, packQty)
  *   costPerBaseUnit = purchaseCost / totalBaseUnits
  *
  * Returns null if any required field is missing/zero or units are incompatible.
@@ -356,11 +389,11 @@ export function computeBaseUnitCostFromPack(item: {
   ) return null;
 
   const baseUom = resolveEffectiveBaseUom(item);
-  if (!baseUom || baseUom === 'ea') return null;
+  if (!baseUom) return null;
 
   try {
     const totalInnerQty  = packQty * innerUnitSize;
-    const totalBaseUnits = normalizeUnit(totalInnerQty, innerUnitUom, baseUom);
+    const totalBaseUnits = convertQtyWithPackQty(totalInnerQty, innerUnitUom, baseUom, packQty);
     if (totalBaseUnits <= 0) return null;
     return purchaseCost / totalBaseUnits;
   } catch {
@@ -490,7 +523,7 @@ const resolveBaseQtyPerPurchaseUnit = (
   ) {
     try {
       const totalInnerQty = invItem.packQty * invItem.innerUnitSize;
-      const converted = normalizeUnit(totalInnerQty, invItem.innerUnitUom, baseUnit);
+      const converted = convertQtyWithPackQty(totalInnerQty, invItem.innerUnitUom, baseUnit, invItem.packQty);
       if (converted > 0) return converted;
     } catch { /* fallback below */ }
   }
@@ -584,24 +617,42 @@ export function computeIngredientLineCost(
   // Measurement units win when compatible. Purchase-pack conversion is used
   // only when the recipe unit exactly matches a purchase unit label.
   let normalizedQty: number | null = null;
-  const convResult = convertQuantity(recipeQty, recipeUnit, baseUnit);
-  const conversionError = convResult.ok ? '' : convResult.error;
-  if (convResult.ok) {
-    normalizedQty = convResult.qty!;
-    // Only override to 'direct_base_unit' when cost came from Path 3 (no purchase pack).
-    // Path 1 and 2 costs are derived from purchase pack pricing — preserve their label
-    // even when recipe unit happens to equal the base unit.
-    if (normalizeCostUnitLabel(recipeUnit) === normalizeCostUnitLabel(baseUnit) && costPath === 3) {
-      costPathLabel = 'direct_base_unit';
-    } else if (costPathLabel === 'fallback_cost' && normalizeCostUnitLabel(recipeUnit) !== normalizeCostUnitLabel(baseUnit)) {
-      costPathLabel = 'measurement_unit_conversion';
-    }
+  let conversionError = '';
+
+  const recipeCanon = canonicalizeUnit(recipeUnit);
+  const baseCanon = canonicalizeUnit(baseUnit);
+
+  const isRecipeEach = recipeCanon === 'ea';
+  const isBaseEach = baseCanon === 'ea';
+  const isRecipePack = ['case', 'box', 'pack', 'bag', 'bottle', 'can'].includes(recipeCanon || '');
+  const isBasePack = ['case', 'box', 'pack', 'bag', 'bottle', 'can'].includes(baseCanon || '');
+
+  if (isRecipeEach && isBasePack && invItem.packQty && invItem.packQty > 0) {
+    normalizedQty = recipeQty / invItem.packQty;
+    costPathLabel = 'measurement_unit_conversion';
+  } else if (isRecipePack && isBaseEach && invItem.packQty && invItem.packQty > 0) {
+    normalizedQty = recipeQty * invItem.packQty;
+    costPathLabel = 'measurement_unit_conversion';
   } else {
-    const purchaseMatch = findExactPurchaseUnitMatch(recipeUnit, invItem);
-    const packConversion = baseQtyPerPurchUnit ?? purchaseMatch?.conversion ?? null;
-    if (purchaseMatch && packConversion && packConversion > 0) {
-      normalizedQty = recipeQty * packConversion;
-      costPathLabel = 'purchase_unit_conversion';
+    const convResult = convertQuantity(recipeQty, recipeUnit, baseUnit);
+    conversionError = convResult.ok ? '' : convResult.error;
+    if (convResult.ok) {
+      normalizedQty = convResult.qty!;
+      // Only override to 'direct_base_unit' when cost came from Path 3 (no purchase pack).
+      // Path 1 and 2 costs are derived from purchase pack pricing — preserve their label
+      // even when recipe unit happens to equal the base unit.
+      if (normalizeCostUnitLabel(recipeUnit) === normalizeCostUnitLabel(baseUnit) && costPath === 3) {
+        costPathLabel = 'direct_base_unit';
+      } else if (costPathLabel === 'fallback_cost' && normalizeCostUnitLabel(recipeUnit) !== normalizeCostUnitLabel(baseUnit)) {
+        costPathLabel = 'measurement_unit_conversion';
+      }
+    } else {
+      const purchaseMatch = findExactPurchaseUnitMatch(recipeUnit, invItem);
+      const packConversion = baseQtyPerPurchUnit ?? purchaseMatch?.conversion ?? null;
+      if (purchaseMatch && packConversion && packConversion > 0) {
+        normalizedQty = recipeQty * packConversion;
+        costPathLabel = 'purchase_unit_conversion';
+      }
     }
   }
 

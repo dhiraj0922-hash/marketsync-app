@@ -105,7 +105,10 @@ export function toDbMenuCostingComponent(fe: Partial<MenuCostingComponent>): any
 // ── Database Queries ─────────────────────────────────────────────────────────
 
 export async function loadMenuCostings(locationId?: string): Promise<MenuCosting[]> {
-  let query = supabase.from('outlet_menu_costings').select('*');
+  let query = supabase.from('outlet_menu_costings').select(`
+    *,
+    components:outlet_menu_costing_components(*)
+  `);
   if (locationId) {
     query = query.eq('location_id', locationId);
   }
@@ -114,7 +117,11 @@ export async function loadMenuCostings(locationId?: string): Promise<MenuCosting
     console.error('[loadMenuCostings] error:', error);
     return [];
   }
-  return (data ?? []).map(fromDbMenuCosting);
+  return (data ?? []).map(row => {
+    const costing = fromDbMenuCosting(row);
+    costing.components = (row.components ?? []).map(fromDbMenuCostingComponent);
+    return costing;
+  });
 }
 
 export async function loadMenuCostingById(id: string): Promise<MenuCosting | null> {

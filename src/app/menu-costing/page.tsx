@@ -22,7 +22,7 @@ import {
   MenuCosting,
   MenuCostingComponent,
 } from "@/lib/menuCostingStorage";
-import { computeIngredientLineCost } from "@/lib/units";
+import { computeIngredientLineCost, computeBaseUnitCostFromPack } from "@/lib/units";
 import {
   Plus,
   Edit2,
@@ -147,6 +147,7 @@ export default function MenuCostingPage() {
       const o = map.get(c.itemId);
       const effectivePrice = o?.localPrice != null && o.localPrice > 0 ? o.localPrice : c.price;
       return {
+        ...c,
         itemId: c.itemId,
         name: c.name,
         category: c.category || "General",
@@ -157,7 +158,7 @@ export default function MenuCostingPage() {
   }, [catalogItems, inventoryRows]);
 
   // ── Autocomplete Filtering Options ────────
-  const getItemSuggestions = (sourceType: "finished_good" | "inventory_item", searchStr: string) => {
+  const getItemSuggestions = useCallback((sourceType: "finished_good" | "inventory_item", searchStr: string) => {
     const query = (searchStr ?? "").toLowerCase().trim();
     if (sourceType === "finished_good") {
       return saleItems
@@ -168,49 +169,10 @@ export default function MenuCostingPage() {
         .filter((item) => !query || item.name.toLowerCase().includes(query) || item.itemId.toLowerCase().includes(query))
         .slice(0, 10);
     }
-  };
-
-  // ── Cost Summary Calculations ─────────────
-  const totals = useMemo(() => {
-    let total_finished_good_cost = 0;
-    let total_inventory_cost = 0;
-    let total_packaging_cost = 0;
-
-    formComponents.forEach((comp) => {
-      if (comp.sourceType === "finished_good") {
-        total_finished_good_cost += comp.lineCost;
-      } else {
-        if (comp.componentType === "packaging") {
-          total_packaging_cost += comp.lineCost;
-        } else {
-          total_inventory_cost += comp.lineCost;
-        }
-      }
-    });
-
-    const total_recipe_cost = total_finished_good_cost + total_inventory_cost + total_packaging_cost;
-    const selling_price = formSellingPrice;
-    const food_cost_percent = selling_price > 0 ? (total_recipe_cost / selling_price) * 100 : 0;
-    const gross_profit = selling_price - total_recipe_cost;
-    const gross_margin_percent = selling_price > 0 ? (gross_profit / selling_price) * 100 : 0;
-
-    return {
-      total_finished_good_cost,
-      total_inventory_cost,
-      total_packaging_cost,
-      total_recipe_cost,
-      selling_price,
-      food_cost_percent,
-      gross_profit,
-      gross_margin_percent,
-      suggested_price_25: total_recipe_cost / 0.25,
-      suggested_price_30: total_recipe_cost / 0.30,
-      suggested_price_35: total_recipe_cost / 0.35,
-    };
-  }, [formComponents, formSellingPrice]);
+  }, [saleItems, inventoryItemsMerged]);
 
   // ── Calculate Line Cost ───────────────────
-  const calculateComponentCost = (
+  const calculateComponentCost = useCallback((
     sourceType: "finished_good" | "inventory_item",
     itemId: string,
     qty: number,
@@ -226,6 +188,7 @@ export default function MenuCostingPage() {
 
       // Build target object for computeIngredientLineCost
       const invItemObj = {
+        ...fg,
         name: fg.name,
         cost: fg.effectivePrice,
         baseUnit: fg.baseUnit,
@@ -243,6 +206,7 @@ export default function MenuCostingPage() {
       if (!inv) return { lineCost: 0, unitCost: 0, error: "Item not found" };
 
       const invItemObj = {
+        ...inv,
         name: inv.name,
         cost: inv.effectivePrice,
         baseUnit: inv.uom,
@@ -256,7 +220,75 @@ export default function MenuCostingPage() {
         return { lineCost: 0, unitCost: 0, error: result.error };
       }
     }
-  };
+  }, [saleItems, inventoryItemsMerged]);
+
+  // ── Unified Costing Totals with Validation ──
+  const getCostingTotalsWithValidation = useCallback((
+    components: Omit<MenuCostingComponent, "id" | "costingId" | "createdAt">[],
+    sellingPrice: number
+  ) => {
+    let total_finished_good_cost = 0;
+    let total_inventory_cost = 0;
+    let total_packaging_cost = 0;
+    let hasConversionError = false;
+
+    components.forEach((comp) => {
+      const { lineCost, error } = calculateComponentCost(
+        comp.sourceType,
+        comp.sourceItemId,
+        comp.qtyUsed,
+        comp.unit || ""
+      );
+
+      if (error) {
+        hasConversionError = true;
+      }
+
+      const effectiveLineCost = error ? 0 : (lineCost || comp.lineCost || 0);
+
+      if (comp.sourceType === "finished_good") {
+        total_finished_good_cost += effectiveLineCost;
+      } else {
+        if (comp.componentType === "packaging") {
+          total_packaging_cost += effectiveLineCost;
+        } else {
+          total_inventory_cost += effectiveLineCost;
+        }
+      }
+    });
+
+    const total_recipe_cost = total_finished_good_cost + total_inventory_cost + total_packaging_cost;
+    const food_cost_percent = sellingPrice > 0 ? (total_recipe_cost / sellingPrice) * 100 : 0;
+    const gross_profit = sellingPrice - total_recipe_cost;
+    const gross_margin_percent = sellingPrice > 0 ? (gross_profit / sellingPrice) * 100 : 0;
+
+    const isIncomplete =
+      sellingPrice <= 0 ||
+      components.length === 0 ||
+      total_recipe_cost <= 0 ||
+      hasConversionError;
+
+    return {
+      total_finished_good_cost,
+      total_inventory_cost,
+      total_packaging_cost,
+      total_recipe_cost,
+      selling_price: sellingPrice,
+      food_cost_percent,
+      gross_profit,
+      gross_margin_percent,
+      suggested_price_25: total_recipe_cost / 0.25,
+      suggested_price_30: total_recipe_cost / 0.30,
+      suggested_price_35: total_recipe_cost / 0.35,
+      hasConversionError,
+      isIncomplete,
+    };
+  }, [calculateComponentCost]);
+
+  // ── Cost Summary Calculations ─────────────
+  const totals = useMemo(() => {
+    return getCostingTotalsWithValidation(formComponents, formSellingPrice);
+  }, [formComponents, formSellingPrice, getCostingTotalsWithValidation]);
 
   // ── Component Row Handlers ────────────────
   const addComponentRow = () => {
@@ -510,8 +542,8 @@ export default function MenuCostingPage() {
   }, [costings, searchQuery, categoryFilter]);
 
   // ── UI Helper Badges ───────────────────────
-  const getFoodCostBadge = (foodCostPct: number, sellingPrice: number) => {
-    if (sellingPrice <= 0 || foodCostPct <= 0) {
+  const getFoodCostBadge = (foodCostPct: number, isIncomplete: boolean) => {
+    if (isIncomplete) {
       return (
         <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-neutral-100 text-neutral-600">
           Incomplete
@@ -667,11 +699,8 @@ export default function MenuCostingPage() {
                 </thead>
                 <tbody className="divide-y divide-neutral-200">
                   {filteredCostings.map((item) => {
-                    // Quick totals for row
-                    const totalCost = item.components?.reduce((sum, c) => sum + (c.lineCost || 0), 0) || 0;
-                    const foodCostPct = item.sellingPrice > 0 ? (totalCost / item.sellingPrice) * 100 : 0;
-                    const profit = item.sellingPrice - totalCost;
-                    const margin = item.sellingPrice > 0 ? (profit / item.sellingPrice) * 100 : 0;
+                    // Quick totals for row using the unified cost engine
+                    const rowTotals = getCostingTotalsWithValidation(item.components || [], item.sellingPrice);
 
                     return (
                       <tr key={item.id} className="hover:bg-neutral-50/50 transition-colors text-sm text-neutral-700">
@@ -681,22 +710,22 @@ export default function MenuCostingPage() {
                           {item.sellingPrice > 0 ? `$${item.sellingPrice.toFixed(2)}` : "—"}
                         </td>
                         <td className="px-4 py-4 text-right font-mono text-neutral-600">
-                          {totalCost > 0 ? `$${totalCost.toFixed(2)}` : "—"}
+                          {!rowTotals.isIncomplete ? `$${rowTotals.total_recipe_cost.toFixed(2)}` : "—"}
                         </td>
-                        <td className="px-4 py-4 text-center">{getFoodCostBadge(foodCostPct, item.sellingPrice)}</td>
+                        <td className="px-4 py-4 text-center">{getFoodCostBadge(rowTotals.food_cost_percent, rowTotals.isIncomplete)}</td>
                         <td
                           className={`px-4 py-4 text-right font-mono ${
-                            profit < 0 ? "text-rose-600 font-bold" : "text-neutral-700"
+                            !rowTotals.isIncomplete && rowTotals.gross_profit < 0 ? "text-rose-600 font-bold" : "text-neutral-700"
                           }`}
                         >
-                          {item.sellingPrice > 0 ? `$${profit.toFixed(2)}` : "—"}
+                          {!rowTotals.isIncomplete ? `$${rowTotals.gross_profit.toFixed(2)}` : "—"}
                         </td>
                         <td
                           className={`px-4 py-4 text-right font-mono ${
-                            margin < 0 ? "text-rose-600 font-bold" : "text-neutral-500"
+                            !rowTotals.isIncomplete && rowTotals.gross_margin_percent < 0 ? "text-rose-600 font-bold" : "text-neutral-500"
                           }`}
                         >
-                          {item.sellingPrice > 0 ? `${margin.toFixed(1)}%` : "—"}
+                          {!rowTotals.isIncomplete ? `${rowTotals.gross_margin_percent.toFixed(1)}%` : "—"}
                         </td>
                         <td className="px-4 py-4 text-center">
                           <button
@@ -957,12 +986,34 @@ export default function MenuCostingPage() {
                   <div className="space-y-3">
                     {formComponents.map((comp, idx) => {
                       const suggestions = getItemSuggestions(comp.sourceType, rowSearchTerm[idx] || "");
-                      const { error: conversionError } = calculateComponentCost(
+                      const { lineCost, unitCost, error: conversionError } = calculateComponentCost(
                         comp.sourceType,
                         comp.sourceItemId,
                         comp.qtyUsed,
                         comp.unit || ""
                       );
+
+                      // Get base unit dynamically
+                      let baseUnit = "—";
+                      let baseUnitCostVal = 0;
+                      if (comp.sourceItemId) {
+                        if (comp.sourceType === "finished_good") {
+                          const fg = saleItems.find((s) => s.id === comp.sourceItemId);
+                          if (fg) {
+                            baseUnit = fg.baseUnit || "ea";
+                            baseUnitCostVal = fg.effectivePrice || 0;
+                          }
+                        } else {
+                          const inv = inventoryItemsMerged.find((i) => i.itemId === comp.sourceItemId);
+                          if (inv) {
+                            baseUnit = inv.uom || "ea";
+                            const structuredCost = computeBaseUnitCostFromPack(inv);
+                            baseUnitCostVal = structuredCost !== null ? structuredCost : (inv.effectivePrice || 0);
+                          }
+                        }
+                      }
+
+                      const displayLineCost = conversionError ? 0 : (lineCost || comp.lineCost || 0);
 
                       return (
                         <div
@@ -1097,8 +1148,40 @@ export default function MenuCostingPage() {
                             )}
                           </div>
 
-                          {/* Bottom controls: Qty, Unit, Unit Cost Snapshot, Line Cost */}
-                          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 bg-neutral-50/70 p-2.5 rounded border border-neutral-150 text-xs">
+                          {/* Bottom controls: Base Unit, Base Unit Cost, Usage Unit, Qty, Line Cost */}
+                          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 bg-neutral-50/70 p-2.5 rounded border border-neutral-150 text-xs">
+                            <div>
+                              <span className="block text-[9px] font-bold text-neutral-400 uppercase tracking-wide mb-0.5">
+                                Base Unit
+                              </span>
+                              <div className="font-mono py-0.5 text-neutral-600 font-semibold">
+                                {baseUnit}
+                              </div>
+                            </div>
+
+                            <div>
+                              <span className="block text-[9px] font-bold text-neutral-400 uppercase tracking-wide mb-0.5">
+                                Base Unit Cost
+                              </span>
+                              <div className="font-mono py-0.5 text-neutral-600 font-semibold">
+                                {baseUnitCostVal > 0 ? `$${baseUnitCostVal.toFixed(4)}` : "—"}
+                              </div>
+                            </div>
+
+                            <div>
+                              <span className="block text-[9px] font-bold text-neutral-400 uppercase tracking-wide mb-0.5">
+                                Usage Unit
+                              </span>
+                              <input
+                                type="text"
+                                disabled={drawerMode === "view"}
+                                placeholder="g, kg, L, oz, pc"
+                                value={comp.unit || ""}
+                                onChange={(e) => updateComponentRow(idx, { unit: e.target.value })}
+                                className="w-full border border-neutral-200 rounded px-2 py-0.5 bg-white focus:outline-none disabled:bg-neutral-100 font-mono text-[11px]"
+                              />
+                            </div>
+
                             <div>
                               <span className="block text-[9px] font-bold text-neutral-400 uppercase tracking-wide mb-0.5">
                                 Qty Used
@@ -1110,31 +1193,8 @@ export default function MenuCostingPage() {
                                 disabled={drawerMode === "view"}
                                 value={comp.qtyUsed || ""}
                                 onChange={(e) => updateComponentRow(idx, { qtyUsed: parseFloat(e.target.value) || 0 })}
-                                className="w-full border border-neutral-200 rounded px-2 py-0.5 bg-white focus:outline-none disabled:bg-neutral-100"
+                                className="w-full border border-neutral-200 rounded px-2 py-0.5 bg-white focus:outline-none disabled:bg-neutral-100 font-mono text-[11px]"
                               />
-                            </div>
-
-                            <div>
-                              <span className="block text-[9px] font-bold text-neutral-400 uppercase tracking-wide mb-0.5">
-                                Unit
-                              </span>
-                              <input
-                                type="text"
-                                disabled={drawerMode === "view"}
-                                placeholder="g, kg, L, oz, pc"
-                                value={comp.unit || ""}
-                                onChange={(e) => updateComponentRow(idx, { unit: e.target.value })}
-                                className="w-full border border-neutral-200 rounded px-2 py-0.5 bg-white focus:outline-none disabled:bg-neutral-100"
-                              />
-                            </div>
-
-                            <div>
-                              <span className="block text-[9px] font-bold text-neutral-400 uppercase tracking-wide mb-0.5">
-                                Base Unit Cost
-                              </span>
-                              <div className="font-mono py-0.5 text-neutral-600">
-                                {comp.unitCostSnapshot > 0 ? `$${comp.unitCostSnapshot.toFixed(4)}` : "—"}
-                              </div>
                             </div>
 
                             <div>
@@ -1142,7 +1202,7 @@ export default function MenuCostingPage() {
                                 Line Cost
                               </span>
                               <div className="font-mono py-0.5 font-semibold text-neutral-900">
-                                {comp.lineCost > 0 ? `$${comp.lineCost.toFixed(2)}` : "$0.00"}
+                                {displayLineCost > 0 ? `$${displayLineCost.toFixed(2)}` : "$0.00"}
                               </div>
                             </div>
                           </div>
