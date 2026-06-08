@@ -33,6 +33,9 @@ import {
   updateDeliveryTicketStatus,
   updateDriver,
   updateVehicle,
+  estimateDeliveryRunRoute,
+  buildGoogleMapsDirectionsUrl,
+  getDeliveryRunById,
   type DeliveryRunStatus,
   type DeliveryTicketStatus,
 } from "@/lib/storage";
@@ -156,6 +159,8 @@ export default function DeliveriesPage() {
   const [runControlDraft, setRunControlDraft] = useState({ odometerStartKm: "", odometerEndKm: "" });
   const [receivedBy, setReceivedBy] = useState("");
   const [ticketItemDrafts, setTicketItemDrafts] = useState<any[]>([]);
+  const [estimatingRoute, setEstimatingRoute] = useState(false);
+  const [returnToStart, setReturnToStart] = useState(true);
 
   const refresh = async () => {
     setLoading(true);
@@ -319,6 +324,45 @@ export default function DeliveriesPage() {
     const res = await reorderDeliveryRunStops(run.id, ordered.map((ticket) => ticket.id));
     if (!res.success) return alert(`Could not reorder stops: ${res.error?.message ?? "Unknown error"}`);
     await refresh();
+  };
+
+  const handleEstimateRoute = async (run: any, optimize: boolean) => {
+    setEstimatingRoute(true);
+    try {
+      const res = await estimateDeliveryRunRoute(run.id, { optimize, returnToStart });
+      if (!res.success) {
+        alert(`Route calculation failed: ${res.error || (res as any).message}`);
+        return;
+      }
+      if (res.data && res.data.routeEstimateAvailable === false) {
+        alert(`Route estimation unavailable: ${res.data.message}`);
+        return;
+      }
+      
+      const km = res.data?.estimatedDistanceKm ?? 0;
+      const mins = res.data?.estimatedDurationMinutes ?? 0;
+      setToast(`Google Route: ${km} km, ${mins} mins. ${optimize ? "Stops optimized!" : ""}`);
+      
+      await refresh();
+      const updatedRunRes = await getDeliveryRunById(run.id);
+      if (updatedRunRes.success) {
+        setRouteRun(updatedRunRes.data);
+      }
+    } catch (err: any) {
+      console.error("Route estimate error:", err);
+      alert(`Route calculation error: ${err.message || "Unknown error"}`);
+    } finally {
+      setEstimatingRoute(false);
+    }
+  };
+
+  const handleOpenInGoogleMaps = async (run: any) => {
+    const url = await buildGoogleMapsDirectionsUrl(run.id);
+    if (url) {
+      window.open(url, "_blank");
+    } else {
+      alert("Could not construct Google Maps Directions URL.");
+    }
   };
 
   const handleCreateDriver = async () => {
@@ -513,7 +557,18 @@ export default function DeliveriesPage() {
                     <CardHeader className="border-b border-white/5">
                       <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
                         <div>
-                          <CardTitle className="text-white">{run.runNumber}</CardTitle>
+                          <CardTitle className="text-white flex items-center gap-2">
+                            {run.runNumber}
+                            {run.routeEstimateSource === 'google' ? (
+                              <span className="rounded-full bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 text-[10px] font-medium text-emerald-400">
+                                Estimated by Google
+                              </span>
+                            ) : (
+                              <span className="rounded-full bg-zinc-500/10 border border-zinc-500/20 px-2 py-0.5 text-[10px] font-medium text-zinc-400">
+                                Manual estimate
+                              </span>
+                            )}
+                          </CardTitle>
                           <p className="mt-1 text-xs text-zinc-500">{run.runDate} · {run.driver?.name ?? "No driver"} · {run.vehicle?.vehicleName ?? "No vehicle"}</p>
                         </div>
                         <div className="flex flex-wrap items-center gap-2">
@@ -763,6 +818,41 @@ export default function DeliveriesPage() {
                   </div>
                 </div>
 
+                <div className="rounded-xl border border-neutral-200 bg-white p-4 space-y-3">
+                  <p className="text-xs font-bold uppercase tracking-wider text-neutral-500">Google Maps Route Integration</p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      disabled={estimatingRoute}
+                      onClick={() => handleEstimateRoute(routeRun, false)}
+                      className="inline-flex items-center justify-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50 disabled:opacity-50"
+                    >
+                      {estimatingRoute ? "Estimating..." : "Estimate Route"}
+                    </button>
+                    <button
+                      disabled={estimatingRoute}
+                      onClick={() => handleEstimateRoute(routeRun, true)}
+                      className="inline-flex items-center justify-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50 disabled:opacity-50"
+                    >
+                      {estimatingRoute ? "Optimizing..." : "Optimize Route"}
+                    </button>
+                    <button
+                      onClick={() => handleOpenInGoogleMaps(routeRun)}
+                      className="inline-flex items-center justify-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50"
+                    >
+                      Open in Google Maps
+                    </button>
+                  </div>
+                  <label className="flex items-center gap-2 text-xs font-semibold text-neutral-600">
+                    <input
+                      type="checkbox"
+                      checked={returnToStart}
+                      onChange={(e) => setReturnToStart(e.target.checked)}
+                      className="rounded border-neutral-300 text-blue-600 focus:ring-blue-500"
+                    />
+                    Return to start (HQ / Start Address)
+                  </label>
+                </div>
+
                 <div className="space-y-2">
                   {orderedTickets.map((ticket, index) => (
                     <div key={ticket.id} className="rounded-xl border border-neutral-200 bg-white p-4">
@@ -901,8 +991,8 @@ function DeliveryRunReport({ report, onPrint }: { report: any; onPrint: () => vo
         <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
           <InfoLine icon={<Clock className="h-4 w-4" />} label="Started" value={formatDateTime(run.actualStartTime)} />
           <InfoLine icon={<Clock className="h-4 w-4" />} label="Completed" value={formatDateTime(run.actualEndTime)} />
-          <InfoLine icon={<Route className="h-4 w-4" />} label="KM" value={`Est ${run.estimatedDistanceKm ?? 0}\nActual ${run.actualDistanceKm ?? 0}`} />
-          <InfoLine icon={<Clock className="h-4 w-4" />} label="Minutes" value={`Est ${run.estimatedDurationMinutes ?? 0}\nActual ${run.actualDurationMinutes ?? 0}`} />
+          <InfoLine icon={<Route className="h-4 w-4" />} label="KM" value={`Est ${run.estimatedDistanceKm ?? 0} (${run.routeEstimateSource === 'google' ? 'Google' : 'Manual'})\nActual ${run.actualDistanceKm ?? 0}`} />
+          <InfoLine icon={<Clock className="h-4 w-4" />} label="Minutes" value={`Est ${run.estimatedDurationMinutes ?? 0} (${run.routeEstimateSource === 'google' ? 'Google' : 'Manual'})\nActual ${run.actualDurationMinutes ?? 0}`} />
         </div>
 
         <div className="mt-4 rounded-xl border border-neutral-200 bg-neutral-50 p-4">

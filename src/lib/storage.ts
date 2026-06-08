@@ -3943,6 +3943,10 @@ const mapDeliveryRunToFrontend = (db: any): any => ({
   createdBy: db.created_by ?? null,
   createdAt: db.created_at,
   updatedAt: db.updated_at,
+  routeEstimateSource: db.route_estimate_source ?? 'manual',
+  routeEstimatedAt: db.route_estimated_at ?? null,
+  routePolyline: db.route_polyline ?? null,
+  googleRouteSummary: db.google_route_summary ?? null,
   driver: db.drivers ? mapDriverToFrontend(db.drivers) : null,
   vehicle: db.vehicles ? mapVehicleToFrontend(db.vehicles) : null,
   tickets: Array.isArray(db.delivery_tickets)
@@ -4063,6 +4067,10 @@ function mapDeliveryRunPatchToDB(patch: any) {
   if ('odometerStartKm' in patch) out.odometer_start_km = patch.odometerStartKm == null || patch.odometerStartKm === '' ? null : Number(patch.odometerStartKm);
   if ('odometerEndKm' in patch) out.odometer_end_km = patch.odometerEndKm == null || patch.odometerEndKm === '' ? null : Number(patch.odometerEndKm);
   if ('notes' in patch) out.notes = patch.notes ?? '';
+  if ('routeEstimateSource' in patch) out.route_estimate_source = patch.routeEstimateSource;
+  if ('routeEstimatedAt' in patch) out.route_estimated_at = patch.routeEstimatedAt || null;
+  if ('routePolyline' in patch) out.route_polyline = patch.routePolyline || null;
+  if ('googleRouteSummary' in patch) out.google_route_summary = patch.googleRouteSummary || null;
   return out;
 }
 
@@ -4410,6 +4418,140 @@ export async function updateDeliveryTicketStopSequence(ticketId: string, sequenc
   return updateDeliveryTicket(ticketId, { stopSequence: sequence });
 }
 
+export async function estimateDeliveryRunRoute(
+  runId: string,
+  options: { optimize?: boolean; returnToStart?: boolean } = {}
+) {
+  try {
+    const res = await fetch('/api/delivery-routes/estimate', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        runId,
+        optimize: options.optimize ?? false,
+        returnToStart: options.returnToStart ?? false,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      return { success: false, error: err.error || `HTTP error ${res.status}` };
+    }
+    const data = await res.json();
+    return { success: true, data };
+  } catch (err: any) {
+    console.error('estimateDeliveryRunRoute error:', err);
+    return { success: false, error: err.message || 'Unknown network error' };
+  }
+}
+
+export async function updateDeliveryRunRouteEstimate(
+  runId: string,
+  estimate: {
+    estimatedDistanceKm: number;
+    estimatedDurationMinutes: number;
+    routeEstimateSource: string;
+    routePolyline?: string | null;
+    googleRouteSummary?: any | null;
+    tickets?: Array<{ id: string; estimatedArrivalTime: string | null }>;
+  }
+) {
+  const patch: any = {
+    estimatedDistanceKm: estimate.estimatedDistanceKm,
+    estimatedDurationMinutes: estimate.estimatedDurationMinutes,
+    routeEstimateSource: estimate.routeEstimateSource,
+    routeEstimatedAt: new Date().toISOString(),
+  };
+  if ('routePolyline' in estimate) patch.routePolyline = estimate.routePolyline;
+  if ('googleRouteSummary' in estimate) patch.googleRouteSummary = estimate.googleRouteSummary;
+
+  const { data, error } = await supabase
+    .from('delivery_runs')
+    .update(mapDeliveryRunPatchToDB(patch))
+    .eq('id', runId)
+    .select()
+    .single();
+
+  if (error) {
+    console.error('updateDeliveryRunRouteEstimate error:', error);
+    return { success: false, error };
+  }
+
+  if (Array.isArray(estimate.tickets) && estimate.tickets.length > 0) {
+    const ticketUpdates = estimate.tickets.map((t) =>
+      supabase
+        .from('delivery_tickets')
+        .update({ estimated_arrival_time: t.estimatedArrivalTime })
+        .eq('id', t.id)
+        .eq('delivery_run_id', runId)
+    );
+    const results = await Promise.all(ticketUpdates);
+    const failed = results.find((r) => r.error);
+    if (failed?.error) {
+      console.error('updateDeliveryRunRouteEstimate ticket update error:', failed.error);
+      return { success: false, error: failed.error };
+    }
+  }
+
+  return { success: true, data: mapDeliveryRunToFrontend(data) };
+}
+
+export async function applyOptimizedStopOrder(runId: string, orderedTicketIds: string[]) {
+  return reorderDeliveryRunStops(runId, orderedTicketIds);
+}
+
+export async function buildGoogleMapsDirectionsUrl(runId: string) {
+  const runRes = await getDeliveryRunById(runId);
+  if (!runRes.success || !runRes.data) return '';
+  const run = runRes.data;
+
+  // 1. Determine origin
+  let origin = run.startAddress?.trim();
+  if (!origin) {
+    // Load LOC-HQ to check for address
+    const { data: hqLoc } = await supabase
+      .from('locations')
+      .select('*')
+      .eq('id', 'LOC-HQ')
+      .maybeSingle();
+    
+    if (hqLoc) {
+      origin = [
+        hqLoc.address,
+        hqLoc.street,
+        hqLoc.city,
+        hqLoc.province ?? hqLoc.state,
+        hqLoc.postal_code ?? hqLoc.postalCode,
+      ].filter(Boolean).join(', ');
+    }
+  }
+
+  if (!origin) {
+    origin = "Head Office / Central Kitchen";
+  }
+
+  const tickets = [...(run.tickets || [])]
+    .sort((a, b) => (a.stopSequence ?? 999) - (b.stopSequence ?? 999))
+    .filter((t: any) => t.status !== 'cancelled');
+
+  if (tickets.length === 0) {
+    return `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(origin)}&destination=${encodeURIComponent(origin)}&travelmode=driving`;
+  }
+
+  const destAddress = tickets[tickets.length - 1].destinationAddress?.trim() || tickets[tickets.length - 1].destinationName?.trim() || '';
+  const intermediateAddresses = tickets
+    .slice(0, -1)
+    .map((t: any) => t.destinationAddress?.trim() || t.destinationName?.trim() || '')
+    .filter(Boolean);
+
+  let url = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(origin)}&destination=${encodeURIComponent(destAddress)}&travelmode=driving`;
+  if (intermediateAddresses.length > 0) {
+    url += `&waypoints=${encodeURIComponent(intermediateAddresses.join('|'))}`;
+  }
+  return url;
+}
+
 export async function getVehicleDailyLogs(filters: { vehicleId?: string; driverId?: string; status?: string; date?: string } = {}) {
   let query = supabase
     .from('vehicle_daily_logs')
@@ -4565,13 +4707,7 @@ export async function getDeliveryRunReport(runId: string) {
   };
 }
 
-export async function estimateDeliveryRunRoute(_runId: string) {
-  return { success: true, data: null, message: 'Route estimate unavailable. Enter km/minutes manually.' };
-}
 
-export async function estimateRouteFromStops(_startAddress: string, _stops: string[]) {
-  return { success: true, data: null, message: 'Route estimate unavailable. Enter km/minutes manually.' };
-}
 
 export async function getDrivers() {
   const { data, error } = await supabase.from('drivers').select('*').order('active', { ascending: false }).order('name');
