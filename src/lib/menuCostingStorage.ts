@@ -54,7 +54,7 @@ export function fromDbMenuCosting(db: any): MenuCosting {
 
 export function toDbMenuCosting(fe: Partial<MenuCosting>): any {
   const db: any = {};
-  if (fe.id !== undefined) db.id = fe.id;
+  if (fe.id != null && fe.id !== "") db.id = fe.id;
   if (fe.locationId !== undefined) db.location_id = fe.locationId;
   if (fe.itemName !== undefined) db.item_name = fe.itemName;
   if (fe.category !== undefined) db.category = fe.category;
@@ -87,7 +87,7 @@ export function fromDbMenuCostingComponent(db: any): MenuCostingComponent {
 
 export function toDbMenuCostingComponent(fe: Partial<MenuCostingComponent>): any {
   const db: any = {};
-  if (fe.id !== undefined) db.id = fe.id;
+  if (fe.id != null && fe.id !== "") db.id = fe.id;
   if (fe.costingId !== undefined) db.costing_id = fe.costingId;
   if (fe.sourceType !== undefined) db.source_type = fe.sourceType;
   if (fe.sourceItemId !== undefined) db.source_item_id = fe.sourceItemId;

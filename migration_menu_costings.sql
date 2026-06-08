@@ -113,3 +113,10 @@ CREATE POLICY "location_manager_all_components"
         AND up.is_active = true
     )
   );
+
+-- Ensure pgcrypto extension exists
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- Ensure default UUID generation is active on tables
+ALTER TABLE public.outlet_menu_costings ALTER COLUMN id SET DEFAULT gen_random_uuid();
+ALTER TABLE public.outlet_menu_costing_components ALTER COLUMN id SET DEFAULT gen_random_uuid();
