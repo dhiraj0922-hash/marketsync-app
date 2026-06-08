@@ -202,25 +202,90 @@ export async function POST(req: NextRequest) {
       await applyOptimizedStopOrder(runId, orderedTicketIds);
     }
 
-    // 9. Calculate stop-by-stop estimated arrival times
-    const ticketsWithETA: Array<{ id: string; estimatedArrivalTime: string | null }> = [];
+    // 9. Calculate stop-by-stop estimated arrival times and parse leg-by-leg details
+    const parsedLegs = [];
     if (Array.isArray(route.legs) && route.legs.length > 0) {
       let currentTime = run.actualStartTime ? new Date(run.actualStartTime) : new Date();
 
-      for (let i = 0; i < Math.min(finalOrderStops.length, route.legs.length); i++) {
+      for (let i = 0; i < route.legs.length; i++) {
         const leg = route.legs[i];
+        const legDistanceMeters = leg.distanceMeters ?? 0;
         const legDurationStr = leg.duration ?? "0s";
         const legDurationSeconds = parseInt(legDurationStr.replace("s", ""), 10) || 0;
+
+        const distanceKm = Number((legDistanceMeters / 1000).toFixed(2));
+        const durationMinutes = Math.round(legDurationSeconds / 60);
 
         // Accumulate driving duration
         currentTime = new Date(currentTime.getTime() + legDurationSeconds * 1000);
 
-        ticketsWithETA.push({
-          id: finalOrderStops[i].id,
+        let fromName = "";
+        let fromAddress = "";
+        if (i === 0) {
+          fromName = run.startLocationName || "HQ / Central Kitchen";
+          fromAddress = originAddress;
+        } else {
+          const prevStop = finalOrderStops[i - 1];
+          if (prevStop) {
+            fromName = prevStop.destinationName || "";
+            fromAddress = prevStop.destinationAddress || prevStop.destinationName || "";
+          }
+        }
+
+        let toName = "";
+        let toAddress = "";
+        let ticketId = null;
+        let ticketNumber = null;
+
+        const isLastReturnLeg = returnToStart && (i === route.legs.length - 1);
+
+        if (isLastReturnLeg) {
+          toName = run.startLocationName || "HQ / Central Kitchen";
+          toAddress = originAddress;
+        } else {
+          const currentStop = finalOrderStops[i];
+          if (currentStop) {
+            toName = currentStop.destinationName || "";
+            toAddress = currentStop.destinationAddress || currentStop.destinationName || "";
+            ticketId = currentStop.id;
+            ticketNumber = currentStop.ticketNumber;
+          }
+        }
+
+        parsedLegs.push({
+          sequence: i + 1,
+          fromName,
+          fromAddress,
+          toName,
+          toAddress,
+          ticketId,
+          ticketNumber,
+          distanceKm,
+          durationMinutes,
           estimatedArrivalTime: currentTime.toISOString(),
         });
       }
     }
+
+    const ticketsWithETA = parsedLegs
+      .filter((leg) => leg.ticketId !== null)
+      .map((leg) => ({
+        id: leg.ticketId!,
+        estimatedArrivalTime: leg.estimatedArrivalTime,
+      }));
+
+    const googleRouteSummary = {
+      source: "google",
+      returnToStart: Boolean(returnToStart),
+      estimatedDistanceKm,
+      estimatedDurationMinutes,
+      estimatedAt: new Date().toISOString(),
+      origin: {
+        name: run.startLocationName || "HQ / Central Kitchen",
+        address: originAddress,
+      },
+      legs: parsedLegs,
+    };
 
     // 10. Update the run route details and ticket ETAs in the database
     await updateDeliveryRunRouteEstimate(runId, {
@@ -228,7 +293,7 @@ export async function POST(req: NextRequest) {
       estimatedDurationMinutes,
       routeEstimateSource: "google",
       routePolyline,
-      googleRouteSummary: { legs: route.legs ?? [] },
+      googleRouteSummary,
       tickets: ticketsWithETA,
     });
 
@@ -238,6 +303,7 @@ export async function POST(req: NextRequest) {
       estimatedDistanceKm,
       estimatedDurationMinutes,
       optimizedOrder: finalOrderStops.map((t) => t.id),
+      googleRouteSummary,
     });
   } catch (err: any) {
     console.error("Backend compute route error:", err);

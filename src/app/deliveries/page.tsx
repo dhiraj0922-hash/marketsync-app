@@ -341,7 +341,11 @@ export default function DeliveriesPage() {
       
       const km = res.data?.estimatedDistanceKm ?? 0;
       const mins = res.data?.estimatedDurationMinutes ?? 0;
-      setToast(`Google Route: ${km} km, ${mins} mins. ${optimize ? "Stops optimized!" : ""}`);
+      if (optimize) {
+        setToast(`Route optimized: ${km} km / ${mins} min`);
+      } else {
+        setToast(`Route estimated: ${km} km / ${mins} min`);
+      }
       
       await refresh();
       const updatedRunRes = await getDeliveryRunById(run.id);
@@ -796,6 +800,11 @@ export default function DeliveriesPage() {
           {routeRun && (() => {
             const orderedTickets = [...(routeRun.tickets ?? [])].sort((a, b) => (a.stopSequence ?? 999) - (b.stopSequence ?? 999));
             const vehicleLog = routeRun.vehicleId ? vehicleLogs.find((log) => log.vehicleId === routeRun.vehicleId && log.logDate === routeRun.runDate) : null;
+            const stopsCount = orderedTickets.length;
+            const isStartAddressMissing = !routeRun.startAddress?.trim();
+            const isAnyStopAddressMissing = orderedTickets.some((t: any) => !t.destinationAddress?.trim());
+            const isEstimateDisabled = stopsCount === 0 || isStartAddressMissing || isAnyStopAddressMissing || estimatingRoute;
+
             return (
               <div className="space-y-4 text-neutral-700">
                 <div className="rounded-xl border border-neutral-200 bg-white p-4">
@@ -822,14 +831,14 @@ export default function DeliveriesPage() {
                   <p className="text-xs font-bold uppercase tracking-wider text-neutral-500">Google Maps Route Integration</p>
                   <div className="flex flex-wrap items-center gap-2">
                     <button
-                      disabled={estimatingRoute}
+                      disabled={isEstimateDisabled}
                       onClick={() => handleEstimateRoute(routeRun, false)}
                       className="inline-flex items-center justify-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50 disabled:opacity-50"
                     >
                       {estimatingRoute ? "Estimating..." : "Estimate Route"}
                     </button>
                     <button
-                      disabled={estimatingRoute}
+                      disabled={isEstimateDisabled}
                       onClick={() => handleEstimateRoute(routeRun, true)}
                       className="inline-flex items-center justify-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50 disabled:opacity-50"
                     >
@@ -851,6 +860,99 @@ export default function DeliveriesPage() {
                     />
                     Return to start (HQ / Start Address)
                   </label>
+                </div>
+
+                {/* Google Route Result Section */}
+                <div className="rounded-xl border border-neutral-200 bg-white p-4 space-y-4">
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-neutral-500">Google Route Result</h4>
+                  
+                  <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                    <div className="rounded-lg bg-neutral-50 p-3">
+                      <div className="text-[10px] font-semibold uppercase text-neutral-500">Estimate Source</div>
+                      <p className="mt-1 text-xs font-semibold text-neutral-900">
+                        {routeRun.routeEstimateSource === 'google' ? 'Google Routes API' : 'Manual Estimate'}
+                      </p>
+                    </div>
+                    <div className="rounded-lg bg-neutral-50 p-3">
+                      <div className="text-[10px] font-semibold uppercase text-neutral-500">Total Distance</div>
+                      <p className="mt-1 text-sm font-bold text-neutral-950">{routeRun.estimatedDistanceKm ?? 0} km</p>
+                    </div>
+                    <div className="rounded-lg bg-neutral-50 p-3">
+                      <div className="text-[10px] font-semibold uppercase text-neutral-500">Total Duration</div>
+                      <p className="mt-1 text-sm font-bold text-neutral-950">{routeRun.estimatedDurationMinutes ?? 0} mins</p>
+                    </div>
+                    <div className="rounded-lg bg-neutral-50 p-3">
+                      <div className="text-[10px] font-semibold uppercase text-neutral-500">Return to Start</div>
+                      <p className="mt-1 text-sm font-semibold text-neutral-900">
+                        {routeRun.googleRouteSummary?.returnToStart ? 'Yes' : 'No'}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-2 text-xs text-neutral-500 md:grid-cols-2 border-t border-neutral-100 pt-3">
+                    <div>
+                      <span className="font-semibold text-neutral-700">Estimated At:</span>{' '}
+                      {routeRun.routeEstimatedAt ? formatDateTime(routeRun.routeEstimatedAt) : '—'}
+                    </div>
+                    <div>
+                      <span className="font-semibold text-neutral-700">Number of Stops:</span> {stopsCount}
+                    </div>
+                  </div>
+
+                  {/* Warnings */}
+                  <div className="space-y-2">
+                    {stopsCount === 0 && (
+                      <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                        <AlertTriangle className="h-4 w-4 shrink-0" />
+                        <span>Add delivery tickets/stops before estimating route.</span>
+                      </div>
+                    )}
+                    {stopsCount > 0 && isStartAddressMissing && (
+                      <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                        <AlertTriangle className="h-4 w-4 shrink-0" />
+                        <span>Start address missing. Add HQ/start address before estimating route.</span>
+                      </div>
+                    )}
+                    {stopsCount > 0 && !isStartAddressMissing && isAnyStopAddressMissing && (
+                      <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                        <AlertTriangle className="h-4 w-4 shrink-0" />
+                        <span>One or more delivery tickets are missing destination address.</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Leg Details */}
+                  {routeRun.routeEstimateSource === 'google' && routeRun.googleRouteSummary?.legs && (
+                    <div className="border-t border-neutral-100 pt-3 space-y-3">
+                      <p className="text-xs font-bold uppercase tracking-wider text-neutral-500">Leg Details</p>
+                      <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+                        {routeRun.googleRouteSummary.legs.map((leg: any, idx: number) => (
+                          <div key={idx} className="rounded-lg border border-neutral-100 bg-neutral-50 p-3 text-xs space-y-1">
+                            <div className="flex items-center justify-between border-b border-neutral-100 pb-1 font-semibold text-neutral-900">
+                              <span>Leg {leg.sequence}: {leg.fromName || 'Start'} → {leg.toName || 'End'}</span>
+                              <span className="text-blue-600 font-bold">{leg.distanceKm} km · {leg.durationMinutes} min</span>
+                            </div>
+                            <div className="text-[11px] text-neutral-500">
+                              <div><span className="font-semibold text-neutral-600">From:</span> {leg.fromAddress}</div>
+                              <div><span className="font-semibold text-neutral-600">To:</span> {leg.toAddress}</div>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] pt-1 text-neutral-600">
+                              {leg.estimatedArrivalTime && (
+                                <div>
+                                  <span className="font-semibold">ETA:</span> {formatDateTime(leg.estimatedArrivalTime)}
+                                </div>
+                              )}
+                              {leg.ticketNumber && (
+                                <div>
+                                  <span className="font-semibold">Ticket:</span> {leg.ticketNumber}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 <div className="space-y-2">
@@ -1004,6 +1106,51 @@ function DeliveryRunReport({ report, onPrint }: { report: any; onPrint: () => vo
             <InfoLine icon={<Route className="h-4 w-4" />} label="All Runs KM" value={String(vehicleTotals.totalRunKm ?? "—")} />
             <InfoLine icon={<AlertTriangle className="h-4 w-4" />} label="Variance" value={`${vehicleTotals.varianceKm ?? "—"} km`} />
           </div>
+        </div>
+
+        {/* Route Details Section */}
+        <div className="mt-4 rounded-xl border border-neutral-200 bg-neutral-50 p-4 space-y-3">
+          <h3 className="text-sm font-bold text-neutral-950">Route Estimate & Leg-by-leg Details</h3>
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+            <InfoLine icon={<Route className="h-4 w-4" />} label="Estimate Source" value={run.routeEstimateSource === 'google' ? 'Google Routes API' : 'Manual estimate'} />
+            <InfoLine icon={<Route className="h-4 w-4" />} label="Est Distance" value={`${run.estimatedDistanceKm ?? 0} km`} />
+            <InfoLine icon={<Clock className="h-4 w-4" />} label="Est Duration" value={`${run.estimatedDurationMinutes ?? 0} minutes`} />
+            <InfoLine icon={<RefreshCw className="h-4 w-4" />} label="Return to Start" value={run.googleRouteSummary?.returnToStart ? 'Yes' : 'No'} />
+          </div>
+          {run.routeEstimatedAt && (
+            <p className="text-xs text-neutral-500">Route estimated at: {formatDateTime(run.routeEstimatedAt)}</p>
+          )}
+
+          {run.routeEstimateSource === 'google' && run.googleRouteSummary?.legs && (
+            <div className="border-t border-neutral-200 pt-3">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-neutral-500 mb-2">Leg-by-leg Details</h4>
+              <div className="space-y-2">
+                {run.googleRouteSummary.legs.map((leg: any, idx: number) => (
+                  <div key={idx} className="flex flex-col md:flex-row md:items-center justify-between border-b border-neutral-200/50 pb-2 text-xs text-neutral-700 gap-2">
+                    <div className="min-w-0">
+                      <div className="font-semibold text-neutral-900">
+                        Leg {leg.sequence}: {leg.fromName} → {leg.toName}
+                      </div>
+                      <div className="text-[11px] text-neutral-500 truncate">
+                        {leg.fromAddress} → {leg.toAddress}
+                      </div>
+                      {leg.ticketNumber && (
+                        <div className="text-[10px] font-medium text-neutral-500 mt-0.5">
+                          Stop Ticket: {leg.ticketNumber} {leg.toName ? `(${leg.toName})` : ''}
+                        </div>
+                      )}
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="font-bold text-neutral-900">{leg.distanceKm} km · {leg.durationMinutes} mins</div>
+                      {leg.estimatedArrivalTime && (
+                        <div className="text-[10px] text-neutral-500">ETA: {formatDateTime(leg.estimatedArrivalTime)}</div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="mt-5 overflow-x-auto">
