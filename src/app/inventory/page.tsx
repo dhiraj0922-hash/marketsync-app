@@ -19,6 +19,206 @@ import { SupplierCombobox } from "@/components/InventoryEditDrawer";
 
 const LONDON_TEMPLATE_LOCATION_ID = "LOC-1091";
 
+const DEFAULT_INVENTORY_CATEGORIES = [
+  "Produce",
+  "Dry Goods",
+  "Prep",
+  "Sauce",
+  "Frozen",
+  "Cash Supplies",
+  "Bakery",
+  "Stationery",
+  "Disposables",
+  "Seafood",
+  "Equipment",
+  "Cleaning Supplies",
+  "Dairy",
+  "Meat",
+  "Packaging",
+  "Beverage",
+  "Spices",
+  "Labour",
+  "Finished Good",
+];
+
+const normalizeCategoryKey = (value: any) =>
+  String(value ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+
+const toCategoryDisplayName = (value: string) =>
+  value
+    .trim()
+    .replace(/\s+/g, " ")
+    .split(" ")
+    .map(word => word ? word.charAt(0).toUpperCase() + word.slice(1).toLowerCase() : "")
+    .join(" ");
+
+const mergeInventoryCategories = (...sources: Array<Array<string | null | undefined> | undefined>) => {
+  const byKey = new Map<string, string>();
+  DEFAULT_INVENTORY_CATEGORIES.forEach(category => byKey.set(normalizeCategoryKey(category), category));
+
+  sources.flat().forEach(category => {
+    const key = normalizeCategoryKey(category);
+    if (!key) return;
+    if (!byKey.has(key)) byKey.set(key, toCategoryDisplayName(String(category)));
+  });
+
+  const defaultOrder = new Map(DEFAULT_INVENTORY_CATEGORIES.map((category, index) => [normalizeCategoryKey(category), index]));
+  return Array.from(byKey.values()).sort((a, b) => {
+    const aDefault = defaultOrder.get(normalizeCategoryKey(a));
+    const bDefault = defaultOrder.get(normalizeCategoryKey(b));
+    if (aDefault !== undefined && bDefault !== undefined) return aDefault - bDefault;
+    if (aDefault !== undefined) return -1;
+    if (bDefault !== undefined) return 1;
+    return a.localeCompare(b);
+  });
+};
+
+const canonicalizeCategory = (value: any, categories: string[]) => {
+  const key = normalizeCategoryKey(value);
+  if (!key) return "";
+  return categories.find(category => normalizeCategoryKey(category) === key) ?? toCategoryDisplayName(String(value));
+};
+
+const getCategoryDisplay = (value: any) => {
+  const text = String(value ?? "").trim();
+  return text || "Uncategorized";
+};
+
+function InventoryCategoryPicker({
+  value,
+  categories,
+  onChange,
+  onCreateCategory,
+}: {
+  value: string;
+  categories: string[];
+  onChange: (category: string) => void;
+  onCreateCategory: (rawCategory: string) => string;
+}) {
+  const [query, setQuery] = useState("");
+  const [isOpen, setIsOpen] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
+  const [newCategory, setNewCategory] = useState("");
+  const [error, setError] = useState("");
+  const selectedCategory = getCategoryDisplay(value);
+  const normalizedQuery = normalizeCategoryKey(query);
+  const visibleCategories = normalizedQuery
+    ? categories.filter(category => normalizeCategoryKey(category).includes(normalizedQuery))
+    : categories;
+
+  const handleCreate = () => {
+    const raw = newCategory.trim();
+    setError("");
+    if (!raw) {
+      setError("Category name is required.");
+      return;
+    }
+    if (raw.length > 50) {
+      setError("Category name must be 50 characters or less.");
+      return;
+    }
+    const created = onCreateCategory(raw);
+    onChange(created);
+    setQuery("");
+    setNewCategory("");
+    setIsCreating(false);
+    setIsOpen(false);
+  };
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => { setIsOpen(prev => !prev); setQuery(""); }}
+        className="flex w-full items-center justify-between rounded border border-neutral-200 bg-white p-2 text-left text-sm text-neutral-900 transition-colors hover:border-brand-300 focus:outline-none focus:ring-1 focus:ring-brand-500"
+      >
+        <span className={value?.trim() ? "text-neutral-900" : "text-neutral-500"}>{selectedCategory}</span>
+        <ChevronDown className="h-4 w-4 text-neutral-500" />
+      </button>
+      {isOpen && (
+        <div className="absolute z-[120] mt-1 w-full rounded-lg border border-neutral-200 bg-white p-2 shadow-xl">
+          {!isCreating ? (
+            <>
+              <div className="relative mb-2">
+                <Search className="pointer-events-none absolute left-2.5 top-2.5 h-3.5 w-3.5 text-neutral-400" />
+                <input
+                  type="text"
+                  value={query}
+                  onChange={e => setQuery(e.target.value)}
+                  placeholder="Search categories..."
+                  className="w-full rounded-md border border-neutral-200 py-2 pl-8 pr-2 text-sm text-neutral-900 outline-none focus:ring-1 focus:ring-brand-500"
+                  autoFocus
+                />
+              </div>
+              <div className="max-h-56 overflow-y-auto">
+                {visibleCategories.map(category => (
+                  <button
+                    key={category}
+                    type="button"
+                    onClick={() => {
+                      onChange(category);
+                      setIsOpen(false);
+                      setQuery("");
+                    }}
+                    className={`flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
+                      normalizeCategoryKey(value) === normalizeCategoryKey(category)
+                        ? "bg-brand-50 font-semibold text-brand-700"
+                        : "text-neutral-800 hover:bg-neutral-100"
+                    }`}
+                  >
+                    {category}
+                    {normalizeCategoryKey(value) === normalizeCategoryKey(category) && <span className="text-xs text-brand-600">Selected</span>}
+                  </button>
+                ))}
+                {visibleCategories.length === 0 && (
+                  <div className="px-2 py-3 text-sm text-neutral-500">No matching categories.</div>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => { setIsCreating(true); setNewCategory(query); setError(""); }}
+                className="mt-2 w-full rounded-md border border-dashed border-brand-300 bg-brand-50 px-2 py-2 text-left text-sm font-semibold text-brand-700 hover:bg-brand-100"
+              >
+                + Create new category
+              </button>
+            </>
+          ) : (
+            <div className="space-y-2">
+              <label className="text-xs font-semibold uppercase tracking-wider text-neutral-700">New Category Name</label>
+              <input
+                type="text"
+                value={newCategory}
+                maxLength={50}
+                onChange={e => { setNewCategory(e.target.value); setError(""); }}
+                className="w-full rounded-md border border-neutral-200 p-2 text-sm text-neutral-900 outline-none focus:ring-1 focus:ring-brand-500"
+                placeholder="e.g. Chutney Base"
+                autoFocus
+              />
+              {error && <p className="text-xs font-medium text-red-600">{error}</p>}
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => { setIsCreating(false); setNewCategory(""); setError(""); }}
+                  className="flex-1 rounded-md border border-neutral-200 px-3 py-2 text-xs font-semibold text-neutral-700 hover:bg-neutral-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCreate}
+                  className="flex-1 rounded-md bg-brand-600 px-3 py-2 text-xs font-semibold text-white hover:bg-brand-700"
+                >
+                  Add Category
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const normalizeDuplicateAuditText = (value: any) =>
   String(value ?? "")
     .toLowerCase()
@@ -326,6 +526,7 @@ export default function Inventory() {
   const [duplicateAuditSearch, setDuplicateAuditSearch] = useState("");
   const [duplicateAuditFilter, setDuplicateAuditFilter] = useState("all");
   const [expandedDuplicateAuditGroups, setExpandedDuplicateAuditGroups] = useState<Record<string, boolean>>({});
+  const [localCustomCategories, setLocalCustomCategories] = useState<string[]>([]);
   const [purchaseOptionsData, setPurchaseOptionsData] = useState<any[]>([]);
   const [recipesData, setRecipesData] = useState<any[]>([]);
   const [ordersData, setOrdersData] = useState<any[]>([]);
@@ -453,10 +654,16 @@ export default function Inventory() {
               // item in that category because there's no UI feedback that the
               // filter is active-but-unknown.
               if (p.filterCategory !== undefined && p.filterCategory !== "All") {
-                const catExists = (cats as string[]).some(
-                  (c: string) => c.toLowerCase() === p.filterCategory.toLowerCase()
+                const loadedCategoryOptions = mergeInventoryCategories(
+                  DEFAULT_INVENTORY_CATEGORIES,
+                  cats as string[],
+                  mergedInv.map((item: any) => item.category),
                 );
-                setFilterCategory(catExists ? p.filterCategory : "All");
+                const restoredCategory = canonicalizeCategory(p.filterCategory, loadedCategoryOptions);
+                const catExists = loadedCategoryOptions.some(
+                  (c: string) => normalizeCategoryKey(c) === normalizeCategoryKey(restoredCategory)
+                );
+                setFilterCategory(catExists ? restoredCategory : "All");
               } else if (p.filterCategory !== undefined) {
                 setFilterCategory(p.filterCategory);
               }
@@ -519,6 +726,28 @@ export default function Inventory() {
 
   const uniqueCategories = Array.from(normalizedCategoriesMap.values()).sort();
   const uniqueSuppliers = Array.from(normalizedSuppliersMap.values()).sort();
+  const categoryOptions = useMemo(
+    () => mergeInventoryCategories(
+      DEFAULT_INVENTORY_CATEGORIES,
+      categories,
+      uniqueCategories,
+      inventoryData.map(item => item.category),
+      localCustomCategories,
+    ),
+    [categories, uniqueCategories, inventoryData, localCustomCategories]
+  );
+
+  const addLocalCategory = (rawCategory: string) => {
+    const canonical = canonicalizeCategory(rawCategory, categoryOptions);
+    const exists = categoryOptions.some(category => normalizeCategoryKey(category) === normalizeCategoryKey(canonical));
+    if (!exists) {
+      setLocalCustomCategories(prev => {
+        if (prev.some(category => normalizeCategoryKey(category) === normalizeCategoryKey(canonical))) return prev;
+        return [...prev, canonical].sort((a, b) => a.localeCompare(b));
+      });
+    }
+    return canonical;
+  };
 
   console.log(`[Diagnostic] Extracted ${uniqueCategories.length} categories from Inventory.`);
   console.log(`[Diagnostic] Extracted ${uniqueSuppliers.length} suppliers from Inventory.`);
@@ -980,7 +1209,7 @@ export default function Inventory() {
       if (isClove) console.log(`  \u2192 DROPPED by filterStatus: item=${dynamicStatus} filter=${filterStatus}`);
       return false;
     }
-    if (filterCategory !== "All" && item.category !== filterCategory) {
+    if (filterCategory !== "All" && normalizeCategoryKey(item.category) !== normalizeCategoryKey(filterCategory)) {
       if (isClove) console.log(`  \u2192 DROPPED by filterCategory: item="${item.category}" filter="${filterCategory}"`);
       return false;
     }
@@ -1299,9 +1528,11 @@ export default function Inventory() {
         ? [...editPurchaseOptions].sort((a: any, b: any) => a.unitPrice - b.unitPrice)[0]
         : null;
       const _chosen = _prefRow ?? _lowRow ?? null;
+      const cleanCategory = canonicalizeCategory(editItem.category, categoryOptions);
 
       const updated = {
         ...editItem,
+        category: cleanCategory,
         baseUnit: lockedBase,
         unit: lockedBase,
         purchaseUnits: pUnits,
@@ -2043,7 +2274,7 @@ export default function Inventory() {
 
     const finalItem = {
       name: newItemName.trim(),
-      category: newItemCategory,
+      category: canonicalizeCategory(newItemCategory, categoryOptions),
       itemType: newItemType,
       unit: lockedBase,
       baseUnit: lockedBase,
@@ -3187,7 +3418,7 @@ export default function Inventory() {
               onChange={(e) => setFilterCategory(e.target.value)}
             >
               <option value="All">All Categories</option>
-              {uniqueCategories.map(c => <option key={c as string} value={c as string}>{c as string}</option>)}
+              {categoryOptions.map(c => <option key={c as string} value={c as string}>{c as string}</option>)}
             </select>
             <select
               className="rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-xs font-medium text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500 sm:text-sm"
@@ -3311,7 +3542,7 @@ export default function Inventory() {
                       </div>
                     </TableCell>
                     <TableCell className="px-2 sm:px-3 py-2.5 sm:py-4 hidden sm:table-cell">
-                      <span className="whitespace-nowrap rounded-md border border-white/10 bg-[#1a1a1a] px-1.5 py-0.5 text-[10px] font-semibold text-zinc-400 sm:px-2 sm:py-1 sm:text-xs">{item.category}</span>
+                      <span className="whitespace-nowrap rounded-md border border-white/10 bg-[#1a1a1a] px-1.5 py-0.5 text-[10px] font-semibold text-zinc-400 sm:px-2 sm:py-1 sm:text-xs">{getCategoryDisplay(item.category)}</span>
                     </TableCell>
                     <TableCell className="py-2.5 sm:py-4 hidden md:table-cell">
                       <div className="flex flex-col gap-0.5">
@@ -4047,13 +4278,12 @@ export default function Inventory() {
               </div>
               <div className="space-y-1.5">
                 <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Category</label>
-                <select
-                  value={editItem.category}
-                  onChange={e => setEditItem({ ...editItem, category: e.target.value })}
-                  className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
-                >
-                  {categories.map(c => <option key={c} value={c}>{c}</option>)}
-                </select>
+                <InventoryCategoryPicker
+                  value={editItem.category ?? ""}
+                  categories={categoryOptions}
+                  onChange={category => setEditItem({ ...editItem, category })}
+                  onCreateCategory={addLocalCategory}
+                />
               </div>
             </div>
 
@@ -4664,9 +4894,12 @@ export default function Inventory() {
               </div>
               <div className="space-y-1.5">
                 <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Category</label>
-                <select value={newItemCategory} onChange={e => setNewItemCategory(e.target.value)} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white">
-                  {categories.map(c => <option key={c} value={c}>{c}</option>)}
-                </select>
+                <InventoryCategoryPicker
+                  value={newItemCategory}
+                  categories={categoryOptions}
+                  onChange={setNewItemCategory}
+                  onCreateCategory={addLocalCategory}
+                />
               </div>
             </div>
           </div>
