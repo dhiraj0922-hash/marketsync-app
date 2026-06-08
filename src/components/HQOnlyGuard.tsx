@@ -17,7 +17,7 @@
  */
 
 import { useAuth } from "@/components/AuthProvider";
-import { isHqAdmin } from "@/lib/roles";
+import { getAllowedHomePath, isHqMaster } from "@/lib/roles";
 import { ShieldOff, ArrowLeft, AlertTriangle } from "lucide-react";
 import Link from "next/link";
 
@@ -49,7 +49,7 @@ export function HQOnlyGuard({ children }: HQOnlyGuardProps) {
   const profileLoaded  = (user as any)?.profileLoaded === true;
   const neverLoaded    = profileError && !profileLoaded;
 
-  if (neverLoaded && isHqAdmin(user)) {
+  if (neverLoaded && isHqMaster(user)) {
     return (
       <>
         <div className="w-full bg-warning-50 border-b border-warning-200 px-6 py-2 flex items-center gap-2 text-warning-700 text-xs font-medium">
@@ -68,7 +68,7 @@ export function HQOnlyGuard({ children }: HQOnlyGuardProps) {
   }
 
   // ── Authorised ─────────────────────────────────────────────────────────────
-  if (isHqAdmin(user)) {
+  if (isHqMaster(user)) {
     return <>{children}</>;
   }
 
@@ -83,9 +83,9 @@ export function HQOnlyGuard({ children }: HQOnlyGuardProps) {
           </div>
         </div>
         <div>
-          <h1 className="text-xl font-bold text-neutral-900 mb-2">HQ Admin Access Only</h1>
+          <h1 className="text-xl font-bold text-neutral-900 mb-2">HQ Master Access Only</h1>
           <p className="text-sm text-neutral-500 leading-relaxed">
-            This section is restricted to HQ administrators. Your account
+            This section is restricted to HQ master administrators. Your account
             ({roleDisplay}) does not have permission to view this page.
           </p>
           {(user as any)?.profileError && (
@@ -98,7 +98,7 @@ export function HQOnlyGuard({ children }: HQOnlyGuardProps) {
           )}
         </div>
         <Link
-          href="/"
+          href={getAllowedHomePath(user)}
           className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors"
         >
           <ArrowLeft className="h-4 w-4" />

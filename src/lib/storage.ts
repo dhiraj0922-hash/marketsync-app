@@ -4047,6 +4047,10 @@ function mapDeliveryTicketPatchToDB(patch: any) {
   if ('receivedBy' in patch) out.received_by = patch.receivedBy ?? '';
   if ('deliveryNotes' in patch) out.delivery_notes = patch.deliveryNotes ?? '';
   if ('notes' in patch) out.notes = patch.notes ?? '';
+  if ('destinationName' in patch) out.destination_name = patch.destinationName ?? '';
+  if ('destinationAddress' in patch) out.destination_address = patch.destinationAddress ?? '';
+  if ('destinationContact' in patch) out.destination_contact = patch.destinationContact ?? null;
+  if ('destinationPhone' in patch) out.destination_phone = patch.destinationPhone ?? null;
   return out;
 }
 
@@ -4133,20 +4137,43 @@ export async function createDeliveryTicketFromRequisition(requisitionId: string)
   if (reqItems.length === 0) return { success: false, error: { message: 'Cannot create a delivery ticket without requisition items.' } };
 
   let location: any = null;
+  let billingProfile: any = null;
   if (req.location_id) {
-    const { data: loc } = await supabase.from('locations').select('*').eq('id', req.location_id).maybeSingle();
-    location = loc;
+    const [locRes, bpRes] = await Promise.all([
+      supabase.from('locations').select('*').eq('id', req.location_id).maybeSingle(),
+      supabase.from('location_billing_profiles').select('*').eq('location_id', req.location_id).maybeSingle()
+    ]);
+    location = locRes.data;
+    billingProfile = bpRes.data;
   }
 
   const userId = await getCurrentAuthUserId();
   const ticketNumber = await generateDeliveryNumber('delivery_tickets', 'ticket_number', 'DT');
-  const address = [
-    location?.address,
-    location?.street,
-    location?.city,
-    location?.province ?? location?.state,
-    location?.postal_code ?? location?.postalCode,
-  ].filter(Boolean).join(', ');
+
+  const storeAddress = billingProfile?.store_address || billingProfile?.storeAddress;
+  const storeCity = billingProfile?.store_city || billingProfile?.storeCity;
+  const storeProvince = billingProfile?.store_province || billingProfile?.storeProvince;
+  const storePostalCode = billingProfile?.store_postal_code || billingProfile?.storePostalCode;
+  const country = billingProfile?.store_country || billingProfile?.storeCountry || 'Canada';
+
+  let address = '';
+  if (storeAddress) {
+    address = `${storeAddress}, ${storeCity || ''}, ${storeProvince || ''} ${storePostalCode || ''}, ${country}`
+      .replace(/,\s*,/g, ',')
+      .replace(/\s+/g, ' ')
+      .trim();
+  } else {
+    address = [
+      location?.address,
+      location?.street,
+      location?.city,
+      location?.province ?? location?.state,
+      location?.postal_code ?? location?.postalCode,
+    ].filter(Boolean).join(', ');
+  }
+
+  const destinationContact = billingProfile?.store_manager_name || billingProfile?.storeManagerName || location?.contact_name || location?.contact || null;
+  const destinationPhone = billingProfile?.store_phone || billingProfile?.storePhone || location?.phone || location?.contact_phone || null;
 
   const { data: ticket, error: ticketError } = await supabase
     .from('delivery_tickets')
@@ -4157,8 +4184,8 @@ export async function createDeliveryTicketFromRequisition(requisitionId: string)
       status: 'draft',
       destination_name: location?.name ?? req.location ?? '',
       destination_address: address,
-      destination_contact: location?.contact_name ?? location?.contact ?? null,
-      destination_phone: location?.phone ?? location?.contact_phone ?? null,
+      destination_contact: destinationContact,
+      destination_phone: destinationPhone,
       notes: req.notes ?? '',
       created_by: userId,
     })
@@ -4205,6 +4232,66 @@ export async function updateDeliveryTicketStatus(id: string, status: DeliveryTic
   return updateDeliveryTicket(id, { status });
 }
 
+export async function updateTicketAddressFromProfile(ticketId: string) {
+  const { data: ticket, error: ticketErr } = await supabase
+    .from('delivery_tickets')
+    .select('*')
+    .eq('id', ticketId)
+    .single();
+  if (ticketErr || !ticket) return { success: false, error: ticketErr || { message: 'Ticket not found' } };
+
+  if (!ticket.location_id) {
+    return { success: false, error: { message: 'Ticket does not have an associated location ID' } };
+  }
+
+  const { data: bp, error: bpErr } = await supabase
+    .from('location_billing_profiles')
+    .select('*')
+    .eq('location_id', ticket.location_id)
+    .maybeSingle();
+
+  if (bpErr) return { success: false, error: bpErr };
+  
+  const { data: loc } = await supabase
+    .from('locations')
+    .select('*')
+    .eq('id', ticket.location_id)
+    .maybeSingle();
+
+  const storeAddress = bp?.store_address || bp?.storeAddress;
+  const storeCity = bp?.store_city || bp?.storeCity;
+  const storeProvince = bp?.store_province || bp?.storeProvince;
+  const storePostalCode = bp?.store_postal_code || bp?.storePostalCode;
+  const country = bp?.store_country || bp?.storeCountry || 'Canada';
+
+  let destinationAddress = '';
+  if (storeAddress) {
+    destinationAddress = `${storeAddress}, ${storeCity || ''}, ${storeProvince || ''} ${storePostalCode || ''}, ${country}`
+      .replace(/,\s*,/g, ',')
+      .replace(/\s+/g, ' ')
+      .trim();
+  } else {
+    destinationAddress = [
+      loc?.address,
+      loc?.street,
+      loc?.city,
+      loc?.province ?? loc?.state,
+      loc?.postal_code ?? loc?.postalCode,
+    ].filter(Boolean).join(', ');
+  }
+
+  const destinationContact = bp?.store_manager_name || bp?.storeManagerName || loc?.contact_name || loc?.contact || null;
+  const destinationPhone = bp?.store_phone || bp?.storePhone || loc?.phone || loc?.contact_phone || null;
+  const destinationName = loc?.name || ticket.destination_name || '';
+
+  return updateDeliveryTicket(ticketId, {
+    destinationAddress,
+    destinationName,
+    destinationContact,
+    destinationPhone
+  });
+}
+
 export async function updateDeliveryTicketItems(ticketId: string, items: any[]) {
   const results = await Promise.all(items.map((item) => supabase
     .from('delivery_ticket_items')
@@ -4235,7 +4322,7 @@ export async function markDeliveryTicketDelivered(id: string, receivedBy: string
   });
 }
 
-export async function getDeliveryRuns(filters: { status?: string; runDate?: string } = {}) {
+export async function getDeliveryRuns(filters: { status?: string; runDate?: string; driverId?: string } = {}) {
   let query = supabase
     .from('delivery_runs')
     .select('*, drivers(*), vehicles(*), delivery_tickets(*, delivery_ticket_items(*))')
@@ -4243,6 +4330,7 @@ export async function getDeliveryRuns(filters: { status?: string; runDate?: stri
     .order('created_at', { ascending: false });
   if (filters.status && filters.status !== 'all') query = query.eq('status', filters.status);
   if (filters.runDate) query = query.eq('run_date', filters.runDate);
+  if (filters.driverId) query = query.eq('driver_id', filters.driverId);
   const { data, error } = await query;
   if (error) {
     console.error('getDeliveryRuns:', error);
@@ -4264,6 +4352,30 @@ export async function getDeliveryRunById(id: string) {
 export async function createDeliveryRun(payload: any) {
   const userId = await getCurrentAuthUserId();
   const runNumber = await generateDeliveryNumber('delivery_runs', 'run_number', 'RUN');
+
+  // Default start address from LOC-HQ billing profile if not provided
+  let defaultStartAddress = '';
+  if (!payload.startAddress) {
+    const { data: hqProfile } = await supabase
+      .from('location_billing_profiles')
+      .select('*')
+      .eq('location_id', 'LOC-HQ')
+      .maybeSingle();
+
+    if (hqProfile) {
+      const storeAddress = hqProfile.store_address || hqProfile.storeAddress;
+      const city = hqProfile.store_city || hqProfile.storeCity;
+      const province = hqProfile.store_province || hqProfile.storeProvince;
+      const postalCode = hqProfile.store_postal_code || hqProfile.storePostalCode;
+      if (storeAddress) {
+        defaultStartAddress = `${storeAddress}, ${city || ''}, ${province || ''} ${postalCode || ''}, Canada`
+          .replace(/,\s*,/g, ',')
+          .replace(/\s+/g, ' ')
+          .trim();
+      }
+    }
+  }
+
   const { data, error } = await supabase
     .from('delivery_runs')
     .insert({
@@ -4275,6 +4387,7 @@ export async function createDeliveryRun(payload: any) {
       estimated_distance_km: Number(payload.estimatedDistanceKm ?? 0),
       estimated_duration_minutes: Number(payload.estimatedDurationMinutes ?? 0),
       notes: payload.notes ?? '',
+      start_address: payload.startAddress || defaultStartAddress,
       created_by: userId,
     })
     .select()
@@ -4509,21 +4622,43 @@ export async function buildGoogleMapsDirectionsUrl(runId: string) {
   // 1. Determine origin
   let origin = run.startAddress?.trim();
   if (!origin) {
-    // Load LOC-HQ to check for address
-    const { data: hqLoc } = await supabase
-      .from('locations')
+    // Load LOC-HQ to check for address in location_billing_profiles
+    const { data: hqProfile } = await supabase
+      .from('location_billing_profiles')
       .select('*')
-      .eq('id', 'LOC-HQ')
+      .eq('location_id', 'LOC-HQ')
       .maybeSingle();
     
-    if (hqLoc) {
-      origin = [
-        hqLoc.address,
-        hqLoc.street,
-        hqLoc.city,
-        hqLoc.province ?? hqLoc.state,
-        hqLoc.postal_code ?? hqLoc.postalCode,
-      ].filter(Boolean).join(', ');
+    if (hqProfile) {
+      const storeAddress = hqProfile.store_address || hqProfile.storeAddress;
+      const city = hqProfile.store_city || hqProfile.storeCity;
+      const province = hqProfile.store_province || hqProfile.storeProvince;
+      const postalCode = hqProfile.store_postal_code || hqProfile.storePostalCode;
+      if (storeAddress) {
+        origin = `${storeAddress}, ${city || ''}, ${province || ''} ${postalCode || ''}, Canada`
+          .replace(/,\s*,/g, ',')
+          .replace(/\s+/g, ' ')
+          .trim();
+      }
+    }
+
+    if (!origin) {
+      // Load LOC-HQ locations table fallback
+      const { data: hqLoc } = await supabase
+        .from('locations')
+        .select('*')
+        .eq('id', 'LOC-HQ')
+        .maybeSingle();
+      
+      if (hqLoc) {
+        origin = [
+          hqLoc.address,
+          hqLoc.street,
+          hqLoc.city,
+          hqLoc.province ?? hqLoc.state,
+          hqLoc.postal_code ?? hqLoc.postalCode,
+        ].filter(Boolean).join(', ');
+      }
     }
   }
 

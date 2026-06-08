@@ -25,17 +25,20 @@ import {
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/components/AuthProvider";
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
+import { isHqMaster } from "@/lib/roles";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 type Tab = "system" | "users";
-const ROLE_OPTIONS = ["hq_admin", "location_manager", "staff"] as const;
+const ROLE_OPTIONS = ["hq_master", "hq_ops", "location_manager", "driver"] as const;
 
 const ROLE_LABELS: Record<string, string> = {
-  hq_admin:         "HQ Admin",
+  hq_master:        "HQ Master",
+  hq_ops:           "HQ Operations",
+  hq_admin:         "HQ Master (Legacy)",
   location_manager: "Location Manager",
-  staff:            "Staff",
+  driver:           "Driver",
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -67,7 +70,7 @@ export default function SettingsPage() {
 
 function SettingsPageContent() {
   const { user } = useAuth();
-  const isHQAdmin = user?.role === "hq_admin";
+  const isHQAdmin = isHqMaster(user);
 
   // ── Tab state ──────────────────────────────────────────────────────────────
   const [activeTab, setActiveTab] = useState<Tab>("system");
@@ -430,7 +433,7 @@ function SettingsPageContent() {
                         </td>
                         <td className="px-4 py-4">
                           <Badge
-                            variant={profile.role === "hq_admin" ? "default" : profile.role === "location_manager" ? "neutral" : "warning"}
+                            variant={profile.role === "hq_master" || profile.role === "hq_admin" ? "default" : profile.role === "location_manager" ? "neutral" : "warning"}
                             className="text-[10px] font-medium"
                           >
                             {ROLE_LABELS[profile.role] ?? profile.role}
@@ -697,7 +700,7 @@ function SettingsPageContent() {
                 <label className="text-xs font-semibold text-neutral-700 uppercase tracking-wider">Role *</label>
                 <select
                   value={form.role}
-                  onChange={e => { setField("role", e.target.value); if (e.target.value === "hq_admin") setField("locationId", ""); }}
+                  onChange={e => { setField("role", e.target.value); if (e.target.value === "hq_master" || e.target.value === "hq_ops" || e.target.value === "driver") setField("locationId", ""); }}
                   className="w-full text-sm border border-neutral-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
                 >
                   {ROLE_OPTIONS.map(r => (
@@ -707,7 +710,7 @@ function SettingsPageContent() {
               </div>
 
               {/* Location — required for location_manager */}
-              {form.role !== "hq_admin" && (
+              {form.role === "location_manager" && (
                 <div className="space-y-1.5">
                   <label className="text-xs font-semibold text-neutral-700 uppercase tracking-wider">
                     Location {form.role === "location_manager" ? "*" : ""}

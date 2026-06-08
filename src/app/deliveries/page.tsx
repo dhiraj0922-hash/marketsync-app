@@ -36,11 +36,13 @@ import {
   estimateDeliveryRunRoute,
   buildGoogleMapsDirectionsUrl,
   getDeliveryRunById,
+  updateTicketAddressFromProfile,
   type DeliveryRunStatus,
   type DeliveryTicketStatus,
 } from "@/lib/storage";
 import { useAuth } from "@/components/AuthProvider";
-import { isHqAdmin, resolveLocationId } from "@/lib/roles";
+import { canAssignDrivers, isDriver, isHqStaff, resolveLocationId } from "@/lib/roles";
+import { supabase } from "@/lib/supabase";
 import {
   CalendarDays,
   CheckCircle2,
@@ -110,7 +112,9 @@ function EmptyState({ title, detail }: { title: string; detail: string }) {
 
 export default function DeliveriesPage() {
   const { user } = useAuth();
-  const hqAdmin = isHqAdmin(user);
+  const hqAdmin = isHqStaff(user);
+  const driverUser = isDriver(user);
+  const canManageDispatch = canAssignDrivers(user);
   const userLocationId = resolveLocationId(user);
 
   const [activeTab, setActiveTab] = useState<"tickets" | "runs" | "drivers" | "vehicles">("tickets");
@@ -165,18 +169,30 @@ export default function DeliveriesPage() {
   const refresh = async () => {
     setLoading(true);
     try {
-      const scopedLocation = hqAdmin ? undefined : userLocationId;
-      const [ticketRows, runRows, driverRows, vehicleRows, locationRows, vehicleLogRows] = await Promise.all([
-        getDeliveryTickets({ locationId: scopedLocation ?? undefined }),
-        hqAdmin ? getDeliveryRuns() : Promise.resolve([]),
-        hqAdmin ? getDrivers() : Promise.resolve([]),
+      const allDriversForLookup = hqAdmin || driverUser ? await getDrivers() : [];
+      const currentDriver = driverUser
+        ? allDriversForLookup.find((driver: any) => String(driver.email ?? "").toLowerCase() === String(user?.email ?? "").toLowerCase())
+        : null;
+      const scopedLocation = hqAdmin || driverUser ? undefined : userLocationId;
+      const [ticketRows, runRows, vehicleRows, locationRows, vehicleLogRows] = await Promise.all([
+        driverUser
+          ? Promise.resolve([])
+          : getDeliveryTickets({ locationId: scopedLocation ?? undefined }),
+        hqAdmin
+          ? getDeliveryRuns()
+          : driverUser && currentDriver?.id
+            ? getDeliveryRuns({ driverId: currentDriver.id })
+            : Promise.resolve([]),
         hqAdmin ? getVehicles() : Promise.resolve([]),
         loadLocations(),
         hqAdmin ? getVehicleDailyLogs() : Promise.resolve([]),
       ]);
-      setTickets(ticketRows);
+      const driverTicketRows = driverUser
+        ? runRows.flatMap((run: any) => (run.tickets ?? []).map((ticket: any) => ({ ...ticket, deliveryRun: run })))
+        : ticketRows;
+      setTickets(driverTicketRows);
       setRuns(runRows);
-      setDrivers(driverRows);
+      setDrivers(allDriversForLookup);
       setVehicles(vehicleRows);
       setLocations(locationRows);
       setVehicleLogs(vehicleLogRows);
@@ -443,11 +459,11 @@ export default function DeliveriesPage() {
 
         <div className="flex flex-wrap gap-2">
           {[
-            ["tickets", "Delivery Tickets", PackageCheck],
-            ["runs", "Delivery Runs", Route],
+            ["tickets", driverUser ? "My Stops" : "Delivery Tickets", PackageCheck],
+            ["runs", driverUser ? "My Routes" : "Delivery Runs", Route],
             ["drivers", "Drivers", UserRound],
             ["vehicles", "Vehicles", Truck],
-          ].filter(([key]) => hqAdmin || key === "tickets").map(([key, label, Icon]: any) => (
+          ].filter(([key]) => hqAdmin || (driverUser && (key === "tickets" || key === "runs")) || key === "tickets").map(([key, label, Icon]: any) => (
             <button
               key={key}
               onClick={() => setActiveTab(key)}
@@ -514,9 +530,9 @@ export default function DeliveriesPage() {
               )}
             </CardContent>
           </Card>
-        ) : activeTab === "runs" && hqAdmin ? (
-          <div className="grid grid-cols-1 gap-5 xl:grid-cols-[390px_1fr]">
-            <Card className="rounded-xl border-white/10 bg-[#111]">
+        ) : activeTab === "runs" && (hqAdmin || driverUser) ? (
+          <div className={`grid grid-cols-1 gap-5 ${hqAdmin ? "xl:grid-cols-[390px_1fr]" : ""}`}>
+            {hqAdmin && <Card className="rounded-xl border-white/10 bg-[#111]">
               <CardHeader className="border-b border-white/5"><CardTitle className="text-white">Create Delivery Run</CardTitle></CardHeader>
               <CardContent className="space-y-3 p-4">
                 <input type="date" value={newRun.runDate} onChange={(e) => setNewRun({ ...newRun, runDate: e.target.value })} className="w-full rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white" />
@@ -548,7 +564,7 @@ export default function DeliveriesPage() {
                   <Plus className="h-4 w-4" /> Create Run
                 </button>
               </CardContent>
-            </Card>
+            </Card>}
 
             <div className="space-y-4">
               {runs.length === 0 ? <EmptyState title="No delivery runs yet" detail="Create a run and assign open delivery tickets as stops." /> : runs.map((run) => {
@@ -577,12 +593,14 @@ export default function DeliveriesPage() {
                         </div>
                         <div className="flex flex-wrap items-center gap-2">
                           {statusBadge(run.status)}
-                          <select value={run.status} onChange={(e) => handleRunStatus(run, e.target.value as DeliveryRunStatus)} className="rounded-md border border-white/10 bg-[#171717] px-2 py-1 text-xs text-white">
-                            {runStatuses.map((status) => <option key={status} value={status}>{labelize(status)}</option>)}
-                          </select>
+                          {canManageDispatch && (
+                            <select value={run.status} onChange={(e) => handleRunStatus(run, e.target.value as DeliveryRunStatus)} className="rounded-md border border-white/10 bg-[#171717] px-2 py-1 text-xs text-white">
+                              {runStatuses.map((status) => <option key={status} value={status}>{labelize(status)}</option>)}
+                            </select>
+                          )}
                           <button onClick={() => setRouteRun(run)} className="inline-flex items-center gap-1 rounded-md border border-blue-500/30 px-3 py-1.5 text-xs font-semibold text-blue-200 hover:bg-blue-500/10"><Route className="h-3.5 w-3.5" /> Manage Route</button>
                           <button onClick={() => openRunReport(run)} className="inline-flex items-center gap-1 rounded-md border border-white/10 px-3 py-1.5 text-xs font-semibold text-zinc-200 hover:bg-white/10"><FileText className="h-3.5 w-3.5" /> Report</button>
-                          <button onClick={() => setSelectedRun(run)} className="inline-flex items-center gap-1 rounded-md border border-white/10 px-3 py-1.5 text-xs font-semibold text-zinc-200 hover:bg-white/10"><Edit3 className="h-3.5 w-3.5" /> Edit</button>
+                          {canManageDispatch && <button onClick={() => setSelectedRun(run)} className="inline-flex items-center gap-1 rounded-md border border-white/10 px-3 py-1.5 text-xs font-semibold text-zinc-200 hover:bg-white/10"><Edit3 className="h-3.5 w-3.5" /> Edit</button>}
                         </div>
                       </div>
                     </CardHeader>
@@ -783,13 +801,94 @@ export default function DeliveriesPage() {
                 </div>
               </div>
               {hqAdmin && (
-                <div className="rounded-xl border border-neutral-200 bg-white p-4">
-                  <label className="text-xs font-semibold uppercase text-neutral-500">Received by</label>
-                  <input value={receivedBy} onChange={(e) => setReceivedBy(e.target.value)} placeholder="Receiver name" className="mt-1 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm" />
-                  <label className="mt-3 block text-xs font-semibold uppercase text-neutral-500">Ticket notes</label>
-                  <textarea value={selectedTicket.notes ?? ""} onChange={(e) => setSelectedTicket({ ...selectedTicket, notes: e.target.value })} onBlur={async () => { await updateDeliveryTicket(selectedTicket.id, { notes: selectedTicket.notes }); await refresh(); }} className="mt-1 min-h-20 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm" />
-                  <label className="mt-3 block text-xs font-semibold uppercase text-neutral-500">Delivery notes</label>
-                  <textarea value={selectedTicket.deliveryNotes ?? ""} onChange={(e) => setSelectedTicket({ ...selectedTicket, deliveryNotes: e.target.value })} onBlur={async () => { await updateDeliveryTicket(selectedTicket.id, { deliveryNotes: selectedTicket.deliveryNotes }); await refresh(); }} className="mt-1 min-h-20 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm" />
+                <div className="space-y-4">
+                  <div className="rounded-xl border border-neutral-200 bg-white p-4 space-y-3">
+                    <p className="text-xs font-bold uppercase tracking-wider text-neutral-500 font-semibold">Edit Destination Address & Info</p>
+                    
+                    <div>
+                      <label className="block text-[10px] font-semibold uppercase text-neutral-500">Destination Name</label>
+                      <input
+                        value={selectedTicket.destinationName ?? ""}
+                        onChange={(e) => setSelectedTicket({ ...selectedTicket, destinationName: e.target.value })}
+                        onBlur={async () => {
+                          await updateDeliveryTicket(selectedTicket.id, { destinationName: selectedTicket.destinationName });
+                          await refresh();
+                        }}
+                        placeholder="Destination Name"
+                        className="mt-1 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-semibold uppercase text-neutral-500">Destination Address</label>
+                      <textarea
+                        value={selectedTicket.destinationAddress ?? ""}
+                        onChange={(e) => setSelectedTicket({ ...selectedTicket, destinationAddress: e.target.value })}
+                        onBlur={async () => {
+                          await updateDeliveryTicket(selectedTicket.id, { destinationAddress: selectedTicket.destinationAddress });
+                          await refresh();
+                        }}
+                        placeholder="Destination Address"
+                        className="mt-1 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm min-h-16"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-[10px] font-semibold uppercase text-neutral-500">Contact Person</label>
+                        <input
+                          value={selectedTicket.destinationContact ?? ""}
+                          onChange={(e) => setSelectedTicket({ ...selectedTicket, destinationContact: e.target.value })}
+                          onBlur={async () => {
+                            await updateDeliveryTicket(selectedTicket.id, { destinationContact: selectedTicket.destinationContact });
+                            await refresh();
+                          }}
+                          placeholder="Contact name"
+                          className="mt-1 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-semibold uppercase text-neutral-500">Contact Phone</label>
+                        <input
+                          value={selectedTicket.destinationPhone ?? ""}
+                          onChange={(e) => setSelectedTicket({ ...selectedTicket, destinationPhone: e.target.value })}
+                          onBlur={async () => {
+                            await updateDeliveryTicket(selectedTicket.id, { destinationPhone: selectedTicket.destinationPhone });
+                            await refresh();
+                          }}
+                          placeholder="Contact phone"
+                          className="mt-1 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="pt-2">
+                      <button
+                        onClick={async () => {
+                          const res: any = await updateTicketAddressFromProfile(selectedTicket.id);
+                          if (res.success && res.data) {
+                            setToast("Delivery address updated from store profile.");
+                            setSelectedTicket(res.data);
+                            await refresh();
+                          } else {
+                            alert(`Address update failed: ${res.error?.message ?? "Unknown error"}`);
+                          }
+                        }}
+                        className="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-xs font-semibold text-neutral-700 hover:bg-neutral-100"
+                      >
+                        <RefreshCw className="h-3.5 w-3.5" /> Update Address from Store Profile
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-neutral-200 bg-white p-4">
+                    <label className="text-xs font-semibold uppercase text-neutral-500">Received by</label>
+                    <input value={receivedBy} onChange={(e) => setReceivedBy(e.target.value)} placeholder="Receiver name" className="mt-1 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm" />
+                    <label className="mt-3 block text-xs font-semibold uppercase text-neutral-500">Ticket notes</label>
+                    <textarea value={selectedTicket.notes ?? ""} onChange={(e) => setSelectedTicket({ ...selectedTicket, notes: e.target.value })} onBlur={async () => { await updateDeliveryTicket(selectedTicket.id, { notes: selectedTicket.notes }); await refresh(); }} className="mt-1 min-h-20 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm" />
+                    <label className="mt-3 block text-xs font-semibold uppercase text-neutral-500">Delivery notes</label>
+                    <textarea value={selectedTicket.deliveryNotes ?? ""} onChange={(e) => setSelectedTicket({ ...selectedTicket, deliveryNotes: e.target.value })} onBlur={async () => { await updateDeliveryTicket(selectedTicket.id, { deliveryNotes: selectedTicket.deliveryNotes }); await refresh(); }} className="mt-1 min-h-20 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm" />
+                  </div>
                 </div>
               )}
             </div>
@@ -826,6 +925,97 @@ export default function DeliveriesPage() {
                     <button onClick={() => handleCompleteRun(routeRun)} className="inline-flex items-center justify-center gap-2 rounded-lg bg-success-600 px-3 py-2 text-sm font-semibold text-white"><SquareCheckBig className="h-4 w-4" /> Complete Run</button>
                   </div>
                 </div>
+
+                {hqAdmin ? (
+                  <div className="rounded-xl border border-neutral-200 bg-white p-4 space-y-3">
+                    <label className="block text-xs font-bold uppercase tracking-wider text-neutral-500 font-semibold">Start Address (Origin)</label>
+                    <div className="flex gap-2">
+                      <input
+                        value={routeRun.startAddress ?? ""}
+                        onChange={(e) => setRouteRun({ ...routeRun, startAddress: e.target.value })}
+                        placeholder="Start address (e.g. HQ address)"
+                        className="flex-1 rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900"
+                      />
+                      <button
+                        onClick={async () => {
+                          const res = await updateDeliveryRun(routeRun.id, { startAddress: routeRun.startAddress });
+                          if (res.success) {
+                            setToast("Start address updated.");
+                            await refresh();
+                          } else {
+                            alert(`Failed to save start address: ${res.error?.message ?? "Unknown error"}`);
+                          }
+                        }}
+                        className="rounded-lg bg-neutral-900 px-3 py-2 text-sm font-semibold text-white"
+                      >
+                        Save
+                      </button>
+                      <button
+                        onClick={async () => {
+                          // Load LOC-HQ to check for address in location_billing_profiles
+                          const { data: hqProfile } = await supabase
+                            .from('location_billing_profiles')
+                            .select('*')
+                            .eq('location_id', 'LOC-HQ')
+                            .maybeSingle();
+                          
+                          let hqAddress = '';
+                          if (hqProfile) {
+                            const storeAddress = hqProfile.store_address || hqProfile.storeAddress;
+                            const city = hqProfile.store_city || hqProfile.storeCity;
+                            const province = hqProfile.store_province || hqProfile.storeProvince;
+                            const postalCode = hqProfile.store_postal_code || hqProfile.storePostalCode;
+                            if (storeAddress) {
+                              hqAddress = `${storeAddress}, ${city || ''}, ${province || ''} ${postalCode || ''}, Canada`
+                                .replace(/,\s*,/g, ',')
+                                .replace(/\s+/g, ' ')
+                                .trim();
+                            }
+                          }
+
+                          if (!hqAddress) {
+                            // locations fallback
+                            const { data: hqLoc } = await supabase
+                              .from('locations')
+                              .select('*')
+                              .eq('id', 'LOC-HQ')
+                              .maybeSingle();
+                            if (hqLoc) {
+                              hqAddress = [
+                                hqLoc.address,
+                                hqLoc.street,
+                                hqLoc.city,
+                                hqLoc.province ?? hqLoc.state,
+                                hqLoc.postal_code ?? hqLoc.postalCode,
+                              ].filter(Boolean).join(', ');
+                            }
+                          }
+
+                          if (hqAddress) {
+                            const res = await updateDeliveryRun(routeRun.id, { startAddress: hqAddress });
+                            if (res.success) {
+                              setToast("Start address defaulted from HQ profile.");
+                              setRouteRun({ ...routeRun, startAddress: hqAddress });
+                              await refresh();
+                            } else {
+                              alert(`Failed to save start address: ${res.error?.message ?? "Unknown error"}`);
+                            }
+                          } else {
+                            alert("HQ location profile address is not configured.");
+                          }
+                        }}
+                        className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-xs font-semibold text-neutral-700 hover:bg-neutral-100"
+                      >
+                        Default HQ
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="rounded-xl border border-neutral-200 bg-white p-4">
+                    <p className="text-xs font-bold uppercase tracking-wider text-neutral-500 font-semibold">Start Address (Origin)</p>
+                    <p className="mt-1 text-sm font-medium text-neutral-900">{routeRun.startAddress || "—"}</p>
+                  </div>
+                )}
 
                 <div className="rounded-xl border border-neutral-200 bg-white p-4 space-y-3">
                   <p className="text-xs font-bold uppercase tracking-wider text-neutral-500">Google Maps Route Integration</p>
@@ -962,7 +1152,15 @@ export default function DeliveriesPage() {
                         <div>
                           <p className="text-sm font-bold text-neutral-950">Stop #{index + 1} · {ticket.destinationName}</p>
                           <p className="text-xs text-neutral-500">{ticket.ticketNumber} · Requisition {ticket.requisitionId}</p>
-                          <p className="mt-1 text-xs text-neutral-500">{ticket.destinationAddress || "No address snapshot"}</p>
+                          <div className="mt-1 text-xs">
+                            {ticket.destinationAddress ? (
+                              <span className="text-neutral-600">{ticket.destinationAddress}</span>
+                            ) : (
+                              <span className="text-red-600 font-semibold flex items-center gap-1">
+                                <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> Destination address missing.
+                              </span>
+                            )}
+                          </div>
                           <div className="mt-2 flex flex-wrap gap-2 text-xs text-neutral-500">
                             <span>ETA: {formatDateTime(ticket.estimatedArrivalTime)}</span>
                             <span>Arrived: {formatDateTime(ticket.arrivedAt)}</span>
@@ -973,6 +1171,26 @@ export default function DeliveriesPage() {
                         </div>
                         <div className="flex flex-wrap gap-1">
                           {statusBadge(ticket.status)}
+                          {hqAdmin && (
+                            <button
+                              onClick={async () => {
+                                const res = await updateTicketAddressFromProfile(ticket.id);
+                                if (res.success) {
+                                  setToast("Delivery address updated from store profile.");
+                                  await refresh();
+                                  const updatedRunRes = await getDeliveryRunById(routeRun.id);
+                                  if (updatedRunRes.success) {
+                                    setRouteRun(updatedRunRes.data);
+                                  }
+                                } else {
+                                  alert(`Address update failed: ${res.error?.message ?? "Unknown error"}`);
+                                }
+                              }}
+                              className="rounded border border-neutral-200 px-2 py-1 text-xs hover:bg-neutral-50"
+                            >
+                              Update Address
+                            </button>
+                          )}
                           <button onClick={() => moveStop(routeRun, ticket.id, -1)} className="rounded border border-neutral-200 px-2 py-1 text-xs">Up</button>
                           <button onClick={() => moveStop(routeRun, ticket.id, 1)} className="rounded border border-neutral-200 px-2 py-1 text-xs">Down</button>
                           <button onClick={() => setSelectedTicket(ticket)} className="rounded border border-neutral-200 px-2 py-1 text-xs">Open Ticket</button>

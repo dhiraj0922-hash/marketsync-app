@@ -35,21 +35,43 @@ export async function POST(req: NextRequest) {
     // 3. Determine origin address
     let originAddress = run.startAddress?.trim();
     if (!originAddress) {
-      // Fetch LOC-HQ location to get address details
-      const { data: hqLoc } = await supabase
-        .from("locations")
+      // Fetch LOC-HQ location billing profile to get address details
+      const { data: hqProfile } = await supabase
+        .from("location_billing_profiles")
         .select("*")
-        .eq("id", "LOC-HQ")
+        .eq("location_id", "LOC-HQ")
         .maybeSingle();
 
-      if (hqLoc) {
-        originAddress = [
-          hqLoc.address,
-          hqLoc.street,
-          hqLoc.city,
-          hqLoc.province ?? hqLoc.state,
-          hqLoc.postal_code ?? hqLoc.postalCode,
-        ].filter(Boolean).join(", ");
+      if (hqProfile) {
+        const storeAddress = hqProfile.store_address || hqProfile.storeAddress;
+        const city = hqProfile.store_city || hqProfile.storeCity;
+        const province = hqProfile.store_province || hqProfile.storeProvince;
+        const postalCode = hqProfile.store_postal_code || hqProfile.storePostalCode;
+        if (storeAddress) {
+          originAddress = `${storeAddress}, ${city || ""}, ${province || ""} ${postalCode || ""}, Canada`
+            .replace(/,\s*,/g, ",")
+            .replace(/\s+/g, " ")
+            .trim();
+        }
+      }
+
+      if (!originAddress) {
+        // Fall back to locations table metadata
+        const { data: hqLoc } = await supabase
+          .from("locations")
+          .select("*")
+          .eq("id", "LOC-HQ")
+          .maybeSingle();
+
+        if (hqLoc) {
+          originAddress = [
+            hqLoc.address,
+            hqLoc.street,
+            hqLoc.city,
+            hqLoc.province ?? hqLoc.state,
+            hqLoc.postal_code ?? hqLoc.postalCode,
+          ].filter(Boolean).join(", ");
+        }
       }
     }
 

@@ -109,7 +109,7 @@ export async function PATCH(req: NextRequest) {
   if (!profile_id) {
     return NextResponse.json({ error: "profile_id is required" }, { status: 400 });
   }
-  if (role && !["hq_admin", "location_manager", "staff"].includes(role)) {
+  if (role && !["hq_master", "hq_ops", "location_manager", "driver", "hq_admin"].includes(role)) {
     return NextResponse.json({ error: `Invalid role: ${role}` }, { status: 400 });
   }
 

@@ -22,14 +22,16 @@ import { HQOnlyGuard } from "@/components/HQOnlyGuard";
 // ── Role maps ─────────────────────────────────────────────────────────────────
 // DB roles ↔ display labels
 const DB_ROLE_MAP: Record<string, string> = {
-  hq_admin:          "HQ Admin",
+  hq_master:         "HQ Master",
+  hq_ops:            "HQ Operations",
   location_manager:  "Location Manager",
-  staff:             "Staff",
+  driver:            "Driver",
+  hq_admin:          "HQ Master (Legacy)",
 };
 const DISPLAY_ROLE_MAP: Record<string, string> = Object.fromEntries(
   Object.entries(DB_ROLE_MAP).map(([k, v]) => [v, k])
 );
-const ROLES_LIST = Object.values(DB_ROLE_MAP); // display labels for <select>
+const ROLES_LIST = ["HQ Master", "HQ Operations", "Location Manager", "Driver"]; // display labels for <select>
 
 export default function Users() {
   return (
@@ -858,7 +860,9 @@ function UsersPageContent() {
 
   // ── Role badge colour ─────────────────────────────────────────────────────
   const roleBadgeClass = (dbRole: string) => {
-    if (dbRole === "hq_admin")         return "bg-brand-100 text-brand-800 border-brand-200";
+    if (dbRole === "hq_master" || dbRole === "hq_admin") return "bg-brand-100 text-brand-800 border-brand-200";
+    if (dbRole === "hq_ops")           return "bg-blue-100 text-blue-800 border-blue-200";
+    if (dbRole === "driver")           return "bg-emerald-100 text-emerald-800 border-emerald-200";
     if (dbRole === "location_manager") return "bg-neutral-100 text-neutral-700 border-neutral-200";
     return "bg-warning-50 text-warning-700 border-warning-200";
   };

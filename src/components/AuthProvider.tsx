@@ -3,7 +3,7 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { supabase, supabaseConfigured } from "@/lib/supabase";
-import { ROLE_HQ_ADMIN, LOC_HQ, type AppUser } from "@/lib/roles";
+import { canAccessPath, getAllowedHomePath, type AppUser } from "@/lib/roles";
 
 type AuthContextType = {
   user: AppUser | null;
@@ -262,7 +262,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if ((!user || user.isActive === false) && pathname !== "/login") {
       router.push("/login");
     } else if (user && user.isActive !== false && pathname === "/login") {
-      router.push("/");
+      router.push(getAllowedHomePath(user));
+    } else if (user && user.isActive !== false && !canAccessPath(user, pathname)) {
+      router.push(getAllowedHomePath(user));
     }
   }, [user, loading, pathname, router]);
 

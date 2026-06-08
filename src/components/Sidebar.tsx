@@ -36,6 +36,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/components/AuthProvider";
+import { canAccessPath, isDriver, isHqMaster, isHqOps, isLocationManager } from "@/lib/roles";
 
 interface NavItem {
   name: string;
@@ -78,17 +79,24 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
   const pathname = usePathname();
   const { user } = useAuth();
 
-  const isHQAdmin = user?.role === "hq_admin";
-  const visibleNav = navigation.filter((item) => !item.hqOnly || isHQAdmin);
+  const isHQAdmin = isHqMaster(user);
+  const driverMode = isDriver(user);
+  const visibleNav = driverMode
+    ? [{ name: "My Routes", href: "/deliveries", icon: Truck }]
+    : navigation.filter((item) => canAccessPath(user, item.href));
 
   const initials = user?.name
     ? user.name.split(" ").map((w: string) => w[0]).join("").slice(0, 2).toUpperCase()
-    : (isHQAdmin ? "HQ" : "LM");
+    : (isHQAdmin ? "HQ" : driverMode ? "DR" : "LM");
 
   const roleLabel = isHQAdmin
-    ? "HQ Admin"
-    : user?.role === "location_manager"
+    ? "HQ Master"
+    : isHqOps(user)
+      ? "HQ Operations"
+    : isLocationManager(user)
       ? "Location Manager"
+      : driverMode
+        ? "Driver"
       : "Staff";
 
   const NavContent = (
