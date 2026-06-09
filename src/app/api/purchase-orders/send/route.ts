@@ -92,7 +92,7 @@ export async function POST(req: NextRequest) {
     .single();
 
   if (profileError || !profile?.is_active) return jsonError("Active user profile not found.", 403);
-  if (!["hq_admin", "location_manager"].includes(profile.role)) {
+  if (!["hq_master", "hq_ops", "hq_admin", "location_manager"].includes(profile.role)) {
     return jsonError("You do not have permission to send supplier orders.", 403);
   }
 

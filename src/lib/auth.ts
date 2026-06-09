@@ -8,7 +8,9 @@
  * auth.users or user_profiles directly in component code.
  *
  * Phase 1 roles:
- *   hq_admin        — full access, location_id may be null
+ *   hq_master       — full access, location_id may be null
+ *   hq_ops          — operational HQ access
+ *   driver          — assigned delivery route access
  *   location_manager — scoped to one location, location_id is always set
  */
 
@@ -16,7 +18,7 @@ import { supabase } from "@/lib/supabase";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-export type UserRole = "hq_admin" | "location_manager";
+export type UserRole = "hq_master" | "hq_ops" | "location_manager" | "driver" | "hq_admin";
 
 export interface UserProfile {
   /** user_profiles.id — UUID row identifier */
@@ -108,7 +110,7 @@ export async function getCurrentRole(): Promise<UserRole | null> {
 
 /**
  * Returns the current user's assigned location_id, or null.
- * Always null for hq_admin. Always set for location_manager.
+ * Usually null for HQ/driver roles. Always set for location_manager.
  */
 export async function getCurrentLocationId(): Promise<string | null> {
   const profile = await getCurrentUserProfile();
@@ -127,10 +129,11 @@ export async function getCurrentUserId(): Promise<string | null> {
 }
 
 /**
- * Returns true if the current user has the hq_admin role.
+ * Returns true if the current user has the HQ master/admin role.
  */
 export async function isHQAdmin(): Promise<boolean> {
-  return (await getCurrentRole()) === "hq_admin";
+  const role = await getCurrentRole();
+  return role === "hq_master" || role === "hq_admin";
 }
 
 /**
@@ -142,13 +145,13 @@ export async function isLocationManager(): Promise<boolean> {
 
 /**
  * Returns true if the current user can access the given locationId.
- * - hq_admin: can access any location (returns true always)
+ * - hq_master / legacy hq_admin / hq_ops: can access any location (returns true always)
  * - location_manager: only if their assigned location matches
  */
 export async function canAccessLocation(targetLocationId: string): Promise<boolean> {
   const profile = await getCurrentUserProfile();
   if (!profile) return false;
-  if (profile.role === "hq_admin") return true;
+  if (profile.role === "hq_master" || profile.role === "hq_admin" || profile.role === "hq_ops") return true;
   return profile.locationId === targetLocationId;
 }
 

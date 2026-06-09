@@ -2806,7 +2806,8 @@ export default function Requisitions() {
   }
 
   // ── Unknown / unexpected role ────────────────────────────────────────────────
-  if (profile.role !== "hq_admin" && profile.role !== "location_manager") {
+  const isHqRequisitionRole = ["hq_master", "hq_admin", "hq_ops"].includes(profile.role);
+  if (!isHqRequisitionRole && profile.role !== "location_manager") {
     return (
       <div className="flex flex-col items-center justify-center py-24 px-8 text-center space-y-5">
         <div className="w-14 h-14 rounded-full bg-danger-50 border border-danger-200 flex items-center justify-center">
@@ -2824,7 +2825,7 @@ export default function Requisitions() {
     );
   }
 
-  if (profile.role === "hq_admin") {
+  if (isHqRequisitionRole) {
     return <HQAdminView finishedGoods={finishedGoods} profile={profile} />;
   }
 

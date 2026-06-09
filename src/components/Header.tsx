@@ -4,7 +4,7 @@ import { usePathname } from "next/navigation";
 import { Bell, Search, MapPin, ChevronDown, LogOut, User, Check, Menu } from "lucide-react";
 import { useAuth } from "./AuthProvider";
 import { useState, useEffect, useRef } from "react";
-import { isHqAdmin, accessScopeLabel } from "@/lib/roles";
+import { isHqStaff } from "@/lib/roles";
 import { useActiveLocation, type LocationOption } from "./LocationContext";
 import { loadLocations } from "@/lib/storage";
 
@@ -25,7 +25,7 @@ export function Header({ onMenuToggle }: { onMenuToggle?: () => void }) {
   const [locations, setLocations] = useState<LocationOption[]>([]);
   const locationBtnRef = useRef<HTMLDivElement>(null);
 
-  const isHQ = isHqAdmin(user);
+  const isHQ = isHqStaff(user);
 
   // Load location list once for HQ admins
   useEffect(() => {

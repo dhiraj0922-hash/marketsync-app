@@ -138,7 +138,7 @@ export async function POST(req: NextRequest) {
   }
 
   const authorized =
-    (role === "hq_admin" && sourceLocationId === LONDON_TEMPLATE_LOCATION_ID) ||
+    ((role === "hq_master" || role === "hq_admin") && sourceLocationId === LONDON_TEMPLATE_LOCATION_ID) ||
     ((role === "location_manager" || role === "location manager") && locationId === LONDON_TEMPLATE_LOCATION_ID);
   if (!authorized) {
     return jsonError("Only HQ admins or London / LOC-1091 location managers can copy London template inventory.", 403);
