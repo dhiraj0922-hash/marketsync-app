@@ -1,12 +1,17 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/components/AuthProvider";
+import { getAllowedHomePath } from "@/lib/roles";
 import {
   ArrowRight,
   BarChart3,
   Boxes,
   CheckCircle2,
+  Eye,
+  EyeOff,
   Factory,
   KeyRound,
   Lock,
@@ -19,8 +24,11 @@ import {
 } from "lucide-react";
 
 export default function LoginPage() {
+  const router = useRouter();
+  const { user } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -31,6 +39,11 @@ export default function LoginPage() {
   const [resetError, setResetError] = useState<string | null>(null);
 
   const submittingRef = useRef(false);
+  const loginRoute = "/login";
+
+  const goToLogin = () => {
+    router.push(user ? getAllowedHomePath(user) : loginRoute);
+  };
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -99,12 +112,13 @@ export default function LoginPage() {
               <p className="text-[11px] font-medium text-zinc-500">Restaurant inventory command center</p>
             </div>
           </div>
-          <a
-            href="/login"
+          <button
+            type="button"
+            onClick={goToLogin}
             className="hidden rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-zinc-200 backdrop-blur transition-colors hover:bg-white/10 sm:inline-flex"
           >
             Sign In
-          </a>
+          </button>
         </header>
 
         <div className="grid flex-1 items-center gap-10 py-10 lg:grid-cols-[1.08fr_0.92fr] lg:py-12">
@@ -122,19 +136,21 @@ export default function LoginPage() {
             </p>
 
             <div className="mt-8 flex flex-col gap-3 sm:flex-row">
-              <a
-                href="/login"
+              <button
+                type="button"
+                onClick={goToLogin}
                 className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-400 px-5 py-3 text-sm font-black text-neutral-950 shadow-xl shadow-emerald-500/20 transition hover:bg-emerald-300"
               >
                 Get Started
                 <ArrowRight className="h-4 w-4" />
-              </a>
-              <a
-                href="/login"
+              </button>
+              <button
+                type="button"
+                onClick={goToLogin}
                 className="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/[0.06] px-5 py-3 text-sm font-bold text-white backdrop-blur transition hover:bg-white/[0.1]"
               >
                 Login
-              </a>
+              </button>
             </div>
 
             <div className="mt-10 grid max-w-2xl grid-cols-1 gap-3 sm:grid-cols-3">
@@ -264,13 +280,21 @@ export default function LoginPage() {
                       </div>
                       <input
                         id="login-password"
-                        type="password"
+                        type={showPassword ? "text" : "password"}
                         required
                         value={password}
                         onChange={(e) => setPassword(e.target.value)}
-                        className="w-full rounded-xl border border-white/10 bg-black/25 py-3 pl-10 pr-4 text-sm font-medium text-white outline-none transition-all placeholder:text-zinc-600 focus:border-emerald-300/60 focus:ring-2 focus:ring-emerald-400/15"
+                        className="w-full rounded-xl border border-white/10 bg-black/25 py-3 pl-10 pr-12 text-sm font-medium text-white outline-none transition-all placeholder:text-zinc-600 focus:border-emerald-300/60 focus:ring-2 focus:ring-emerald-400/15"
                         placeholder="••••••••••••"
                       />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword((visible) => !visible)}
+                        aria-label={showPassword ? "Hide password" : "Show password"}
+                        className="absolute right-3 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-white/5 hover:text-white focus:outline-none focus:ring-2 focus:ring-emerald-400/30"
+                      >
+                        {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
                     </div>
                     <button
                       id="login-submit-btn"
