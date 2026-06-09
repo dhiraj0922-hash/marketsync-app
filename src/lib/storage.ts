@@ -4351,6 +4351,9 @@ function mapDeliveryTicketPatchToDB(patch: any) {
   if ('destinationAddress' in patch) out.destination_address = patch.destinationAddress ?? '';
   if ('destinationContact' in patch) out.destination_contact = patch.destinationContact ?? null;
   if ('destinationPhone' in patch) out.destination_phone = patch.destinationPhone ?? null;
+  if ('proofPhotoUrl' in patch) out.proof_photo_url = patch.proofPhotoUrl ?? null;
+  if ('signatureUrl' in patch) out.signature_url = patch.signatureUrl ?? null;
+  if ('driverDepartedPreviousStopAt' in patch) out.driver_departed_previous_stop_at = patch.driverDepartedPreviousStopAt || null;
   return out;
 }
 
@@ -4608,9 +4611,24 @@ export async function updateDeliveryTicketItems(ticketId: string, items: any[]) 
 }
 
 export async function markDeliveryTicketDelivered(id: string, receivedBy: string, items: any[]) {
+  for (const item of items) {
+    const del = Number(item.deliveredQty ?? 0);
+    const iss = Number(item.issueQty ?? 0);
+    const shp = Number(item.shippedQty ?? 0);
+    if (del + iss !== shp) {
+      return {
+        success: false,
+        error: {
+          message: "Delivered quantity plus issue quantity must equal shipped quantity for all items."
+        }
+      };
+    }
+  }
+
   const normalized = items.map((item) => ({
     ...item,
-    deliveredQty: Math.max(0, Number(item.shippedQty ?? 0) - Number(item.issueQty ?? 0)),
+    deliveredQty: Number(item.deliveredQty ?? 0),
+    issueQty: Number(item.issueQty ?? 0),
   }));
   const itemRes = await updateDeliveryTicketItems(id, normalized);
   if (!itemRes.success) return itemRes;
@@ -4865,6 +4883,15 @@ export async function reorderDeliveryRunStops(runId: string, orderedTicketIds: s
 }
 
 export async function startDeliveryRun(runId: string, payload: { odometerStartKm?: number | string; startLocationName?: string; startAddress?: string } = {}) {
+  const { data: tickets, error: ticketError } = await supabase
+    .from('delivery_tickets')
+    .select('id')
+    .eq('delivery_run_id', runId);
+  if (ticketError) return { success: false, error: ticketError };
+  if (!tickets || tickets.length === 0) {
+    return { success: false, error: { message: "Cannot start a delivery run with 0 stops/tickets." } };
+  }
+
   const now = new Date().toISOString();
   const patch: any = {
     status: 'in_progress',
@@ -4891,6 +4918,11 @@ export async function completeDeliveryRun(runId: string, payload: { odometerEndK
   const runRes = await getDeliveryRunById(runId);
   if (!runRes.success) return runRes;
   const run = runRes.data;
+  const stopsCount = (run.tickets ?? []).length;
+  if (stopsCount === 0) {
+    return { success: false, error: { message: "Cannot complete a delivery run with 0 stops/tickets." } };
+  }
+
   const incomplete = (run.tickets ?? []).some((ticket: any) => !['delivered', 'issue_reported', 'cancelled'].includes(ticket.status));
   if (incomplete) return { success: false, error: { message: 'All tickets must be delivered, issue reported, or cancelled before completing the run.' } };
 

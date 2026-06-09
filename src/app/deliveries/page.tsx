@@ -43,7 +43,7 @@ import {
 } from "@/lib/storage";
 import { useAuth } from "@/components/AuthProvider";
 import { isDeliveryDestinationLocation } from "@/lib/locationRegistry";
-import { canAssignDrivers, isDriver, isHqStaff, resolveLocationId } from "@/lib/roles";
+import { canAssignDrivers, isDriver, isHqStaff, isLocationManager, resolveLocationId } from "@/lib/roles";
 import { supabase } from "@/lib/supabase";
 import {
   CalendarDays,
@@ -134,6 +134,7 @@ export default function DeliveriesPage() {
   const { user } = useAuth();
   const hqAdmin = isHqStaff(user);
   const driverUser = isDriver(user);
+  const managerUser = isLocationManager(user);
   const canManageDispatch = canAssignDrivers(user);
   const userLocationId = resolveLocationId(user);
 
@@ -338,6 +339,15 @@ export default function DeliveriesPage() {
 
   const markDelivered = async () => {
     if (!selectedTicket) return;
+    for (const item of ticketItemDrafts) {
+      const del = Number(item.deliveredQty ?? 0);
+      const iss = Number(item.issueQty ?? 0);
+      const shp = Number(item.shippedQty ?? 0);
+      if (del + iss !== shp) {
+        alert(`Cannot complete delivery for ${item.itemName}: Delivered Quantity (${del}) + Issue Quantity (${iss}) must equal Shipped Quantity (${shp}).`);
+        return;
+      }
+    }
     const res = await markDeliveryTicketDelivered(selectedTicket.id, receivedBy.trim(), ticketItemDrafts);
     if (!res.success) {
       alert(`Could not mark delivered: ${res.error?.message ?? "Unknown error"}`);
@@ -394,6 +404,12 @@ export default function DeliveriesPage() {
   };
 
   const handleRunStatus = async (run: any, status: DeliveryRunStatus) => {
+    if (status === "in_progress" || status === "completed") {
+      const stopsCount = (run.tickets ?? []).length;
+      if (stopsCount === 0) {
+        return alert(`Cannot transition run to ${status} with 0 stops/tickets.`);
+      }
+    }
     if (status === "completed") {
       const incomplete = (run.tickets ?? []).some((ticket: any) => !["delivered", "issue_reported", "cancelled"].includes(ticket.status));
       if (incomplete) return alert("A run can be completed only when all tickets are delivered, issue reported, or cancelled.");
@@ -404,6 +420,10 @@ export default function DeliveriesPage() {
   };
 
   const handleStartRun = async (run: any) => {
+    const stopsCount = (run.tickets ?? []).length;
+    if (stopsCount === 0) {
+      return alert("Cannot start a delivery run with 0 stops/tickets.");
+    }
     const odometerStartKm = runControlDraft.odometerStartKm || run.odometerStartKm;
     if (odometerStartKm === "" || odometerStartKm == null) return alert("Starting odometer is required to start the run.");
     const res = await startDeliveryRun(run.id, { odometerStartKm });
@@ -414,6 +434,10 @@ export default function DeliveriesPage() {
   };
 
   const handleCompleteRun = async (run: any) => {
+    const stopsCount = (run.tickets ?? []).length;
+    if (stopsCount === 0) {
+      return alert("Cannot complete a delivery run with 0 stops/tickets.");
+    }
     const odometerEndKm = runControlDraft.odometerEndKm || run.odometerEndKm;
     if (odometerEndKm === "" || odometerEndKm == null) return alert("Ending odometer is required to complete the run.");
     const res = await completeDeliveryRun(run.id, { odometerEndKm });
@@ -684,6 +708,9 @@ export default function DeliveriesPage() {
             if (driverUser) {
               return key === "tickets" || key === "runs";
             }
+            if (managerUser) {
+              return key === "tickets" || key === "runs";
+            }
             return hqAdmin || key === "tickets";
           }).map(([key, label, Icon]: any) => (
             <button
@@ -785,7 +812,7 @@ export default function DeliveriesPage() {
               )}
             </CardContent>
           </Card>
-        ) : activeTab === "runs" && (hqAdmin || driverUser) ? (
+        ) : activeTab === "runs" && (hqAdmin || driverUser || managerUser) ? (
           <div className={`grid grid-cols-1 gap-5 ${hqAdmin ? "xl:grid-cols-[390px_1fr]" : ""}`}>
             {hqAdmin && <Card className="rounded-2xl border-slate-200 bg-white shadow-sm">
               <CardHeader className="border-b border-slate-100"><CardTitle className="text-slate-950">Create Delivery Run</CardTitle></CardHeader>
@@ -1047,12 +1074,12 @@ export default function DeliveriesPage() {
               <button onClick={() => window.print()} className="inline-flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50"><Printer className="h-4 w-4" /> Print</button>
               <div className="flex flex-wrap gap-2">
                 {hqAdmin && ticketStatuses.map((status) => (
-                  <button key={status} onClick={async () => { const res = await updateDeliveryTicketStatus(selectedTicket.id, status); if (!res.success) alert(res.error?.message ?? "Update failed"); else { setSelectedTicket({ ...selectedTicket, status }); await refresh(); } }} className="rounded-lg border border-neutral-200 bg-white px-3 py-2 text-xs font-semibold text-neutral-700 hover:bg-neutral-50">{labelize(status)}</button>
+                  <button key={status} onClick={async () => { const res = await updateDeliveryTicketStatus(selectedTicket.id, status); if (!res.success) alert(res.error?.message ?? "Update failed"); else { setSelectedTicket({ ...selectedTicket, status }); await refresh(); } }} className="rounded-lg border border-neutral-200 bg-white px-3 py-2 text-xs font-semibold text-neutral-700 hover:bg-slate-50">{labelize(status)}</button>
                 ))}
-                {(hqAdmin || driverUser) && <button onClick={saveTicketItems} className="rounded-lg bg-neutral-900 px-3 py-2 text-sm font-semibold text-white">Save Lines</button>}
+                {(hqAdmin || driverUser || managerUser) && <button onClick={saveTicketItems} className="rounded-lg bg-neutral-900 px-3 py-2 text-sm font-semibold text-white">Save Lines</button>}
                 {(hqAdmin || driverUser) && <button onClick={() => markArrived()} className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white">Mark Arrived</button>}
-                {(hqAdmin || driverUser) && <button onClick={() => reportIssue()} className="rounded-lg bg-amber-600 px-3 py-2 text-sm font-semibold text-white">Report Issue</button>}
-                {(hqAdmin || driverUser) && <button onClick={markDelivered} className="rounded-lg bg-success-600 px-3 py-2 text-sm font-semibold text-white">Mark Delivered</button>}
+                {(hqAdmin || driverUser || managerUser) && <button onClick={() => reportIssue()} className="rounded-lg bg-amber-600 px-3 py-2 text-sm font-semibold text-white">Report Issue</button>}
+                {(hqAdmin || driverUser || managerUser) && <button onClick={markDelivered} className="rounded-lg bg-success-600 px-3 py-2 text-sm font-semibold text-white">{managerUser ? "Confirm Receipt" : "Mark Delivered"}</button>}
               </div>
             </div>
           )}
@@ -1093,10 +1120,10 @@ export default function DeliveriesPage() {
                           <td className="py-2 text-right">{item.approvedQty}</td>
                           <td className="py-2 text-right">{item.shippedQty}</td>
                           <td className="py-2 text-right">
-                            {(hqAdmin || driverUser) ? <input type="number" min="0" value={item.deliveredQty} onChange={(e) => setTicketItemDrafts((prev) => prev.map((row, idx) => idx === index ? { ...row, deliveredQty: Number(e.target.value) } : row))} className="w-20 rounded border border-neutral-200 px-2 py-1 text-right" /> : item.deliveredQty}
+                            {(hqAdmin || driverUser || managerUser) ? <input type="number" min="0" value={item.deliveredQty} onChange={(e) => setTicketItemDrafts((prev) => prev.map((row, idx) => idx === index ? { ...row, deliveredQty: Number(e.target.value) } : row))} className="w-20 rounded border border-neutral-200 px-2 py-1 text-right" /> : item.deliveredQty}
                           </td>
                           <td className="py-2 text-right">
-                            {(hqAdmin || driverUser) ? (
+                            {(hqAdmin || driverUser || managerUser) ? (
                               <div className="flex justify-end gap-2">
                                 <input type="number" min="0" value={item.issueQty} onChange={(e) => setTicketItemDrafts((prev) => prev.map((row, idx) => idx === index ? { ...row, issueQty: Number(e.target.value) } : row))} className="w-16 rounded border border-neutral-200 px-2 py-1 text-right" />
                                 <input value={item.issueReason ?? ""} onChange={(e) => setTicketItemDrafts((prev) => prev.map((row, idx) => idx === index ? { ...row, issueReason: e.target.value } : row))} placeholder="Reason" className="w-32 rounded border border-neutral-200 px-2 py-1" />
@@ -1194,7 +1221,7 @@ export default function DeliveriesPage() {
                 </div>
               )}
 
-              {(hqAdmin || driverUser) && (
+              {(hqAdmin || driverUser || managerUser) && (
                 <div className="rounded-xl border border-neutral-200 bg-white p-4">
                   <label className="text-xs font-semibold uppercase text-neutral-500">Received by</label>
                   <input value={receivedBy} onChange={(e) => setReceivedBy(e.target.value)} placeholder="Receiver name" className="mt-1 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm" />
@@ -1731,9 +1758,9 @@ export default function DeliveriesPage() {
                                   </>
                                 )}
                                 <button onClick={() => setSelectedTicket(ticket)} className="rounded border border-neutral-200 px-2 py-1 text-xs font-semibold hover:bg-neutral-50">Open Ticket</button>
-                                <button onClick={() => markArrived(ticket)} className="rounded border border-blue-200 bg-blue-50 px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100">Mark Arrived</button>
-                                <button onClick={() => { setSelectedTicket(ticket); }} className="rounded border border-success-200 bg-success-50 px-2 py-1 text-xs font-semibold text-success-700 hover:bg-success-100">Mark Delivered</button>
-                                <button onClick={() => reportIssue(ticket)} className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-700 hover:bg-amber-100">Report Issue</button>
+                                {(hqAdmin || driverUser) && <button onClick={() => markArrived(ticket)} className="rounded border border-blue-200 bg-blue-50 px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100">Mark Arrived</button>}
+                                {(hqAdmin || driverUser || managerUser) && <button onClick={() => { setSelectedTicket(ticket); }} className="rounded border border-success-200 bg-success-50 px-2 py-1 text-xs font-semibold text-success-700 hover:bg-success-100">{managerUser ? "Confirm Receipt" : "Mark Delivered"}</button>}
+                                {(hqAdmin || driverUser || managerUser) && <button onClick={() => reportIssue(ticket)} className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-700 hover:bg-amber-100">Report Issue</button>}
                               </div>
                             </div>
                           )}
