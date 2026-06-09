@@ -4744,8 +4744,9 @@ export async function getDeliveryRunById(id: string) {
     .from('delivery_runs')
     .select('*, drivers(*), vehicles(*), delivery_tickets(*, delivery_ticket_items(*))')
     .eq('id', id)
-    .single();
+    .maybeSingle();
   if (error) return { success: false, error };
+  if (!data) return { success: false, error: { message: 'Delivery run not found.' } };
   return { success: true, data: mapDeliveryRunToFrontend(data) };
 }
 
@@ -4973,7 +4974,7 @@ export async function estimateDeliveryRunRoute(
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      return { success: false, error: err.error || `HTTP error ${res.status}` };
+      return { success: false, error: err.error || err.message || `HTTP error ${res.status}` };
     }
     const data = await res.json();
     return { success: true, data };
@@ -5008,11 +5009,16 @@ export async function updateDeliveryRunRouteEstimate(
     .update(mapDeliveryRunPatchToDB(patch))
     .eq('id', runId)
     .select()
-    .single();
+    .maybeSingle();
 
   if (error) {
-    console.error('updateDeliveryRunRouteEstimate error:', error);
+    console.error('[Route Estimate Supabase Error]', error);
     return { success: false, error };
+  }
+  if (!data) {
+    const notFoundError = { message: 'Delivery run not found.' };
+    console.error('[Route Estimate Supabase Error]', notFoundError);
+    return { success: false, error: notFoundError };
   }
 
   if (Array.isArray(estimate.tickets) && estimate.tickets.length > 0) {

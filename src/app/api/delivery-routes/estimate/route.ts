@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import {
-  getDeliveryRunById,
   updateDeliveryRunRouteEstimate,
   applyOptimizedStopOrder,
 } from "@/lib/storage";
@@ -25,12 +24,29 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 2. Load delivery run
-    const runRes = await getDeliveryRunById(runId);
-    if (!runRes.success || !runRes.data) {
-      return NextResponse.json({ error: runRes.error?.message || "Delivery run not found" }, { status: 404 });
+    // 2. Load delivery run directly. Avoid embedded relationship .single()
+    // coercion; route estimation needs only the run snapshot fields here.
+    const { data: runRow, error: runError } = await supabase
+      .from("delivery_runs")
+      .select("*")
+      .eq("id", runId)
+      .maybeSingle();
+
+    if (runError) {
+      console.error("[Route Estimate Supabase Error]", runError);
+      return NextResponse.json({ error: runError.message || "Delivery run not found." }, { status: 500 });
     }
-    const run = runRes.data;
+
+    if (!runRow) {
+      return NextResponse.json({ error: "Delivery run not found." }, { status: 404 });
+    }
+    const run = {
+      id: runRow.id,
+      runNumber: runRow.run_number,
+      startLocationName: runRow.start_location_name ?? "",
+      startAddress: runRow.start_address ?? "",
+      actualStartTime: runRow.actual_start_time ?? "",
+    };
 
     // 3. Determine origin address
     let originAddress = run.startAddress?.trim();
@@ -40,6 +56,8 @@ export async function POST(req: NextRequest) {
         .from("location_billing_profiles")
         .select("*")
         .eq("location_id", "LOC-HQ")
+        .order("updated_at", { ascending: false })
+        .limit(1)
         .maybeSingle();
 
       if (hqProfile) {
@@ -61,6 +79,8 @@ export async function POST(req: NextRequest) {
           .from("locations")
           .select("*")
           .eq("id", "LOC-HQ")
+          .order("updated_at", { ascending: false })
+          .limit(1)
           .maybeSingle();
 
         if (hqLoc) {
@@ -83,41 +103,52 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 4. Load stops (delivery tickets) sorted by sequence
-    const stops = [...(run.tickets || [])]
-      .sort((a, b) => (a.stopSequence ?? 999) - (b.stopSequence ?? 999))
+    // 4. Load stops from delivery ticket snapshots. Route estimation should
+    // not require live location/profile lookups when snapshot addresses exist.
+    const { data: ticketRows, error: ticketsError } = await supabase
+      .from("delivery_tickets")
+      .select("id, ticket_number, destination_name, destination_address, stop_sequence, status")
+      .eq("delivery_run_id", runId)
+      .order("stop_sequence", { ascending: true, nullsFirst: false })
+      .order("created_at", { ascending: true });
+
+    if (ticketsError) {
+      console.error("[Route Estimate Supabase Error]", ticketsError);
+      return NextResponse.json({ error: ticketsError.message || "No stops assigned to this run." }, { status: 500 });
+    }
+
+    const stops = (ticketRows ?? [])
+      .map((ticket: any) => ({
+        id: ticket.id,
+        ticketNumber: ticket.ticket_number,
+        destinationName: ticket.destination_name ?? "",
+        destinationAddress: ticket.destination_address ?? "",
+        stopSequence: ticket.stop_sequence ?? null,
+        status: ticket.status,
+      }))
       .filter((t: any) => t.status !== "cancelled");
 
-    // If there are no stops, we return a zero route estimate
+    console.log("[Route Estimate Request]", {
+      runId,
+      origin: originAddress,
+      stopCount: stops.length,
+      returnToStart,
+      ticketAddresses: stops.map((t: any) => t.destinationAddress),
+    });
+
     if (stops.length === 0) {
-      await updateDeliveryRunRouteEstimate(runId, {
-        estimatedDistanceKm: 0,
-        estimatedDurationMinutes: 0,
-        routeEstimateSource: "google",
-        routePolyline: null,
-        googleRouteSummary: null,
-        tickets: [],
-      });
-      return NextResponse.json({
-        success: true,
-        routeEstimateAvailable: true,
-        estimatedDistanceKm: 0,
-        estimatedDurationMinutes: 0,
-        optimizedOrder: [],
-      });
+      return NextResponse.json({ routeEstimateAvailable: false, message: "No stops assigned to this run." }, { status: 400 });
     }
 
-    // Filter stops to ensure they have an address or name
-    const activeStops = stops.filter(
-      (t: any) => (t.destinationAddress?.trim() || t.destinationName?.trim() || "") !== ""
-    );
-
-    if (activeStops.length === 0) {
+    const missingAddress = stops.some((t: any) => !t.destinationAddress?.trim());
+    if (missingAddress) {
       return NextResponse.json({
         routeEstimateAvailable: false,
-        message: "Stops are missing destination addresses. Enter addresses manually.",
-      });
+        message: "One or more stops missing destination address.",
+      }, { status: 400 });
     }
+
+    const activeStops = stops;
 
     // 5. Structure origin, destination, and intermediates for the Routes API
     const originWaypoint = { address: originAddress };
@@ -175,8 +206,8 @@ export async function POST(req: NextRequest) {
       console.error("Google Routes API error response:", errorText);
       return NextResponse.json({
         routeEstimateAvailable: false,
-        message: `Google Routes API call failed. Fallback to manual estimation.`,
-      });
+        message: `Google Routes API call failed: ${errorText || googleResponse.statusText}`,
+      }, { status: googleResponse.status || 502 });
     }
 
     const resData = await googleResponse.json();
