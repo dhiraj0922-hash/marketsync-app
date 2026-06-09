@@ -7,6 +7,7 @@ import { useState, useEffect, useRef } from "react";
 import { isHqStaff } from "@/lib/roles";
 import { useActiveLocation, type LocationOption } from "./LocationContext";
 import { loadLocations } from "@/lib/storage";
+import { isActiveLocation } from "@/lib/locationRegistry";
 
 const getPageTitle = (pathname: string) => {
   if (pathname === "/") return "Overview";
@@ -32,7 +33,7 @@ export function Header({ onMenuToggle }: { onMenuToggle?: () => void }) {
     if (!isHQ) return;
     loadLocations().then((locs: any[]) => {
       const mapped: LocationOption[] = Array.isArray(locs)
-        ? locs.map((l: any) => ({ id: l.id, name: l.name || l.id }))
+        ? locs.filter(isActiveLocation).map((l: any) => ({ id: l.id, name: l.name || l.id }))
         : [];
       console.log("[Header] loaded locations for dropdown:", mapped);
       setLocations(mapped);

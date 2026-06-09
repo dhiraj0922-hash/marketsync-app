@@ -17,6 +17,7 @@ import {
   updateUserProfileAndBilling,
   type LocationBillingProfile,
 } from "@/lib/storage";
+import { isUserAssignableLocation } from "@/lib/locationRegistry";
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
 
 // ── Role maps ─────────────────────────────────────────────────────────────────
@@ -1153,7 +1154,7 @@ function UsersPageContent() {
                         className="w-full p-2 border border-neutral-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-1 focus:ring-brand-500"
                       >
                         <option value="">— None / HQ —</option>
-                        {locations.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+                        {locations.filter(isUserAssignableLocation).map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
                       </select>
                     </div>
                   </div>
@@ -1343,7 +1344,7 @@ function UsersPageContent() {
                     className="w-full p-2 border border-neutral-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-1 focus:ring-brand-500"
                   >
                     <option value="">— None / HQ —</option>
-                    {locations.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+                    {locations.filter(isUserAssignableLocation).map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
                   </select>
                 </div>
               </div>

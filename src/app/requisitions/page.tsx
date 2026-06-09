@@ -30,6 +30,7 @@ import {
   X,
   Warehouse,
 } from "lucide-react";
+import { isActiveLocation, isStoreLocation } from "@/lib/locationRegistry";
 import {
   loadRequisitions,
   saveRequisitions,
@@ -1902,7 +1903,7 @@ function HQAdminView({
                     onChange={(e) => setFilterLocation(e.target.value)}
                   >
                     <option value="All">All Locations (HQ View)</option>
-                    {locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+                    {locations.filter(l => isActiveLocation(l) && isStoreLocation(l)).map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
                   </select>
                 )}
                 {profile?.role === "location_manager" && profile.locationId && (
@@ -2500,7 +2501,7 @@ function HQAdminView({
                 className="h-10 rounded-lg border border-white/10 bg-[#151515] px-3 text-sm text-zinc-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
                 <option value="all">All Locations</option>
-                {locations.map((loc) => (
+                {locations.filter(l => isActiveLocation(l) && isStoreLocation(l)).map((loc) => (
                   <option key={loc.id} value={loc.id}>
                     {loc.name}
                   </option>

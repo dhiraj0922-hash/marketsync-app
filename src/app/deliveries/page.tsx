@@ -42,6 +42,7 @@ import {
   type DeliveryTicketStatus,
 } from "@/lib/storage";
 import { useAuth } from "@/components/AuthProvider";
+import { isDeliveryDestinationLocation } from "@/lib/locationRegistry";
 import { canAssignDrivers, isDriver, isHqStaff, resolveLocationId } from "@/lib/roles";
 import { supabase } from "@/lib/supabase";
 import {
@@ -529,7 +530,7 @@ export default function DeliveriesPage() {
                   </select>
                   <select value={locationFilter} onChange={(e) => setLocationFilter(e.target.value)} className="rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white">
                     <option value="all">All locations</option>
-                    {locations.map((loc) => <option key={loc.id} value={loc.id}>{loc.name}</option>)}
+                    {locations.filter(isDeliveryDestinationLocation).map((loc) => <option key={loc.id} value={loc.id}>{loc.name}</option>)}
                   </select>
                 </div>
               </div>

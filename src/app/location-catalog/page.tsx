@@ -10,6 +10,7 @@ import {
   type OutletCatalogItem, type SaleItem, type AssignCatalogResult,
 } from "@/lib/storage";
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
+import { isActiveLocation } from "@/lib/locationRegistry";
 import {
   BookOpen, Plus, Search, Edit2, ToggleLeft, ToggleRight, Upload,
   Download, CheckCircle2, X, RefreshCw, AlertCircle, Package, Store, MapPin, Loader2,
@@ -69,7 +70,7 @@ function LocationCatalogContent() {
   const [bulkAssignResult, setBulkAssignResult] = useState<AssignCatalogResult | null>(null);
 
   // Active non-HQ locations
-  const activeLocations = locations.filter(l => l.status === 'active' && l.type !== 'hq');
+  const activeLocations = locations.filter(l => isActiveLocation(l) && l.type !== 'hq');
 
   const load = useCallback(async () => {
     setLoading(true);

@@ -65,6 +65,7 @@ const navigation: NavItem[] = [
   { name: "Sales Entry",      href: "/location-sales", icon: ReceiptText },
   { name: "Reports",          href: "/reports",        icon: BarChart4 },
   { name: "Users",            href: "/users",          icon: Users,          hqOnly: true },
+  { name: "Locations",        href: "/locations",      icon: MapPin,         hqOnly: true },
   { name: "Settings",         href: "/settings",       icon: Settings,       hqOnly: true },
 ];
 

@@ -23,6 +23,7 @@ import {
   BarChart3, Loader2, RefreshCw, ChevronDown, Filter, DollarSign,
   HardHat, Clock, Store, ClipboardList,
 } from "lucide-react";
+import { isReportVisibleLocation } from "@/lib/locationRegistry";
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -287,7 +288,7 @@ function ReportsContent({ user }: { user: any }) {
                     className="w-full appearance-none pl-3 pr-8 py-2 border border-neutral-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-1 focus:ring-brand-400"
                   >
                     <option value="">All Locations</option>
-                    {locations.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+                    {locations.filter(l => isReportVisibleLocation(l, user.role, user.locationId)).map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
                   </select>
                   <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-neutral-400 pointer-events-none" />
                 </div>

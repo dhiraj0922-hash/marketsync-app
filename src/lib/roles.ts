@@ -147,6 +147,7 @@ export function canAccessPath(user: { role?: string | null } | null | undefined,
       "/recipes",
       "/users",
       "/settings",
+      "/locations",
     ].some(blocked => path === blocked || path.startsWith(`${blocked}/`));
   }
   return false;

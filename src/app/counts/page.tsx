@@ -10,6 +10,8 @@ import { loadCounts, saveCounts, loadInventory, loadLocations, loadSuppliers, up
 import { useAuth } from "@/components/AuthProvider";
 import { isHqAdmin, resolveLocationId } from "@/lib/roles";
 
+import { isActiveLocation } from "@/lib/locationRegistry";
+
 // countTypes is static — no need to load from DB
 const countTypes = ["Daily", "Weekly", "Monthly", "Spot Check"];
 
@@ -73,10 +75,10 @@ export default function Counts() {
         }
         setSupplierIdToName(supMap);
 
-        // Filter to active locations only (status === 'active' or no status field)
+        // Filter to active locations only (case-insensitive status check)
         const activeLocs: { id: string; name: string }[] = Array.isArray(loadedLocs)
           ? loadedLocs
-              .filter((l: any) => !l.status || l.status === "active")
+              .filter((l: any) => isActiveLocation(l))
               .map((l: any) => ({ id: l.id, name: l.name }))
           : [];
         setLocations(activeLocs);

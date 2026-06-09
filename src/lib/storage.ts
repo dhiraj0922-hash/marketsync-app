@@ -1,4 +1,17 @@
 import { supabase } from "@/lib/supabase";
+import {
+  normalizeLocationStatus,
+  isActiveLocation,
+  isStoreLocation,
+  isHqLocation,
+  isInternalLocation,
+  isWarehouseLocation,
+  isDeliveryDestinationLocation,
+  isUserAssignableLocation,
+  isReportVisibleLocation,
+  buildFullLocationAddress,
+  getLocationHealthStatus
+} from "./locationRegistry";
 
 // ============================================================================
 // GLOBAL MAPPER ARCHITECTURE
@@ -3465,7 +3478,13 @@ const mapLocationToFrontend = (db: any) => ({
     // subtype is the human-friendly display label (store/airport/mall/other/hq)
     // Falls back to type if subtype column doesn't exist yet in older rows
     subtype: db.subtype || db.type,
-    status:  db.status
+    status:  db.status,
+    purpose: db.purpose || 'store',
+    isDeliveryDestination: db.is_delivery_destination !== false,
+    isHq: !!db.is_hq,
+    isInternal: !!db.is_internal,
+    sortOrder: db.sort_order ?? null,
+    notes: db.notes || ''
 });
 
 /**
@@ -3499,7 +3518,13 @@ const mapLocationToDB = (l: any) => ({
     type:    UI_TO_DB_TYPE[l.type] ?? 'branch',
     // subtype preserves the original UI label for display purposes
     subtype: l.subtype || l.type || '',
-    status:  l.status || ''
+    status:  l.status || '',
+    purpose: l.purpose || 'store',
+    is_delivery_destination: l.isDeliveryDestination !== false,
+    is_hq: !!l.isHq,
+    is_internal: !!l.isInternal,
+    sort_order: l.sortOrder ?? null,
+    notes: l.notes || ''
 });
 
 export async function loadLocations() {
@@ -3526,6 +3551,8 @@ export async function insertLocation(
   payload: {
     id: string; name: string; code: string;
     type: string; subtype: string; status: string;
+    purpose?: string; isDeliveryDestination?: boolean;
+    isHq?: boolean; isInternal?: boolean; notes?: string;
   }
 ): Promise<{ success: boolean; location?: any; error?: string }> {
   const row = mapLocationToDB(payload);
@@ -3540,6 +3567,271 @@ export async function insertLocation(
   if (error) return { success: false, error: error.message };
   // Return as frontend model so callers can merge into local state directly
   return { success: true, location: mapLocationToFrontend(data) };
+}
+
+export async function getAllLocationsForRegistry(): Promise<any[]> {
+  const { data: locs, error: locsErr } = await supabase.from('locations').select('*');
+  if (locsErr || !locs) return [];
+  
+  const { data: profiles } = await supabase.from('location_billing_profiles').select('*');
+  const profileMap = new Map(profiles?.map(p => [p.location_id, p]) ?? []);
+
+  return locs.map(l => {
+    const frontendLoc = mapLocationToFrontend(l);
+    const bp = profileMap.get(l.id);
+    return {
+      ...frontendLoc,
+      billingProfile: bp ? mapBillingProfileToFrontend(bp) : null
+    };
+  });
+}
+
+export async function getLocationById(id: string): Promise<{ success: boolean; data: any; error?: any }> {
+  const { data: loc, error: locErr } = await supabase.from('locations').select('*').eq('id', id).maybeSingle();
+  if (locErr) return { success: false, data: null, error: locErr };
+  if (!loc) return { success: false, data: null, error: { message: 'Location not found' } };
+
+  const { data: bp } = await supabase.from('location_billing_profiles').select('*').eq('location_id', id).maybeSingle();
+
+  return {
+    success: true,
+    data: {
+      ...mapLocationToFrontend(loc),
+      billingProfile: bp ? mapBillingProfileToFrontend(bp) : null
+    }
+  };
+}
+
+export async function createLocationWithProfile(payload: {
+  location: {
+    id: string;
+    name: string;
+    code?: string;
+    status: string;
+    type: string;
+    subtype: string;
+    purpose: string;
+    isDeliveryDestination: boolean;
+    isHq: boolean;
+    isInternal: boolean;
+    notes?: string;
+  };
+  billingProfile: Partial<LocationBillingProfile>;
+}): Promise<{ success: boolean; error?: any }> {
+  const locRow = mapLocationToDB(payload.location);
+  const { error: locErr } = await supabase.from('locations').insert(locRow);
+  if (locErr) return { success: false, error: locErr };
+
+  // Initialize/upsert billing profile
+  const bpRow = {
+    location_id: payload.location.id,
+    legal_name: payload.billingProfile.legalName || null,
+    incorporation_address: payload.billingProfile.incorporationAddress || null,
+    billing_address: payload.billingProfile.billingAddress || null,
+    billing_city: payload.billingProfile.billingCity || null,
+    billing_province: payload.billingProfile.billingProvince || null,
+    billing_postal_code: payload.billingProfile.billingPostalCode || null,
+    hst_number: payload.billingProfile.hstNumber || null,
+    business_number: payload.billingProfile.businessNumber || null,
+    store_address: payload.billingProfile.storeAddress || null,
+    store_city: payload.billingProfile.storeCity || null,
+    store_province: payload.billingProfile.storeProvince || null,
+    store_postal_code: payload.billingProfile.storePostalCode || null,
+    store_phone: payload.billingProfile.storePhone || null,
+    store_manager_name: payload.billingProfile.storeManagerName || null,
+  };
+  
+  const { error: bpErr } = await supabase.from('location_billing_profiles').upsert(bpRow, { onConflict: 'location_id' });
+  if (bpErr) return { success: false, error: bpErr };
+
+  return { success: true };
+}
+
+export async function updateLocationRegistryRecord(id: string, patch: any): Promise<{ success: boolean; error?: any }> {
+  const dbPatch: any = {};
+  if (patch.name !== undefined) dbPatch.name = patch.name;
+  if (patch.code !== undefined) dbPatch.code = patch.code;
+  if (patch.status !== undefined) dbPatch.status = patch.status;
+  if (patch.type !== undefined) dbPatch.type = UI_TO_DB_TYPE[patch.type] ?? patch.type;
+  if (patch.subtype !== undefined) dbPatch.subtype = patch.subtype;
+  if (patch.purpose !== undefined) dbPatch.purpose = patch.purpose;
+  if (patch.isDeliveryDestination !== undefined) dbPatch.is_delivery_destination = patch.isDeliveryDestination;
+  if (patch.isHq !== undefined) dbPatch.is_hq = patch.isHq;
+  if (patch.isInternal !== undefined) dbPatch.is_internal = patch.isInternal;
+  if (patch.notes !== undefined) dbPatch.notes = patch.notes;
+  if (patch.sortOrder !== undefined) dbPatch.sort_order = patch.sortOrder;
+
+  const { error } = await supabase.from('locations').update(dbPatch).eq('id', id);
+  if (error) return { success: false, error };
+  return { success: true };
+}
+
+export async function updateLocationBillingProfile(locationId: string, patch: any): Promise<{ success: boolean; error?: any }> {
+  const dbPatch: any = {
+    location_id: locationId
+  };
+  if (patch.legalName !== undefined) dbPatch.legal_name = patch.legalName;
+  if (patch.incorporationAddress !== undefined) dbPatch.incorporation_address = patch.incorporationAddress;
+  if (patch.billingAddress !== undefined) dbPatch.billing_address = patch.billingAddress;
+  if (patch.billingCity !== undefined) dbPatch.billing_city = patch.billingCity;
+  if (patch.billingProvince !== undefined) dbPatch.billing_province = patch.billingProvince;
+  if (patch.billingPostalCode !== undefined) dbPatch.billing_postal_code = patch.billingPostalCode;
+  if (patch.hstNumber !== undefined) dbPatch.hst_number = patch.hstNumber;
+  if (patch.businessNumber !== undefined) dbPatch.business_number = patch.businessNumber;
+  if (patch.storeAddress !== undefined) dbPatch.store_address = patch.storeAddress;
+  if (patch.storeCity !== undefined) dbPatch.store_city = patch.storeCity;
+  if (patch.storeProvince !== undefined) dbPatch.store_province = patch.storeProvince;
+  if (patch.storePostalCode !== undefined) dbPatch.store_postal_code = patch.storePostalCode;
+  if (patch.storePhone !== undefined) dbPatch.store_phone = patch.storePhone;
+  if (patch.storeManagerName !== undefined) dbPatch.store_manager_name = patch.storeManagerName;
+
+  const { error } = await supabase.from('location_billing_profiles').upsert(dbPatch, { onConflict: 'location_id' });
+  if (error) return { success: false, error };
+  return { success: true };
+}
+
+export async function getUserAssignableLocations(): Promise<any[]> {
+  const locs = await loadLocations();
+  return locs.filter(l => isUserAssignableLocation(l));
+}
+
+export async function getDeliveryDestinationLocations(): Promise<any[]> {
+  const locs = await loadLocations();
+  return locs.filter(l => isDeliveryDestinationLocation(l));
+}
+
+export async function getRequisitionLocations(): Promise<any[]> {
+  const locs = await loadLocations();
+  return locs.filter(l => isActiveLocation(l) && isStoreLocation(l));
+}
+
+export async function getHqStartLocation(): Promise<any | null> {
+  const res = await getLocationById('LOC-HQ');
+  return res.success ? res.data : null;
+}
+
+export async function getLocationUsers(locationId: string): Promise<UserProfileRow[]> {
+  const allProfiles = await loadUserProfiles();
+  return allProfiles.filter(p => p.locationId === locationId);
+}
+
+export async function getLocationActivityCounts(locationId: string): Promise<{
+  openTicketsCount: number;
+  openRequisitionsCount: number;
+  assignedUsersCount: number;
+  inventoryRowsCount: number;
+}> {
+  const allProfiles = await loadUserProfiles();
+  const assignedUsersCount = allProfiles.filter(p => p.locationId === locationId).length;
+
+  const { count: openTicketsCount } = await supabase
+    .from('delivery_tickets')
+    .select('*', { count: 'exact', head: true })
+    .eq('location_id', locationId)
+    .not('status', 'in', '(delivered,cancelled)');
+
+  const { count: openRequisitionsCount } = await supabase
+    .from('requisitions')
+    .select('*', { count: 'exact', head: true })
+    .eq('location_id', locationId)
+    .not('status', 'in', '(fulfilled,cancelled,rejected)');
+
+  const { count: inventoryRowsCount } = await supabase
+    .from('inventory_items')
+    .select('*', { count: 'exact', head: true })
+    .eq('location_id', locationId);
+
+  return {
+    openTicketsCount: openTicketsCount ?? 0,
+    openRequisitionsCount: openRequisitionsCount ?? 0,
+    assignedUsersCount,
+    inventoryRowsCount: inventoryRowsCount ?? 0
+  };
+}
+
+export async function getLocationRegistryHealth(): Promise<any> {
+  const locs = await getAllLocationsForRegistry();
+  
+  const { count: missingAddrTickets } = await supabase
+    .from('delivery_tickets')
+    .select('*', { count: 'exact', head: true })
+    .or('destination_address.eq.,destination_address.is.null')
+    .not('status', 'in', '(delivered,cancelled)');
+
+  let totalLocations = locs.length;
+  let activeStores = 0;
+  let deliveryDestinations = 0;
+  let missingAddress = 0;
+  let missingBillingProfile = 0;
+  let inactiveWithActivity = 0;
+
+  const healthRecords = await Promise.all(locs.map(async (l) => {
+    const activity = await getLocationActivityCounts(l.id);
+    const warnings = getLocationHealthStatus(l, l.billingProfile, activity);
+    
+    const isAct = isActiveLocation(l);
+    const isStore = isStoreLocation(l);
+    const isDest = isDeliveryDestinationLocation(l);
+
+    if (isAct && isStore) activeStores++;
+    if (isDest) deliveryDestinations++;
+    
+    const street = (l.billingProfile?.storeAddress || l.address || l.street || "").trim();
+    if (!street) missingAddress++;
+    if (!l.billingProfile) missingBillingProfile++;
+    if (!isAct && (activity.openTicketsCount > 0 || activity.openRequisitionsCount > 0 || activity.assignedUsersCount > 0)) {
+      inactiveWithActivity++;
+    }
+
+    return {
+      location: l,
+      activity,
+      warnings
+    };
+  }));
+
+  return {
+    summary: {
+      totalLocations,
+      activeStores,
+      deliveryDestinations,
+      missingAddress,
+      missingBillingProfile,
+      inactiveWithActivity,
+      deliveryTicketsMissingAddress: missingAddrTickets ?? 0
+    },
+    records: healthRecords
+  };
+}
+
+export async function syncLocationAddressToOpenTickets(locationId: string): Promise<{ success: boolean; count: number; error?: any }> {
+  const res = await getLocationById(locationId);
+  if (!res.success || !res.data) return { success: false, count: 0, error: res.error || { message: 'Location not found' } };
+  const loc = res.data;
+  const addr = buildFullLocationAddress(loc, loc.billingProfile);
+  if (!addr) return { success: false, count: 0, error: { message: 'Location has no physical address to sync' } };
+
+  const { data: tickets, error: fetchErr } = await supabase
+    .from('delivery_tickets')
+    .select('id')
+    .eq('location_id', locationId)
+    .not('status', 'in', '(delivered,cancelled)');
+  if (fetchErr) return { success: false, count: 0, error: fetchErr };
+  if (!tickets || tickets.length === 0) return { success: true, count: 0 };
+
+  const ticketIds = tickets.map(t => t.id);
+  const { error: updateErr } = await supabase
+    .from('delivery_tickets')
+    .update({
+      destination_address: addr,
+      destination_name: loc.name || '',
+      destination_contact: loc.billingProfile?.storeManagerName || null,
+      destination_phone: loc.billingProfile?.storePhone || null
+    })
+    .in('id', ticketIds);
+
+  if (updateErr) return { success: false, count: 0, error: updateErr };
+  return { success: true, count: ticketIds.length };
 }
 
 
