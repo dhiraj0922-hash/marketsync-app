@@ -184,6 +184,13 @@ export default function DeliveriesPage() {
     damageNotes: "",
   });
   const [runControlDraft, setRunControlDraft] = useState({ odometerStartKm: "", odometerEndKm: "" });
+  const [manualEstimateDraft, setManualEstimateDraft] = useState({
+    estimatedDistanceKm: "",
+    estimatedDurationMinutes: "",
+    routeEstimateSource: "manual",
+    notes: "",
+  });
+  const [savingManualEstimate, setSavingManualEstimate] = useState(false);
   const [receivedBy, setReceivedBy] = useState("");
   const [ticketItemDrafts, setTicketItemDrafts] = useState<any[]>([]);
   const [estimatingRoute, setEstimatingRoute] = useState(false);
@@ -268,6 +275,12 @@ export default function DeliveriesPage() {
     setRunControlDraft({
       odometerStartKm: routeRun.odometerStartKm ?? "",
       odometerEndKm: routeRun.odometerEndKm ?? "",
+    });
+    setManualEstimateDraft({
+      estimatedDistanceKm: routeRun.estimatedDistanceKm != null && routeRun.estimatedDistanceKm !== 0 ? String(routeRun.estimatedDistanceKm) : "",
+      estimatedDurationMinutes: routeRun.estimatedDurationMinutes != null && routeRun.estimatedDurationMinutes !== 0 ? String(routeRun.estimatedDurationMinutes) : "",
+      routeEstimateSource: ["manual", "google_manual", "google"].includes(routeRun.routeEstimateSource) ? routeRun.routeEstimateSource : "manual",
+      notes: routeRun.notes ?? "",
     });
   }, [routeRun]);
 
@@ -472,6 +485,46 @@ export default function DeliveriesPage() {
       setToast(`Route calculation error: ${err.message || "Unknown error"}`);
     } finally {
       setEstimatingRoute(false);
+    }
+  };
+
+  const handleSaveManualEstimate = async () => {
+    if (!routeRun?.id) {
+      setToast("No delivery run selected.");
+      return;
+    }
+    setSavingManualEstimate(true);
+    setToast("Saving manual estimate...");
+    try {
+      const dist = manualEstimateDraft.estimatedDistanceKm.trim();
+      const dur = manualEstimateDraft.estimatedDurationMinutes.trim();
+      const distNum = Number(dist);
+      const durNum = Number(dur);
+      
+      const patch = {
+        estimatedDistanceKm: isNaN(distNum) ? 0 : distNum,
+        estimatedDurationMinutes: isNaN(durNum) ? 0 : durNum,
+        routeEstimateSource: manualEstimateDraft.routeEstimateSource,
+        routeEstimatedAt: new Date().toISOString(),
+        notes: manualEstimateDraft.notes,
+      };
+
+      const res = await updateDeliveryRun(routeRun.id, patch);
+      if (!res.success) {
+        setToast(`Failed to save manual estimate: ${res.error?.message ?? "Unknown error"}`);
+        return;
+      }
+      setToast("Manual estimate saved successfully.");
+      await refresh();
+      const updatedRunRes = await getDeliveryRunById(routeRun.id);
+      if (updatedRunRes.success) {
+        setRouteRun(updatedRunRes.data);
+      }
+    } catch (err: any) {
+      console.error("Manual estimate save error:", err);
+      setToast(`Error saving manual estimate: ${err.message || "Unknown error"}`);
+    } finally {
+      setSavingManualEstimate(false);
     }
   };
 
@@ -832,6 +885,10 @@ export default function DeliveriesPage() {
                             {run.routeEstimateSource === 'google' ? (
                               <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
                                 Estimated by Google
+                              </span>
+                            ) : run.routeEstimateSource === 'google_manual' ? (
+                              <span className="rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-medium text-indigo-700">
+                                Google Maps Manual Entry
                               </span>
                             ) : (
                               <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-medium text-slate-500">
@@ -1332,7 +1389,11 @@ export default function DeliveriesPage() {
                     <div className="rounded-lg bg-neutral-50 p-3">
                       <div className="text-[10px] font-semibold uppercase text-neutral-500">Estimate Source</div>
                       <p className="mt-1 text-xs font-semibold text-neutral-900">
-                        {routeRun.routeEstimateSource === 'google' ? 'Google Routes API' : 'Manual Estimate'}
+                        {routeRun.routeEstimateSource === 'google'
+                          ? 'Google API'
+                          : routeRun.routeEstimateSource === 'google_manual'
+                          ? 'Google Maps Manual Entry'
+                          : 'Manual'}
                       </p>
                     </div>
                     <div className="rounded-lg bg-neutral-50 p-3">
@@ -1416,6 +1477,74 @@ export default function DeliveriesPage() {
                     </div>
                   )}
                 </div>
+
+                {/* Manual Route Estimate Override Section */}
+                {hqAdmin && (
+                  <div className="rounded-xl border border-neutral-200 bg-white p-4 space-y-4">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-neutral-500">Manual Estimate Override</h4>
+                    
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-semibold text-neutral-600 mb-1">Estimated KM</label>
+                        <input
+                          type="number"
+                          step="any"
+                          placeholder="e.g. 172"
+                          value={manualEstimateDraft.estimatedDistanceKm}
+                          onChange={(e) => setManualEstimateDraft(prev => ({ ...prev, estimatedDistanceKm: e.target.value }))}
+                          className="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-medium text-neutral-900 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-neutral-600 mb-1">Estimated Minutes</label>
+                        <input
+                          type="number"
+                          step="any"
+                          placeholder="e.g. 108"
+                          value={manualEstimateDraft.estimatedDurationMinutes}
+                          onChange={(e) => setManualEstimateDraft(prev => ({ ...prev, estimatedDurationMinutes: e.target.value }))}
+                          className="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-medium text-neutral-900 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-neutral-600 mb-1">Estimate Source</label>
+                      <select
+                        value={manualEstimateDraft.routeEstimateSource}
+                        onChange={(e) => setManualEstimateDraft(prev => ({ ...prev, routeEstimateSource: e.target.value }))}
+                        className="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-medium text-neutral-950 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                      >
+                        <option value="manual">Manual</option>
+                        <option value="google_manual">Google Maps Manual Entry</option>
+                        <option value="google">Google API</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-neutral-600 mb-1">Route Notes</label>
+                      <textarea
+                        placeholder="Enter details about the manual estimate override..."
+                        value={manualEstimateDraft.notes}
+                        onChange={(e) => setManualEstimateDraft(prev => ({ ...prev, notes: e.target.value }))}
+                        rows={2}
+                        className="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-medium text-neutral-900 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                      />
+                    </div>
+
+                    <p className="text-[11px] text-neutral-500 italic">
+                      If Google estimate fails, open Google Maps, copy the distance/time, and save it here.
+                    </p>
+
+                    <button
+                      disabled={savingManualEstimate}
+                      onClick={handleSaveManualEstimate}
+                      className="w-full inline-flex items-center justify-center rounded-lg bg-neutral-900 hover:bg-neutral-800 disabled:opacity-50 text-white font-semibold text-sm px-4 py-2.5 shadow-sm transition-colors"
+                    >
+                      {savingManualEstimate ? "Saving Estimate..." : "Save Manual Estimate"}
+                    </button>
+                  </div>
+                )}
 
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
@@ -1831,8 +1960,8 @@ function DeliveryRunReport({ report, onPrint }: { report: any; onPrint: () => vo
         <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
           <InfoLine icon={<Clock className="h-4 w-4" />} label="Started" value={formatDateTime(run.actualStartTime)} />
           <InfoLine icon={<Clock className="h-4 w-4" />} label="Completed" value={formatDateTime(run.actualEndTime)} />
-          <InfoLine icon={<Route className="h-4 w-4" />} label="KM" value={`Est ${run.estimatedDistanceKm ?? 0} (${run.routeEstimateSource === 'google' ? 'Google' : 'Manual'})\nActual ${run.actualDistanceKm ?? 0}`} />
-          <InfoLine icon={<Clock className="h-4 w-4" />} label="Minutes" value={`Est ${run.estimatedDurationMinutes ?? 0} (${run.routeEstimateSource === 'google' ? 'Google' : 'Manual'})\nActual ${run.actualDurationMinutes ?? 0}`} />
+          <InfoLine icon={<Route className="h-4 w-4" />} label="KM" value={`Est ${run.estimatedDistanceKm ?? 0} (${run.routeEstimateSource === 'google' ? 'Google' : run.routeEstimateSource === 'google_manual' ? 'Google Manual' : 'Manual'})\nActual ${run.actualDistanceKm ?? 0}`} />
+          <InfoLine icon={<Clock className="h-4 w-4" />} label="Minutes" value={`Est ${run.estimatedDurationMinutes ?? 0} (${run.routeEstimateSource === 'google' ? 'Google' : run.routeEstimateSource === 'google_manual' ? 'Google Manual' : 'Manual'})\nActual ${run.actualDurationMinutes ?? 0}`} />
         </div>
 
         <div className="mt-4 rounded-xl border border-neutral-200 bg-neutral-50 p-4">
@@ -1850,7 +1979,7 @@ function DeliveryRunReport({ report, onPrint }: { report: any; onPrint: () => vo
         <div className="mt-4 rounded-xl border border-neutral-200 bg-neutral-50 p-4 space-y-3">
           <h3 className="text-sm font-bold text-neutral-950">Route Estimate & Leg-by-leg Details</h3>
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-            <InfoLine icon={<Route className="h-4 w-4" />} label="Estimate Source" value={run.routeEstimateSource === 'google' ? 'Google Routes API' : 'Manual estimate'} />
+            <InfoLine icon={<Route className="h-4 w-4" />} label="Estimate Source" value={run.routeEstimateSource === 'google' ? 'Google API' : run.routeEstimateSource === 'google_manual' ? 'Google Maps Manual Entry' : 'Manual'} />
             <InfoLine icon={<Route className="h-4 w-4" />} label="Est Distance" value={`${run.estimatedDistanceKm ?? 0} km`} />
             <InfoLine icon={<Clock className="h-4 w-4" />} label="Est Duration" value={`${run.estimatedDurationMinutes ?? 0} minutes`} />
             <InfoLine icon={<RefreshCw className="h-4 w-4" />} label="Return to Start" value={run.googleRouteSummary?.returnToStart ? 'Yes' : 'No'} />
