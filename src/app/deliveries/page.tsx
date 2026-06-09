@@ -514,7 +514,7 @@ export default function DeliveriesPage() {
         setToast(`Failed to save manual estimate: ${res.error?.message ?? "Unknown error"}`);
         return;
       }
-      setToast("Manual estimate saved successfully.");
+      setToast("Manual route estimate saved.");
       await refresh();
       const updatedRunRes = await getDeliveryRunById(routeRun.id);
       if (updatedRunRes.success) {
@@ -1479,72 +1479,72 @@ export default function DeliveriesPage() {
                 </div>
 
                 {/* Manual Route Estimate Override Section */}
-                {hqAdmin && (
-                  <div className="rounded-xl border border-neutral-200 bg-white p-4 space-y-4">
-                    <h4 className="text-xs font-bold uppercase tracking-wider text-neutral-500">Manual Estimate Override</h4>
-                    
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="block text-xs font-semibold text-neutral-600 mb-1">Estimated KM</label>
-                        <input
-                          type="number"
-                          step="any"
-                          placeholder="e.g. 172"
-                          value={manualEstimateDraft.estimatedDistanceKm}
-                          onChange={(e) => setManualEstimateDraft(prev => ({ ...prev, estimatedDistanceKm: e.target.value }))}
-                          className="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-medium text-neutral-900 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-semibold text-neutral-600 mb-1">Estimated Minutes</label>
-                        <input
-                          type="number"
-                          step="any"
-                          placeholder="e.g. 108"
-                          value={manualEstimateDraft.estimatedDurationMinutes}
-                          onChange={(e) => setManualEstimateDraft(prev => ({ ...prev, estimatedDurationMinutes: e.target.value }))}
-                          className="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-medium text-neutral-900 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-                        />
-                      </div>
-                    </div>
-
+                <div className="rounded-xl border border-neutral-200 bg-white p-4 space-y-4">
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-neutral-500">Manual Estimate Override</h4>
+                  
+                  <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <label className="block text-xs font-semibold text-neutral-600 mb-1">Estimate Source</label>
-                      <select
-                        value={manualEstimateDraft.routeEstimateSource}
-                        onChange={(e) => setManualEstimateDraft(prev => ({ ...prev, routeEstimateSource: e.target.value }))}
-                        className="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-medium text-neutral-950 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-                      >
-                        <option value="manual">Manual</option>
-                        <option value="google_manual">Google Maps Manual Entry</option>
-                        <option value="google">Google API</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-neutral-600 mb-1">Route Notes</label>
-                      <textarea
-                        placeholder="Enter details about the manual estimate override..."
-                        value={manualEstimateDraft.notes}
-                        onChange={(e) => setManualEstimateDraft(prev => ({ ...prev, notes: e.target.value }))}
-                        rows={2}
+                      <label className="block text-xs font-semibold text-neutral-600 mb-1">Estimated KM</label>
+                      <input
+                        type="number"
+                        step="any"
+                        placeholder="e.g. 172"
+                        value={manualEstimateDraft.estimatedDistanceKm}
+                        onChange={(e) => setManualEstimateDraft(prev => ({ ...prev, estimatedDistanceKm: e.target.value }))}
                         className="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-medium text-neutral-900 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                       />
                     </div>
-
-                    <p className="text-[11px] text-neutral-500 italic">
-                      If Google estimate fails, open Google Maps, copy the distance/time, and save it here.
-                    </p>
-
-                    <button
-                      disabled={savingManualEstimate}
-                      onClick={handleSaveManualEstimate}
-                      className="w-full inline-flex items-center justify-center rounded-lg bg-neutral-900 hover:bg-neutral-800 disabled:opacity-50 text-white font-semibold text-sm px-4 py-2.5 shadow-sm transition-colors"
-                    >
-                      {savingManualEstimate ? "Saving Estimate..." : "Save Manual Estimate"}
-                    </button>
+                    <div>
+                      <label className="block text-xs font-semibold text-neutral-600 mb-1">Estimated Minutes</label>
+                      <input
+                        type="number"
+                        step="any"
+                        placeholder="e.g. 108"
+                        value={manualEstimateDraft.estimatedDurationMinutes}
+                        onChange={(e) => setManualEstimateDraft(prev => ({ ...prev, estimatedDurationMinutes: e.target.value }))}
+                        className="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-medium text-neutral-900 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                      />
+                    </div>
                   </div>
-                )}
+
+                  <div>
+                    <label className="block text-xs font-semibold text-neutral-600 mb-1">Estimate Source</label>
+                    <select
+                      value={manualEstimateDraft.routeEstimateSource}
+                      onChange={(e) => setManualEstimateDraft(prev => ({ ...prev, routeEstimateSource: e.target.value }))}
+                      className="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-medium text-neutral-950 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                    >
+                      <option value="manual">Manual</option>
+                      <option value="google_manual">Google Maps Manual Entry</option>
+                      {manualEstimateDraft.routeEstimateSource === 'google' && (
+                        <option value="google" disabled>Google API</option>
+                      )}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-neutral-600 mb-1">Route Notes</label>
+                    <textarea
+                      placeholder="Enter details about the manual estimate override..."
+                      value={manualEstimateDraft.notes}
+                      onChange={(e) => setManualEstimateDraft(prev => ({ ...prev, notes: e.target.value }))}
+                      rows={2}
+                      className="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-medium text-neutral-900 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
+
+                  <p className="text-[11px] text-neutral-500 italic">
+                    If Google estimate fails, open Google Maps, copy the distance/time, and save it here.
+                  </p>
+
+                  <button
+                    disabled={savingManualEstimate}
+                    onClick={handleSaveManualEstimate}
+                    className="w-full inline-flex items-center justify-center rounded-lg bg-neutral-900 hover:bg-neutral-800 disabled:opacity-50 text-white font-semibold text-sm px-4 py-2.5 shadow-sm transition-colors"
+                  >
+                    {savingManualEstimate ? "Saving Estimate..." : "Save Manual Estimate"}
+                  </button>
+                </div>
 
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
