@@ -59,25 +59,18 @@ import {
   Truck,
   UserRound,
   AlertTriangle,
+  Bell,
   FileText,
   Gauge,
   Play,
   SquareCheckBig,
+  Search,
 } from "lucide-react";
 
 const ticketStatuses: DeliveryTicketStatus[] = ["draft", "assigned", "loaded", "out_for_delivery", "delivered", "issue_reported", "cancelled"];
 const runStatuses: DeliveryRunStatus[] = ["draft", "assigned", "loaded", "in_progress", "completed", "cancelled"];
 
-const darkShellCss = `
-  body .flex.bg-neutral-50.text-neutral-900.min-h-screen { background:#070707!important; color:#e4e4e7!important; }
-  body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] { background:#111!important; border-color:#262626!important; }
-  body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] a,
-  body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] button { color:#a1a1aa!important; }
-  body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] a[class*="bg-brand-50"],
-  body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] a:hover { background:#2563eb!important; color:#fff!important; }
-  body header[class*="bg-white"][class*="border-b"] { background:#111!important; border-color:#262626!important; box-shadow:none!important; }
-  body header[class*="bg-white"] h1, body header[class*="bg-white"] button, body header[class*="bg-white"] span { color:#e4e4e7!important; }
-  body header[class*="bg-white"] input, body header[class*="bg-white"] [role="button"] { background:#171717!important; border-color:#262626!important; color:#e4e4e7!important; }
+const deliveryPageCss = `
   @media print {
     body * { visibility: hidden; }
     #delivery-ticket-print, #delivery-ticket-print * { visibility: visible; }
@@ -88,12 +81,14 @@ const darkShellCss = `
 const labelize = (value: string) => value.replace(/_/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
 
 function statusBadge(status: string) {
-  const tone =
-    status === "delivered" || status === "completed" ? "success" :
-    status === "cancelled" || status === "issue_reported" ? "danger" :
-    status === "out_for_delivery" || status === "in_progress" ? "warning" :
-    "neutral";
-  return <Badge variant={tone as any} className="rounded-md px-2 py-0.5">{labelize(status || "draft")}</Badge>;
+  const classes =
+    status === "delivered" || status === "completed" ? "bg-emerald-50 text-emerald-700 border-emerald-100" :
+    status === "loaded" ? "bg-green-50 text-green-700 border-green-100" :
+    status === "assigned" ? "bg-blue-50 text-blue-700 border-blue-100" :
+    status === "out_for_delivery" || status === "in_progress" ? "bg-amber-50 text-amber-700 border-amber-100" :
+    status === "cancelled" || status === "issue_reported" ? "bg-red-50 text-red-700 border-red-100" :
+    "bg-slate-100 text-slate-700 border-slate-200";
+  return <Badge variant="neutral" className={`rounded-md border px-2 py-0.5 ${classes}`}>{labelize(status || "draft")}</Badge>;
 }
 
 function formatDateTime(value?: string) {
@@ -105,9 +100,32 @@ function formatDateTime(value?: string) {
 
 function EmptyState({ title, detail }: { title: string; detail: string }) {
   return (
-    <div className="rounded-xl border border-dashed border-white/10 bg-[#101010] p-10 text-center">
-      <p className="text-sm font-semibold text-white">{title}</p>
-      <p className="mt-1 text-xs text-zinc-500">{detail}</p>
+    <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-10 text-center">
+      <p className="text-sm font-semibold text-slate-900">{title}</p>
+      <p className="mt-1 text-xs text-slate-500">{detail}</p>
+    </div>
+  );
+}
+
+function SummaryCard({ label, value, helper, icon: Icon, accent = "green" }: { label: string; value: React.ReactNode; helper: string; icon: React.ElementType; accent?: "green" | "blue" | "amber" | "slate" }) {
+  const tone = {
+    green: "bg-emerald-50 text-emerald-700 ring-emerald-100",
+    blue: "bg-blue-50 text-blue-700 ring-blue-100",
+    amber: "bg-amber-50 text-amber-700 ring-amber-100",
+    slate: "bg-slate-100 text-slate-700 ring-slate-200",
+  }[accent];
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-500">{label}</p>
+          <div className="mt-2 text-2xl font-bold tracking-tight text-slate-950">{value}</div>
+        </div>
+        <div className={`rounded-xl p-2.5 ring-1 ${tone}`}>
+          <Icon className="h-4 w-4" />
+        </div>
+      </div>
+      <p className="mt-3 text-xs font-medium text-slate-500">{helper}</p>
     </div>
   );
 }
@@ -138,6 +156,7 @@ export default function DeliveriesPage() {
   const [ticketFilter, setTicketFilter] = useState("all");
   const [locationFilter, setLocationFilter] = useState("all");
   const [ticketSearch, setTicketSearch] = useState("");
+  const [ticketDateFilter, setTicketDateFilter] = useState("");
   const [newRun, setNewRun] = useState({
     runDate: new Date().toISOString().slice(0, 10),
     driverId: "",
@@ -211,15 +230,7 @@ export default function DeliveriesPage() {
         hqAdmin ? getVehicleDailyLogs() : Promise.resolve([]),
       ]);
 
-      const filteredRuns = driverUser
-        ? runRows.filter((run: any) => {
-            const stopsCount = run.tickets?.length ?? 0;
-            if (stopsCount === 0) {
-              return run.status === 'in_progress';
-            }
-            return true;
-          })
-        : runRows;
+      const filteredRuns = runRows;
 
       if (process.env.NODE_ENV === "development" && driverUser) {
         console.log("[DeliveriesDriverScope] runs returned", {
@@ -279,18 +290,27 @@ export default function DeliveriesPage() {
     return tickets.filter((ticket) => {
       const statusOk = ticketFilter === "all" || ticket.status === ticketFilter;
       const locationOk = locationFilter === "all" || ticket.locationId === locationFilter;
+      const createdAt = String(ticket.createdAt ?? ticket.created_at ?? "");
+      const dateOk = !ticketDateFilter || createdAt.startsWith(ticketDateFilter);
       const searchOk = !q ||
         ticket.ticketNumber?.toLowerCase().includes(q) ||
         ticket.requisitionId?.toLowerCase().includes(q) ||
         ticket.destinationName?.toLowerCase().includes(q);
-      return statusOk && locationOk && searchOk;
+      return statusOk && locationOk && dateOk && searchOk;
     });
-  }, [tickets, ticketFilter, locationFilter, ticketSearch]);
+  }, [tickets, ticketFilter, locationFilter, ticketSearch, ticketDateFilter]);
 
   const openTickets = tickets.filter((ticket) => !ticket.deliveryRunId && !["delivered", "cancelled"].includes(ticket.status));
   const activeTickets = useMemo(() => {
     return tickets.filter((t) => !["delivered", "cancelled"].includes(t.status));
   }, [tickets]);
+  const summary = useMemo(() => ({
+    openTickets: tickets.filter((ticket) => !ticket.deliveryRunId && !["delivered", "cancelled"].includes(ticket.status)).length,
+    assignedTickets: tickets.filter((ticket) => Boolean(ticket.deliveryRunId) || ticket.status === "assigned").length,
+    activeRuns: runs.filter((run) => ["assigned", "loaded", "in_progress"].includes(run.status)).length,
+    availableDrivers: drivers.filter((driver) => driver.active).length,
+    vehiclesReady: vehicles.filter((vehicle) => vehicle.active).length,
+  }), [tickets, runs, drivers, vehicles]);
 
   const saveTicketItems = async () => {
     if (!selectedTicket) return;
@@ -409,11 +429,10 @@ export default function DeliveriesPage() {
 
   const handleEstimateRoute = async (run: any, optimize = false) => {
     console.log("[Estimate Route Clicked]", {
-      runId: run?.id,
+      selectedRunId: run?.id,
+      selectedRunNumber: run?.runNumber,
       optimize,
       returnToStart,
-      stops: run?.tickets?.length ?? 0,
-      startAddress: run?.startAddress,
     });
     if (!run?.id) {
       setToast("No delivery run selected.");
@@ -517,34 +536,89 @@ export default function DeliveriesPage() {
   };
 
   return (
-    <div className="-m-6 min-h-[calc(100vh-4rem)] bg-[#070707] p-6 text-zinc-100">
-      <style>{darkShellCss}</style>
-      <div className="mx-auto max-w-[1408px] space-y-5">
+    <div className="delivery-light -m-6 min-h-[calc(100vh-4rem)] bg-slate-50 p-4 text-slate-900 sm:p-6">
+      <style>{deliveryPageCss}</style>
+      <div className="mx-auto max-w-[1440px] space-y-6">
         {toast && (
-          <div className="fixed right-5 top-20 z-[140] rounded-lg border border-emerald-500/30 bg-emerald-950 px-4 py-3 text-sm text-emerald-100 shadow-2xl">
+          <div className="fixed right-5 top-20 z-[140] rounded-xl border border-emerald-200 bg-white px-4 py-3 text-sm font-medium text-emerald-800 shadow-2xl">
             {toast}
-            <button className="ml-3 text-emerald-300" onClick={() => setToast(null)}>Dismiss</button>
+            <button className="ml-3 text-emerald-700 underline" onClick={() => setToast(null)}>Dismiss</button>
           </div>
         )}
 
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex items-center gap-3">
+              <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-emerald-600 text-white shadow-sm">
+                <Truck className="h-5 w-5" />
+              </div>
+              <div>
+                <p className="text-sm font-black tracking-[0.18em] text-slate-950">STOCK DHARMA</p>
+                <p className="text-xs font-medium text-slate-500">Page title: Deliveries</p>
+              </div>
+            </div>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+              <div className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-700">
+                <MapPin className="h-4 w-4 text-emerald-600" />
+                Head Office / Central Kitchen
+              </div>
+              <div className="relative min-w-0 sm:w-72">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <input
+                  placeholder="Search inventory, orders..."
+                  className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-900 outline-none transition focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
+                />
+              </div>
+              <button className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-500 hover:bg-slate-50" aria-label="Notifications">
+                <Bell className="h-4 w-4" />
+              </button>
+              <div className="rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white">
+                {driverUser ? "Driver" : "HQ Admin"}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-zinc-500">Delivery Management</p>
-            <h1 className="mt-2 text-2xl font-semibold tracking-tight text-white">
+            <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-emerald-700">Delivery Management</p>
+            <h1 className="mt-2 text-3xl font-bold tracking-tight text-slate-950">
               {driverUser ? "My Routes & Stops" : "Tickets & Runs"}
             </h1>
-            <p className="mt-1 text-sm text-zinc-500">
+            <p className="mt-1 text-sm text-slate-500">
               {driverUser
                 ? "View and execute your assigned delivery runs and stops."
                 : "Operational delivery documents and driver runs. Inventory is not deducted here."}
             </p>
           </div>
-          <button onClick={refresh} className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-[#151515] px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10">
-            <RefreshCw className="h-4 w-4" /> Refresh
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button onClick={refresh} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50">
+              <RefreshCw className="h-4 w-4" /> Refresh
+            </button>
+            {hqAdmin && (
+              <>
+                <button onClick={() => setActiveTab("runs")} className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700">
+                  <Plus className="h-4 w-4" /> New Delivery Run
+                </button>
+                <button onClick={() => routeRun ? setShowAddStopsPicker(true) : setActiveTab("tickets")} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50">
+                  <PackageCheck className="h-4 w-4" /> Assign Tickets
+                </button>
+              </>
+            )}
+          </div>
         </div>
 
-        <div className="flex flex-wrap gap-2">
+        {hqAdmin && (
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+            <SummaryCard label="Open Tickets" value={summary.openTickets} helper="Not assigned yet" icon={PackageCheck} accent="green" />
+            <SummaryCard label="Assigned Tickets" value={summary.assignedTickets} helper="Linked to runs" icon={CheckCircle2} accent="blue" />
+            <SummaryCard label="Active Runs" value={summary.activeRuns} helper="Assigned, loaded, in progress" icon={Route} accent="amber" />
+            <SummaryCard label="Available Drivers" value={summary.availableDrivers} helper="Active driver profiles" icon={UserRound} accent="slate" />
+            <SummaryCard label="Vehicles Ready" value={summary.vehiclesReady} helper="Active fleet records" icon={Truck} accent="green" />
+          </div>
+        )}
+
+        <div className="flex flex-wrap gap-2 rounded-2xl border border-slate-200 bg-white p-2 shadow-sm">
           {[
             ["tickets", driverUser ? "My Stops" : "Delivery Tickets", PackageCheck],
             ["runs", driverUser ? "My Routes" : "Delivery Runs", Route],
@@ -560,7 +634,7 @@ export default function DeliveriesPage() {
               key={key}
               onClick={() => setActiveTab(key)}
               className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
-                activeTab === key ? "bg-blue-600 text-white" : "border border-white/10 bg-[#151515] text-zinc-400 hover:text-white"
+                activeTab === key ? "bg-blue-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-100 hover:text-slate-950"
               }`}
             >
               <Icon className="h-4 w-4" /> {label}
@@ -569,86 +643,116 @@ export default function DeliveriesPage() {
         </div>
 
         {driverUser && driverResolved && !currentDriver ? (
-          <div className="rounded-xl border border-dashed border-white/10 bg-[#101010] p-10 text-center">
-            <p className="text-sm font-semibold text-white">No active driver profile found for this login email. Ask HQ to add this email in Drivers.</p>
+          <div className="rounded-2xl border border-dashed border-slate-200 bg-white p-10 text-center shadow-sm">
+            <p className="text-sm font-semibold text-slate-900">No active driver profile found for this login email. Ask HQ to add this email in Drivers.</p>
           </div>
         ) : loading ? (
-          <div className="rounded-xl border border-white/10 bg-[#111] p-10 text-center text-sm text-zinc-500">Loading deliveries...</div>
+          <div className="rounded-2xl border border-slate-200 bg-white p-10 text-center text-sm text-slate-500 shadow-sm">Loading deliveries...</div>
         ) : activeTab === "tickets" ? (
-          <Card className="rounded-xl border-white/10 bg-[#111]">
-            <CardHeader className="border-b border-white/5">
+          <Card className="overflow-hidden rounded-2xl border-slate-200 bg-white shadow-sm">
+            <CardHeader className="border-b border-slate-100">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                <CardTitle className="text-white">Delivery Tickets</CardTitle>
+                <CardTitle className="text-slate-950">Delivery Tickets</CardTitle>
                 <div className="flex flex-wrap gap-2">
-                  <input value={ticketSearch} onChange={(e) => setTicketSearch(e.target.value)} placeholder="Search tickets..." className="rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white placeholder:text-zinc-600" />
-                  <select value={ticketFilter} onChange={(e) => setTicketFilter(e.target.value)} className="rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white">
+                  <input value={ticketSearch} onChange={(e) => setTicketSearch(e.target.value)} placeholder="Search tickets..." className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 outline-none focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100" />
+                  <select value={ticketFilter} onChange={(e) => setTicketFilter(e.target.value)} className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:border-emerald-300">
                     <option value="all">All statuses</option>
                     {ticketStatuses.map((status) => <option key={status} value={status}>{labelize(status)}</option>)}
                   </select>
-                  <select value={locationFilter} onChange={(e) => setLocationFilter(e.target.value)} className="rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white">
+                  <select value={locationFilter} onChange={(e) => setLocationFilter(e.target.value)} className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:border-emerald-300">
                     <option value="all">All locations</option>
                     {locations.filter(isDeliveryDestinationLocation).map((loc) => <option key={loc.id} value={loc.id}>{loc.name}</option>)}
                   </select>
+                  <input
+                    type="date"
+                    value={ticketDateFilter}
+                    onChange={(event) => setTicketDateFilter(event.target.value)}
+                    className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:border-emerald-300"
+                  />
                 </div>
               </div>
             </CardHeader>
             <CardContent className="p-0">
               {visibleTickets.length === 0 ? <div className="p-5"><EmptyState title="No delivery tickets found" detail="Generate tickets from approved or fulfilled requisitions." /></div> : (
-                <Table>
-                  <TableHeader className="bg-[#151515]">
-                    <TableRow className="border-white/5">
-                      <TableHead className="text-zinc-500">Ticket</TableHead>
-                      <TableHead className="text-zinc-500">Requisition</TableHead>
-                      <TableHead className="text-zinc-500">Destination</TableHead>
-                      <TableHead className="text-zinc-500">Run</TableHead>
-                      <TableHead className="text-zinc-500">Status</TableHead>
-                      <TableHead className="text-right text-zinc-500">Action</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
+                <>
+                  <div className="hidden overflow-x-auto md:block">
+                    <Table>
+                      <TableHeader className="bg-slate-50">
+                        <TableRow className="border-slate-200">
+                          <TableHead className="text-slate-500">Ticket</TableHead>
+                          <TableHead className="text-slate-500">Requisition</TableHead>
+                          <TableHead className="text-slate-500">Destination</TableHead>
+                          <TableHead className="text-slate-500">Run</TableHead>
+                          <TableHead className="text-slate-500">Status</TableHead>
+                          <TableHead className="text-right text-slate-500">Action</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {visibleTickets.map((ticket) => (
+                          <TableRow key={ticket.id} className="border-slate-100 hover:bg-slate-50">
+                            <TableCell className="font-mono text-xs font-semibold text-slate-800">{ticket.ticketNumber}</TableCell>
+                            <TableCell className="font-mono text-xs text-slate-500">{ticket.requisitionId}</TableCell>
+                            <TableCell>
+                              <div className="font-semibold text-slate-950">{ticket.destinationName || "—"}</div>
+                              <div className="text-xs text-slate-500">{ticket.destinationAddress || ticket.locationId || "No address snapshot"}</div>
+                            </TableCell>
+                            <TableCell className="text-slate-600">{ticket.deliveryRun?.runNumber ? `Assigned to ${ticket.deliveryRun.runNumber}` : "Not assigned"}</TableCell>
+                            <TableCell>{statusBadge(ticket.status)}</TableCell>
+                            <TableCell className="text-right">
+                              <button onClick={() => setSelectedTicket(ticket)} className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm hover:bg-slate-50">Open</button>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                  <div className="space-y-3 p-4 md:hidden">
                     {visibleTickets.map((ticket) => (
-                      <TableRow key={ticket.id} className="border-white/5 hover:bg-white/[0.03]">
-                        <TableCell className="font-mono text-xs text-zinc-300">{ticket.ticketNumber}</TableCell>
-                        <TableCell className="font-mono text-xs text-zinc-500">{ticket.requisitionId}</TableCell>
-                        <TableCell>
-                          <div className="font-semibold text-white">{ticket.destinationName || "—"}</div>
-                        </TableCell>
-                        <TableCell className="text-zinc-400">{ticket.deliveryRun?.runNumber ? `Assigned to ${ticket.deliveryRun.runNumber}` : "Not assigned"}</TableCell>
-                        <TableCell>{statusBadge(ticket.status)}</TableCell>
-                        <TableCell className="text-right">
-                          <button onClick={() => setSelectedTicket(ticket)} className="rounded-md border border-white/10 px-3 py-1.5 text-xs font-semibold text-zinc-200 hover:bg-white/10">Open</button>
-                        </TableCell>
-                      </TableRow>
+                      <div key={ticket.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="font-mono text-xs font-bold text-slate-900">{ticket.ticketNumber}</p>
+                            <p className="mt-1 text-sm font-semibold text-slate-950">{ticket.destinationName || "—"}</p>
+                          </div>
+                          {statusBadge(ticket.status)}
+                        </div>
+                        <div className="mt-3 space-y-1 text-xs text-slate-500">
+                          <p>Requisition: <span className="font-mono">{ticket.requisitionId}</span></p>
+                          <p>Run: {ticket.deliveryRun?.runNumber ? `Assigned to ${ticket.deliveryRun.runNumber}` : "Not assigned"}</p>
+                          <p>{ticket.destinationAddress || ticket.locationId || "No address snapshot"}</p>
+                        </div>
+                        <button onClick={() => setSelectedTicket(ticket)} className="mt-4 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-800">Open</button>
+                      </div>
                     ))}
-                  </TableBody>
-                </Table>
+                  </div>
+                </>
               )}
             </CardContent>
           </Card>
         ) : activeTab === "runs" && (hqAdmin || driverUser) ? (
           <div className={`grid grid-cols-1 gap-5 ${hqAdmin ? "xl:grid-cols-[390px_1fr]" : ""}`}>
-            {hqAdmin && <Card className="rounded-xl border-white/10 bg-[#111]">
-              <CardHeader className="border-b border-white/5"><CardTitle className="text-white">Create Delivery Run</CardTitle></CardHeader>
+            {hqAdmin && <Card className="rounded-2xl border-slate-200 bg-white shadow-sm">
+              <CardHeader className="border-b border-slate-100"><CardTitle className="text-slate-950">Create Delivery Run</CardTitle></CardHeader>
               <CardContent className="space-y-3 p-4">
-                <input type="date" value={newRun.runDate} onChange={(e) => setNewRun({ ...newRun, runDate: e.target.value })} className="w-full rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white" />
-                <select value={newRun.driverId} onChange={(e) => setNewRun({ ...newRun, driverId: e.target.value })} className="w-full rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white">
+                <input type="date" value={newRun.runDate} onChange={(e) => setNewRun({ ...newRun, runDate: e.target.value })} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-950" />
+                <select value={newRun.driverId} onChange={(e) => setNewRun({ ...newRun, driverId: e.target.value })} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-950">
                   <option value="">Assign driver later</option>
                   {drivers.filter((d) => d.active).map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
                 </select>
-                <select value={newRun.vehicleId} onChange={(e) => setNewRun({ ...newRun, vehicleId: e.target.value })} className="w-full rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white">
+                <select value={newRun.vehicleId} onChange={(e) => setNewRun({ ...newRun, vehicleId: e.target.value })} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-950">
                   <option value="">No vehicle</option>
                   {vehicles.filter((v) => v.active).map((v) => <option key={v.id} value={v.id}>{v.vehicleName} {v.plateNumber ? `(${v.plateNumber})` : ""}</option>)}
                 </select>
                 <div className="grid grid-cols-2 gap-2">
-                  <input type="number" min="0" value={newRun.estimatedDistanceKm} onChange={(e) => setNewRun({ ...newRun, estimatedDistanceKm: Number(e.target.value) })} placeholder="Estimated km" className="rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white" />
-                  <input type="number" min="0" value={newRun.estimatedDurationMinutes} onChange={(e) => setNewRun({ ...newRun, estimatedDurationMinutes: Number(e.target.value) })} placeholder="Minutes" className="rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white" />
+                  <input type="number" min="0" value={newRun.estimatedDistanceKm} onChange={(e) => setNewRun({ ...newRun, estimatedDistanceKm: Number(e.target.value) })} placeholder="Estimated km" className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-950" />
+                  <input type="number" min="0" value={newRun.estimatedDurationMinutes} onChange={(e) => setNewRun({ ...newRun, estimatedDurationMinutes: Number(e.target.value) })} placeholder="Minutes" className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-950" />
                 </div>
-                <textarea value={newRun.notes} onChange={(e) => setNewRun({ ...newRun, notes: e.target.value })} placeholder="Run notes" className="min-h-20 w-full rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white" />
-                <div className="rounded-lg border border-white/10 bg-[#151515] p-3">
-                  <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">Open tickets</p>
+                <textarea value={newRun.notes} onChange={(e) => setNewRun({ ...newRun, notes: e.target.value })} placeholder="Run notes" className="min-h-20 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-950" />
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                  <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">Open tickets</p>
                   <div className="max-h-52 space-y-2 overflow-y-auto">
                     {activeTickets.length === 0 ? (
-                      <p className="text-xs text-zinc-500">No active tickets available.</p>
+                      <p className="text-xs text-slate-500">No active tickets available.</p>
                     ) : (
                       activeTickets.map((ticket) => {
                         const isAssigned = !!ticket.deliveryRunId;
@@ -658,8 +762,8 @@ export default function DeliveriesPage() {
                             key={ticket.id}
                             className={`flex items-start gap-2 rounded-md border p-2 text-xs transition-colors ${
                               isAssigned
-                                ? "border-white/5 bg-white/[0.02] text-zinc-500 opacity-60"
-                                : "border-white/5 bg-[#151515] text-zinc-300 cursor-pointer hover:bg-white/[0.03]"
+                                ? "border-slate-100 bg-slate-50 text-slate-500 opacity-60"
+                                : "border-slate-100 bg-slate-50 text-slate-700 cursor-pointer hover:bg-slate-50"
                             }`}
                           >
                             <input
@@ -678,7 +782,7 @@ export default function DeliveriesPage() {
                             <div className="flex-1">
                               <div className="flex items-center justify-between gap-1">
                                 <strong>{ticket.ticketNumber}</strong>
-                                <span className="text-[10px] text-zinc-400">
+                                <span className="text-[10px] text-slate-500">
                                   {isAssigned ? `Assigned to ${runNum || "another run"}` : "Not assigned"}
                                 </span>
                               </div>
@@ -690,7 +794,7 @@ export default function DeliveriesPage() {
                     )}
                   </div>
                 </div>
-                <button onClick={handleCreateRun} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-500">
+                <button onClick={handleCreateRun} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-700">
                   <Plus className="h-4 w-4" /> Create Run
                 </button>
               </CardContent>
@@ -699,10 +803,10 @@ export default function DeliveriesPage() {
             <div className="space-y-4">
               {runs.length === 0 ? (
                 driverUser ? (
-                  <div className="rounded-xl border border-dashed border-white/10 bg-[#101010] p-10 text-center">
-                    <p className="text-sm font-semibold text-white">No assigned delivery runs found for {user?.email ?? "your email"}.</p>
+                  <div className="rounded-xl border border-dashed border-slate-200 bg-white p-10 text-center shadow-sm">
+                    <p className="text-sm font-semibold text-slate-950">No assigned delivery runs found for {user?.email ?? "your email"}.</p>
                     {(hqAdmin || process.env.NODE_ENV === "development") && (
-                      <p className="mt-2 text-xs text-zinc-500 font-mono">
+                      <p className="mt-2 text-xs text-slate-500 font-mono">
                         Check delivery_runs.driver_id matches drivers.id.
                       </p>
                     )}
@@ -716,70 +820,70 @@ export default function DeliveriesPage() {
                   ? vehicleLogs.find((log) => log.vehicleId === run.vehicleId && log.logDate === run.runDate)
                   : null;
                 return (
-                  <Card key={run.id} className="rounded-xl border-white/10 bg-[#111]">
-                    <CardHeader className="border-b border-white/5">
+                  <Card key={run.id} className="rounded-2xl border-slate-200 bg-white shadow-sm">
+                    <CardHeader className="border-b border-slate-100">
                       <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
                         <div>
-                          <CardTitle className="text-white flex items-center gap-2">
+                          <CardTitle className="text-slate-950 flex items-center gap-2">
                             {run.runNumber}
                             {run.routeEstimateSource === 'google' ? (
-                              <span className="rounded-full bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 text-[10px] font-medium text-emerald-400">
+                              <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
                                 Estimated by Google
                               </span>
                             ) : (
-                              <span className="rounded-full bg-zinc-500/10 border border-zinc-500/20 px-2 py-0.5 text-[10px] font-medium text-zinc-400">
+                              <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-medium text-slate-500">
                                 Manual estimate
                               </span>
                             )}
                           </CardTitle>
-                          <p className="mt-1 text-xs text-zinc-500">{run.runDate} · {run.driver?.name ?? "No driver"} · {run.vehicle?.vehicleName ?? "No vehicle"}</p>
+                          <p className="mt-1 text-xs text-slate-500">{run.runDate} · {run.driver?.name ?? "No driver"} · {run.vehicle?.vehicleName ?? "No vehicle"}</p>
                         </div>
                         <div className="flex flex-wrap items-center gap-2">
                           {statusBadge(run.status)}
                           {canManageDispatch && (
-                            <select value={run.status} onChange={(e) => handleRunStatus(run, e.target.value as DeliveryRunStatus)} className="rounded-md border border-white/10 bg-[#171717] px-2 py-1 text-xs text-white">
+                            <select value={run.status} onChange={(e) => handleRunStatus(run, e.target.value as DeliveryRunStatus)} className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-950">
                               {runStatuses.map((status) => <option key={status} value={status}>{labelize(status)}</option>)}
                             </select>
                           )}
-                          <button onClick={() => setRouteRun(run)} className="inline-flex items-center gap-1 rounded-md border border-blue-500/30 px-3 py-1.5 text-xs font-semibold text-blue-200 hover:bg-blue-500/10"><Route className="h-3.5 w-3.5" /> Manage Route</button>
-                          <button onClick={() => openRunReport(run)} className="inline-flex items-center gap-1 rounded-md border border-white/10 px-3 py-1.5 text-xs font-semibold text-zinc-200 hover:bg-white/10"><FileText className="h-3.5 w-3.5" /> Report</button>
-                          {canManageDispatch && <button onClick={() => setSelectedRun(run)} className="inline-flex items-center gap-1 rounded-md border border-white/10 px-3 py-1.5 text-xs font-semibold text-zinc-200 hover:bg-white/10"><Edit3 className="h-3.5 w-3.5" /> Edit</button>}
+                          <button onClick={() => setRouteRun(run)} className="inline-flex items-center gap-1 rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100"><Route className="h-3.5 w-3.5" /> Manage Route</button>
+                          <button onClick={() => openRunReport(run)} className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"><FileText className="h-3.5 w-3.5" /> Report</button>
+                          {canManageDispatch && <button onClick={() => setSelectedRun(run)} className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"><Edit3 className="h-3.5 w-3.5" /> Edit</button>}
                         </div>
                       </div>
                     </CardHeader>
                     <CardContent className="p-4">
                       <div className="mb-3 grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-8">
-                        <div className="rounded-lg bg-[#171717] p-3"><p className="text-[10px] uppercase text-zinc-500">Stops</p><p className="text-lg font-bold text-white">{orderedTickets.length}</p></div>
-                        <div className="rounded-lg bg-[#171717] p-3"><p className="text-[10px] uppercase text-zinc-500">Estimated km</p><p className="text-lg font-bold text-white">{run.estimatedDistanceKm}</p></div>
-                        <div className="rounded-lg bg-[#171717] p-3"><p className="text-[10px] uppercase text-zinc-500">Est. minutes</p><p className="text-lg font-bold text-white">{run.estimatedDurationMinutes}</p></div>
-                        <div className="rounded-lg bg-[#171717] p-3"><p className="text-[10px] uppercase text-zinc-500">Actual km</p><p className="text-lg font-bold text-white">{run.actualDistanceKm ?? 0}</p></div>
-                        <div className="rounded-lg bg-[#171717] p-3"><p className="text-[10px] uppercase text-zinc-500">Actual min</p><p className="text-lg font-bold text-white">{run.actualDurationMinutes ?? 0}</p></div>
-                        <div className="rounded-lg bg-[#171717] p-3"><p className="text-[10px] uppercase text-zinc-500">Started</p><p className="text-sm font-bold text-white">{formatDateTime(run.actualStartTime)}</p></div>
-                        <div className="rounded-lg bg-[#171717] p-3"><p className="text-[10px] uppercase text-zinc-500">Completed</p><p className="text-sm font-bold text-white">{formatDateTime(run.actualEndTime)}</p></div>
-                        <div className="rounded-lg bg-[#171717] p-3"><p className="text-[10px] uppercase text-zinc-500">Odometer</p><p className="text-sm font-bold text-white">{run.odometerStartKm ?? "—"} → {run.odometerEndKm ?? "—"}</p></div>
+                        <div className="rounded-lg border border-slate-100 bg-slate-50 p-3"><p className="text-[10px] uppercase text-slate-500">Stops</p><p className="text-lg font-bold text-slate-950">{orderedTickets.length}</p></div>
+                        <div className="rounded-lg border border-slate-100 bg-slate-50 p-3"><p className="text-[10px] uppercase text-slate-500">Estimated km</p><p className="text-lg font-bold text-slate-950">{run.estimatedDistanceKm}</p></div>
+                        <div className="rounded-lg border border-slate-100 bg-slate-50 p-3"><p className="text-[10px] uppercase text-slate-500">Est. minutes</p><p className="text-lg font-bold text-slate-950">{run.estimatedDurationMinutes}</p></div>
+                        <div className="rounded-lg border border-slate-100 bg-slate-50 p-3"><p className="text-[10px] uppercase text-slate-500">Actual km</p><p className="text-lg font-bold text-slate-950">{run.actualDistanceKm ?? 0}</p></div>
+                        <div className="rounded-lg border border-slate-100 bg-slate-50 p-3"><p className="text-[10px] uppercase text-slate-500">Actual min</p><p className="text-lg font-bold text-slate-950">{run.actualDurationMinutes ?? 0}</p></div>
+                        <div className="rounded-lg border border-slate-100 bg-slate-50 p-3"><p className="text-[10px] uppercase text-slate-500">Started</p><p className="text-sm font-bold text-slate-950">{formatDateTime(run.actualStartTime)}</p></div>
+                        <div className="rounded-lg border border-slate-100 bg-slate-50 p-3"><p className="text-[10px] uppercase text-slate-500">Completed</p><p className="text-sm font-bold text-slate-950">{formatDateTime(run.actualEndTime)}</p></div>
+                        <div className="rounded-lg border border-slate-100 bg-slate-50 p-3"><p className="text-[10px] uppercase text-slate-500">Odometer</p><p className="text-sm font-bold text-slate-950">{run.odometerStartKm ?? "—"} → {run.odometerEndKm ?? "—"}</p></div>
                       </div>
                       {run.vehicleId && !matchingVehicleLog && (
-                        <div className="mb-3 flex items-center gap-2 rounded-lg border border-amber-500/20 bg-amber-950/20 px-3 py-2 text-xs text-amber-200">
+                        <div className="mb-3 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                           <AlertTriangle className="h-4 w-4" /> No vehicle daily log opened for this vehicle/date.
                         </div>
                       )}
                       <div className="space-y-2">
                         {orderedTickets.map((ticket, index) => (
-                          <div key={ticket.id} className="flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-[#151515] p-3">
+                          <div key={ticket.id} className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
                             <div className="min-w-0">
-                              <p className="text-sm font-semibold text-white">#{index + 1} {ticket.destinationName}</p>
-                              <p className="text-xs text-zinc-500">{ticket.ticketNumber} · {ticket.destinationAddress || ticket.locationId}</p>
+                              <p className="text-sm font-semibold text-slate-950">#{index + 1} {ticket.destinationName}</p>
+                              <p className="text-xs text-slate-500">{ticket.ticketNumber} · {ticket.destinationAddress || ticket.locationId}</p>
                             </div>
                             <div className="flex shrink-0 items-center gap-1">
                               {hqAdmin && (
                                 <>
-                                  <button onClick={() => moveStop(run, ticket.id, -1)} className="rounded border border-white/10 px-2 py-1 text-xs text-zinc-300">Up</button>
-                                  <button onClick={() => moveStop(run, ticket.id, 1)} className="rounded border border-white/10 px-2 py-1 text-xs text-zinc-300">Down</button>
+                                  <button onClick={() => moveStop(run, ticket.id, -1)} className="rounded border border-slate-200 px-2 py-1 text-xs text-slate-700">Up</button>
+                                  <button onClick={() => moveStop(run, ticket.id, 1)} className="rounded border border-slate-200 px-2 py-1 text-xs text-slate-700">Down</button>
                                 </>
                               )}
-                              <button onClick={() => setSelectedTicket(ticket)} className="rounded border border-white/10 px-2 py-1 text-xs text-zinc-300">Open</button>
+                              <button onClick={() => setSelectedTicket(ticket)} className="rounded border border-slate-200 px-2 py-1 text-xs text-slate-700">Open</button>
                               {hqAdmin && (
-                                <button onClick={async () => { await removeTicketFromDeliveryRun(ticket.id); await refresh(); }} className="rounded border border-red-500/30 px-2 py-1 text-xs text-red-300">Remove</button>
+                                <button onClick={async () => { await removeTicketFromDeliveryRun(ticket.id); await refresh(); }} className="rounded border border-red-200 px-2 py-1 text-xs text-red-600 hover:bg-red-50">Remove</button>
                               )}
                             </div>
                           </div>
@@ -793,12 +897,12 @@ export default function DeliveriesPage() {
           </div>
         ) : activeTab === "drivers" && hqAdmin ? (
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-[360px_1fr]">
-            <Card className="rounded-xl border-white/10 bg-[#111]"><CardHeader><CardTitle className="text-white">Add Driver</CardTitle></CardHeader><CardContent className="space-y-2">
-              <input value={driverDraft.name} onChange={(e) => setDriverDraft({ ...driverDraft, name: e.target.value })} placeholder="Name" className="w-full rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white" />
-              <input value={driverDraft.phone} onChange={(e) => setDriverDraft({ ...driverDraft, phone: e.target.value })} placeholder="Phone" className="w-full rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white" />
-              <input value={driverDraft.email} onChange={(e) => setDriverDraft({ ...driverDraft, email: e.target.value })} placeholder="Email" className="w-full rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white" />
-              <input type="number" value={driverDraft.hourlyRate} onChange={(e) => setDriverDraft({ ...driverDraft, hourlyRate: e.target.value })} placeholder="Hourly rate" className="w-full rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white" />
-              <textarea value={driverDraft.notes} onChange={(e) => setDriverDraft({ ...driverDraft, notes: e.target.value })} placeholder="Notes" className="w-full rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white" />
+            <Card className="rounded-2xl border-slate-200 bg-white shadow-sm"><CardHeader><CardTitle className="text-slate-950">Add Driver</CardTitle></CardHeader><CardContent className="space-y-2">
+              <input value={driverDraft.name} onChange={(e) => setDriverDraft({ ...driverDraft, name: e.target.value })} placeholder="Name" className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-950" />
+              <input value={driverDraft.phone} onChange={(e) => setDriverDraft({ ...driverDraft, phone: e.target.value })} placeholder="Phone" className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-950" />
+              <input value={driverDraft.email} onChange={(e) => setDriverDraft({ ...driverDraft, email: e.target.value })} placeholder="Email" className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-950" />
+              <input type="number" value={driverDraft.hourlyRate} onChange={(e) => setDriverDraft({ ...driverDraft, hourlyRate: e.target.value })} placeholder="Hourly rate" className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-950" />
+              <textarea value={driverDraft.notes} onChange={(e) => setDriverDraft({ ...driverDraft, notes: e.target.value })} placeholder="Notes" className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-950" />
               <button onClick={handleCreateDriver} className="w-full rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white">Save Driver</button>
             </CardContent></Card>
             <PeopleTable rows={drivers} type="driver" onToggle={async (row) => { await updateDriver(row.id, { active: !row.active }); await refresh(); }} />
@@ -806,61 +910,61 @@ export default function DeliveriesPage() {
         ) : activeTab === "vehicles" && hqAdmin ? (
           <div className="space-y-5">
             <div className="grid grid-cols-1 gap-5 lg:grid-cols-[360px_1fr]">
-              <Card className="rounded-xl border-white/10 bg-[#111]"><CardHeader><CardTitle className="text-white">Add Vehicle</CardTitle></CardHeader><CardContent className="space-y-2">
-                <input value={vehicleDraft.vehicleName} onChange={(e) => setVehicleDraft({ ...vehicleDraft, vehicleName: e.target.value })} placeholder="Vehicle name" className="w-full rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white" />
-                <input value={vehicleDraft.plateNumber} onChange={(e) => setVehicleDraft({ ...vehicleDraft, plateNumber: e.target.value })} placeholder="Plate number" className="w-full rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white" />
-                <textarea value={vehicleDraft.notes} onChange={(e) => setVehicleDraft({ ...vehicleDraft, notes: e.target.value })} placeholder="Notes" className="w-full rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white" />
+              <Card className="rounded-2xl border-slate-200 bg-white shadow-sm"><CardHeader><CardTitle className="text-slate-950">Add Vehicle</CardTitle></CardHeader><CardContent className="space-y-2">
+                <input value={vehicleDraft.vehicleName} onChange={(e) => setVehicleDraft({ ...vehicleDraft, vehicleName: e.target.value })} placeholder="Vehicle name" className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-950" />
+                <input value={vehicleDraft.plateNumber} onChange={(e) => setVehicleDraft({ ...vehicleDraft, plateNumber: e.target.value })} placeholder="Plate number" className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-950" />
+                <textarea value={vehicleDraft.notes} onChange={(e) => setVehicleDraft({ ...vehicleDraft, notes: e.target.value })} placeholder="Notes" className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-950" />
                 <button onClick={handleCreateVehicle} className="w-full rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white">Save Vehicle</button>
               </CardContent></Card>
               <PeopleTable rows={vehicles} type="vehicle" onToggle={async (row) => { await updateVehicle(row.id, { active: !row.active }); await refresh(); }} />
             </div>
 
             <div className="grid grid-cols-1 gap-5 lg:grid-cols-[360px_1fr]">
-              <Card className="rounded-xl border-white/10 bg-[#111]">
-                <CardHeader className="border-b border-white/5"><CardTitle className="text-white">Open Vehicle Daily Log</CardTitle></CardHeader>
+              <Card className="rounded-2xl border-slate-200 bg-white shadow-sm">
+                <CardHeader className="border-b border-slate-100"><CardTitle className="text-slate-950">Open Vehicle Daily Log</CardTitle></CardHeader>
                 <CardContent className="space-y-2 p-4">
-                  <select value={vehicleLogDraft.vehicleId} onChange={(e) => setVehicleLogDraft({ ...vehicleLogDraft, vehicleId: e.target.value })} className="w-full rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white">
+                  <select value={vehicleLogDraft.vehicleId} onChange={(e) => setVehicleLogDraft({ ...vehicleLogDraft, vehicleId: e.target.value })} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-950">
                     <option value="">Select vehicle</option>
                     {vehicles.filter((v) => v.active).map((vehicle) => <option key={vehicle.id} value={vehicle.id}>{vehicle.vehicleName} {vehicle.plateNumber ? `(${vehicle.plateNumber})` : ""}</option>)}
                   </select>
-                  <select value={vehicleLogDraft.driverId} onChange={(e) => setVehicleLogDraft({ ...vehicleLogDraft, driverId: e.target.value })} className="w-full rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white">
+                  <select value={vehicleLogDraft.driverId} onChange={(e) => setVehicleLogDraft({ ...vehicleLogDraft, driverId: e.target.value })} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-950">
                     <option value="">Driver optional</option>
                     {drivers.filter((d) => d.active).map((driver) => <option key={driver.id} value={driver.id}>{driver.name}</option>)}
                   </select>
-                  <input type="date" value={vehicleLogDraft.logDate} onChange={(e) => setVehicleLogDraft({ ...vehicleLogDraft, logDate: e.target.value })} className="w-full rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white" />
-                  <input type="number" min="0" value={vehicleLogDraft.odometerStartKm} onChange={(e) => setVehicleLogDraft({ ...vehicleLogDraft, odometerStartKm: e.target.value })} placeholder="Starting odometer km" className="w-full rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white" />
-                  <input value={vehicleLogDraft.fuelStartLevel} onChange={(e) => setVehicleLogDraft({ ...vehicleLogDraft, fuelStartLevel: e.target.value })} placeholder="Fuel start level" className="w-full rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white" />
-                  <textarea value={vehicleLogDraft.startConditionNotes} onChange={(e) => setVehicleLogDraft({ ...vehicleLogDraft, startConditionNotes: e.target.value })} placeholder="Start condition notes" className="min-h-20 w-full rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-white" />
+                  <input type="date" value={vehicleLogDraft.logDate} onChange={(e) => setVehicleLogDraft({ ...vehicleLogDraft, logDate: e.target.value })} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-950" />
+                  <input type="number" min="0" value={vehicleLogDraft.odometerStartKm} onChange={(e) => setVehicleLogDraft({ ...vehicleLogDraft, odometerStartKm: e.target.value })} placeholder="Starting odometer km" className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-950" />
+                  <input value={vehicleLogDraft.fuelStartLevel} onChange={(e) => setVehicleLogDraft({ ...vehicleLogDraft, fuelStartLevel: e.target.value })} placeholder="Fuel start level" className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-950" />
+                  <textarea value={vehicleLogDraft.startConditionNotes} onChange={(e) => setVehicleLogDraft({ ...vehicleLogDraft, startConditionNotes: e.target.value })} placeholder="Start condition notes" className="min-h-20 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-950" />
                   <button onClick={handleOpenVehicleLog} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white"><Gauge className="h-4 w-4" /> Open Daily Log</button>
                 </CardContent>
               </Card>
 
-              <Card className="rounded-xl border-white/10 bg-[#111]">
-                <CardHeader className="border-b border-white/5"><CardTitle className="text-white">Vehicle Daily Logs</CardTitle></CardHeader>
+              <Card className="rounded-2xl border-slate-200 bg-white shadow-sm">
+                <CardHeader className="border-b border-slate-100"><CardTitle className="text-slate-950">Vehicle Daily Logs</CardTitle></CardHeader>
                 <CardContent className="p-0">
                   {vehicleLogs.length === 0 ? <div className="p-5"><EmptyState title="No vehicle daily logs" detail="Open a daily log before dispatch to compare odometer usage later." /></div> : (
                     <Table>
-                      <TableHeader className="bg-[#151515]">
-                        <TableRow className="border-white/5">
-                          <TableHead className="text-zinc-500">Date</TableHead>
-                          <TableHead className="text-zinc-500">Vehicle</TableHead>
-                          <TableHead className="text-zinc-500">Driver</TableHead>
-                          <TableHead className="text-zinc-500">KM</TableHead>
-                          <TableHead className="text-zinc-500">Variance</TableHead>
-                          <TableHead className="text-zinc-500">Damage</TableHead>
-                          <TableHead className="text-right text-zinc-500">Action</TableHead>
+                      <TableHeader className="bg-slate-50">
+                        <TableRow className="border-slate-100">
+                          <TableHead className="text-slate-500">Date</TableHead>
+                          <TableHead className="text-slate-500">Vehicle</TableHead>
+                          <TableHead className="text-slate-500">Driver</TableHead>
+                          <TableHead className="text-slate-500">KM</TableHead>
+                          <TableHead className="text-slate-500">Variance</TableHead>
+                          <TableHead className="text-slate-500">Damage</TableHead>
+                          <TableHead className="text-right text-slate-500">Action</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
                         {vehicleLogs.map((log) => (
-                          <TableRow key={log.id} className="border-white/5">
-                            <TableCell className="text-zinc-300">{log.logDate}<div>{statusBadge(log.status)}</div></TableCell>
-                            <TableCell className="font-semibold text-white">{log.vehicle?.vehicleName ?? log.vehicleId}</TableCell>
-                            <TableCell className="text-zinc-400">{log.driver?.name ?? "—"}</TableCell>
-                            <TableCell className="text-zinc-400">{log.odometerStartKm} → {log.odometerEndKm ?? "—"}<div className="text-xs text-zinc-600">Total {log.totalOdometerKm ?? "—"} km</div></TableCell>
-                            <TableCell className={`${Number(log.varianceKm ?? 0) > 25 ? "text-red-300" : Number(log.varianceKm ?? 0) > 10 ? "text-amber-300" : "text-zinc-400"}`}>{log.varianceKm ?? "—"} km</TableCell>
-                            <TableCell className={log.damageReported ? "text-red-300" : "text-zinc-500"}>{log.damageReported ? "Yes" : "No"}</TableCell>
-                            <TableCell className="text-right"><button onClick={() => openVehicleLogReport(log)} className="rounded-md border border-white/10 px-3 py-1.5 text-xs font-semibold text-zinc-200 hover:bg-white/10">{log.status === "open" ? "Close / View" : "View Logs"}</button></TableCell>
+                          <TableRow key={log.id} className="border-slate-100">
+                            <TableCell className="text-slate-700">{log.logDate}<div>{statusBadge(log.status)}</div></TableCell>
+                            <TableCell className="font-semibold text-slate-950">{log.vehicle?.vehicleName ?? log.vehicleId}</TableCell>
+                            <TableCell className="text-slate-500">{log.driver?.name ?? "—"}</TableCell>
+                            <TableCell className="text-slate-500">{log.odometerStartKm} → {log.odometerEndKm ?? "—"}<div className="text-xs text-slate-400">Total {log.totalOdometerKm ?? "—"} km</div></TableCell>
+                            <TableCell className={`${Number(log.varianceKm ?? 0) > 25 ? "text-red-600" : Number(log.varianceKm ?? 0) > 10 ? "text-amber-600" : "text-slate-500"}`}>{log.varianceKm ?? "—"} km</TableCell>
+                            <TableCell className={log.damageReported ? "text-red-600" : "text-slate-500"}>{log.damageReported ? "Yes" : "No"}</TableCell>
+                            <TableCell className="text-right"><button onClick={() => openVehicleLogReport(log)} className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">{log.status === "open" ? "Close / View" : "View Logs"}</button></TableCell>
                           </TableRow>
                         ))}
                       </TableBody>
@@ -1336,7 +1440,7 @@ export default function DeliveriesPage() {
                               setSelectedStopsToAssign([]);
                               setShowAddStopsPicker(true);
                             }}
-                            className="mt-3 inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-500"
+                            className="mt-3 inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
                           >
                             <Plus className="h-3.5 w-3.5" /> Add Delivery Tickets
                           </button>
@@ -1612,7 +1716,7 @@ export default function DeliveriesPage() {
                     alert(`Failed to add tickets: ${res.error?.message ?? "Unknown error"}`);
                   }
                 }}
-                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
               >
                 Add Selected Tickets
               </button>
@@ -1843,19 +1947,19 @@ function DeliveryRunReport({ report, onPrint }: { report: any; onPrint: () => vo
 
 function PeopleTable({ rows, type, onToggle }: { rows: any[]; type: "driver" | "vehicle"; onToggle: (row: any) => void }) {
   return (
-    <Card className="rounded-xl border-white/10 bg-[#111]">
-      <CardHeader><CardTitle className="text-white">{type === "driver" ? "Drivers" : "Vehicles"}</CardTitle></CardHeader>
+    <Card className="rounded-2xl border-slate-200 bg-white shadow-sm">
+      <CardHeader><CardTitle className="text-slate-950">{type === "driver" ? "Drivers" : "Vehicles"}</CardTitle></CardHeader>
       <CardContent className="p-0">
         {rows.length === 0 ? <div className="p-5"><EmptyState title={`No ${type}s yet`} detail={`Add your first ${type} to assign delivery runs.`} /></div> : (
           <Table>
-            <TableHeader className="bg-[#151515]"><TableRow className="border-white/5"><TableHead className="text-zinc-500">Name</TableHead><TableHead className="text-zinc-500">Contact</TableHead><TableHead className="text-zinc-500">Status</TableHead><TableHead className="text-right text-zinc-500">Action</TableHead></TableRow></TableHeader>
+            <TableHeader className="bg-slate-50"><TableRow className="border-slate-100"><TableHead className="text-slate-500">Name</TableHead><TableHead className="text-slate-500">Contact</TableHead><TableHead className="text-slate-500">Status</TableHead><TableHead className="text-right text-slate-500">Action</TableHead></TableRow></TableHeader>
             <TableBody>
               {rows.map((row) => (
-                <TableRow key={row.id} className="border-white/5">
-                  <TableCell className="font-semibold text-white">{type === "driver" ? row.name : row.vehicleName}<div className="text-xs text-zinc-500">{type === "vehicle" ? row.plateNumber : row.notes}</div></TableCell>
-                  <TableCell className="text-zinc-400">{type === "driver" ? `${row.phone || "—"} ${row.email || ""}` : row.notes || "—"}</TableCell>
-                  <TableCell>{row.active ? <span className="text-emerald-300">Active</span> : <span className="text-zinc-500">Inactive</span>}</TableCell>
-                  <TableCell className="text-right"><button onClick={() => onToggle(row)} className="rounded-md border border-white/10 px-3 py-1.5 text-xs font-semibold text-zinc-200">{row.active ? "Deactivate" : "Activate"}</button></TableCell>
+                <TableRow key={row.id} className="border-slate-100">
+                  <TableCell className="font-semibold text-slate-950">{type === "driver" ? row.name : row.vehicleName}<div className="text-xs text-slate-500">{type === "vehicle" ? row.plateNumber : row.notes}</div></TableCell>
+                  <TableCell className="text-slate-500">{type === "driver" ? `${row.phone || "—"} ${row.email || ""}` : row.notes || "—"}</TableCell>
+                  <TableCell>{row.active ? <span className="font-semibold text-emerald-700">Active</span> : <span className="text-slate-500">Inactive</span>}</TableCell>
+                  <TableCell className="text-right"><button onClick={() => onToggle(row)} className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700">{row.active ? "Deactivate" : "Activate"}</button></TableCell>
                 </TableRow>
               ))}
             </TableBody>

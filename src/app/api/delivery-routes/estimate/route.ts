@@ -10,6 +10,8 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const { runId, optimize, returnToStart } = body;
 
+    console.log("[Route Estimate Body]", body);
+
     if (!runId) {
       return NextResponse.json({ error: "runId is required" }, { status: 400 });
     }
@@ -26,20 +28,48 @@ export async function POST(req: NextRequest) {
 
     // 2. Load delivery run directly. Avoid embedded relationship .single()
     // coercion; route estimation needs only the run snapshot fields here.
-    const { data: runRow, error: runError } = await supabase
-      .from("delivery_runs")
-      .select("*")
-      .eq("id", runId)
-      .maybeSingle();
+    let runRow = null;
+    let runError = null;
+    let lookupMode = "id";
+
+    const isUuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(runId);
+    if (isUuid) {
+      const { data, error } = await supabase
+        .from("delivery_runs")
+        .select("*")
+        .eq("id", runId)
+        .maybeSingle();
+      runRow = data;
+      runError = error;
+    }
 
     if (runError) {
-      console.error("[Route Estimate Supabase Error]", runError);
-      return NextResponse.json({ error: runError.message || "Delivery run not found." }, { status: 500 });
+      console.error("[Route Estimate Supabase Error UUID lookup]", runError);
     }
 
     if (!runRow) {
-      return NextResponse.json({ error: "Delivery run not found." }, { status: 404 });
+      lookupMode = "run_number";
+      const { data, error } = await supabase
+        .from("delivery_runs")
+        .select("*")
+        .eq("run_number", runId)
+        .maybeSingle();
+      runRow = data;
+      if (error) {
+        console.error("[Route Estimate Supabase Error run_number lookup]", error);
+        runError = error;
+      }
     }
+
+    if (!runRow) {
+      const errRes: any = { success: false, message: "Delivery run not found." };
+      if (process.env.NODE_ENV === "development") {
+        errRes.requestedRunId = runId;
+        errRes.lookupMode = lookupMode;
+      }
+      return NextResponse.json(errRes, { status: 404 });
+    }
+
     const run = {
       id: runRow.id,
       runNumber: runRow.run_number,
@@ -107,10 +137,9 @@ export async function POST(req: NextRequest) {
     // not require live location/profile lookups when snapshot addresses exist.
     const { data: ticketRows, error: ticketsError } = await supabase
       .from("delivery_tickets")
-      .select("id, ticket_number, destination_name, destination_address, stop_sequence, status")
-      .eq("delivery_run_id", runId)
-      .order("stop_sequence", { ascending: true, nullsFirst: false })
-      .order("created_at", { ascending: true });
+      .select("*")
+      .eq("delivery_run_id", run.id)
+      .order("stop_sequence", { ascending: true });
 
     if (ticketsError) {
       console.error("[Route Estimate Supabase Error]", ticketsError);
@@ -252,7 +281,7 @@ export async function POST(req: NextRequest) {
 
       // Sync the optimized order back to the database
       const orderedTicketIds = finalOrderStops.map((t) => t.id);
-      await applyOptimizedStopOrder(runId, orderedTicketIds);
+      await applyOptimizedStopOrder(run.id, orderedTicketIds);
     }
 
     // 9. Calculate stop-by-stop estimated arrival times and parse leg-by-leg details
@@ -341,7 +370,7 @@ export async function POST(req: NextRequest) {
     };
 
     // 10. Update the run route details and ticket ETAs in the database
-    await updateDeliveryRunRouteEstimate(runId, {
+    await updateDeliveryRunRouteEstimate(run.id, {
       estimatedDistanceKm,
       estimatedDurationMinutes,
       routeEstimateSource: "google",
