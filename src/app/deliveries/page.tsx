@@ -16,6 +16,7 @@ import {
   getDeliveryRuns,
   getDeliveryRunReport,
   getDeliveryTickets,
+  getActiveDriverByEmail,
   getDrivers,
   getVehicleDailyLogs,
   getVehicleDailyLogReport,
@@ -165,14 +166,30 @@ export default function DeliveriesPage() {
   const [ticketItemDrafts, setTicketItemDrafts] = useState<any[]>([]);
   const [estimatingRoute, setEstimatingRoute] = useState(false);
   const [returnToStart, setReturnToStart] = useState(true);
+  const [showAddStopsPicker, setShowAddStopsPicker] = useState(false);
+  const [selectedStopsToAssign, setSelectedStopsToAssign] = useState<string[]>([]);
+  const [editingStopId, setEditingStopId] = useState<string | null>(null);
+  const [stopEditDraft, setStopEditDraft] = useState({
+    destinationName: "",
+    destinationAddress: "",
+    destinationContact: "",
+    destinationPhone: "",
+  });
 
   const refresh = async () => {
     setLoading(true);
     try {
-      const allDriversForLookup = hqAdmin || driverUser ? await getDrivers() : [];
-      const currentDriver = driverUser
-        ? allDriversForLookup.find((driver: any) => String(driver.email ?? "").toLowerCase() === String(user?.email ?? "").toLowerCase())
-        : null;
+      const currentDriver = driverUser ? await getActiveDriverByEmail(user?.email ?? "") : null;
+      if (process.env.NODE_ENV === "development" && driverUser) {
+        console.log("[DeliveriesDriverScope] resolved driver context", {
+          authEmail: user?.email ?? null,
+          userRole: user?.role ?? null,
+          driverId: currentDriver?.id ?? null,
+          driverEmail: currentDriver?.email ?? null,
+          driverActive: currentDriver?.active ?? null,
+          runsFilter: currentDriver?.id ? `delivery_runs.driver_id = ${currentDriver.id}` : "no driver row resolved",
+        });
+      }
       const scopedLocation = hqAdmin || driverUser ? undefined : userLocationId;
       const [ticketRows, runRows, vehicleRows, locationRows, vehicleLogRows] = await Promise.all([
         driverUser
@@ -187,12 +204,20 @@ export default function DeliveriesPage() {
         loadLocations(),
         hqAdmin ? getVehicleDailyLogs() : Promise.resolve([]),
       ]);
+      if (process.env.NODE_ENV === "development" && driverUser) {
+        console.log("[DeliveriesDriverScope] runs returned", {
+          authEmail: user?.email ?? null,
+          driverId: currentDriver?.id ?? null,
+          count: runRows.length,
+          runNumbers: runRows.map((run: any) => run.runNumber),
+        });
+      }
       const driverTicketRows = driverUser
         ? runRows.flatMap((run: any) => (run.tickets ?? []).map((ticket: any) => ({ ...ticket, deliveryRun: run })))
         : ticketRows;
       setTickets(driverTicketRows);
       setRuns(runRows);
-      setDrivers(allDriversForLookup);
+      setDrivers(hqAdmin ? await getDrivers() : currentDriver ? [currentDriver] : []);
       setVehicles(vehicleRows);
       setLocations(locationRows);
       setVehicleLogs(vehicleLogRows);
@@ -232,6 +257,9 @@ export default function DeliveriesPage() {
   }, [tickets, ticketFilter, locationFilter, ticketSearch]);
 
   const openTickets = tickets.filter((ticket) => !ticket.deliveryRunId && !["delivered", "cancelled"].includes(ticket.status));
+  const activeTickets = useMemo(() => {
+    return tickets.filter((t) => !["delivered", "cancelled"].includes(t.status));
+  }, [tickets]);
 
   const saveTicketItems = async () => {
     if (!selectedTicket) return;
@@ -293,6 +321,12 @@ export default function DeliveriesPage() {
     setToast("Delivery run created.");
     setNewRun({ runDate: new Date().toISOString().slice(0, 10), driverId: "", vehicleId: "", estimatedDistanceKm: 0, estimatedDurationMinutes: 0, notes: "", ticketIds: [] });
     await refresh();
+
+    // Automatically open the Manage Route drawer for the new run
+    const updatedRunRes = await getDeliveryRunById(res.data.id);
+    if (updatedRunRes.success) {
+      setRouteRun(updatedRunRes.data);
+    }
   };
 
   const handleRunStatus = async (run: any, status: DeliveryRunStatus) => {
@@ -377,6 +411,10 @@ export default function DeliveriesPage() {
   };
 
   const handleOpenInGoogleMaps = async (run: any) => {
+    const stopsCount = (run.tickets ?? []).length;
+    if (stopsCount === 0) {
+      return alert("This run has no stops. Add delivery tickets first.");
+    }
     const url = await buildGoogleMapsDirectionsUrl(run.id);
     if (url) {
       window.open(url, "_blank");
@@ -516,9 +554,8 @@ export default function DeliveriesPage() {
                         <TableCell className="font-mono text-xs text-zinc-500">{ticket.requisitionId}</TableCell>
                         <TableCell>
                           <div className="font-semibold text-white">{ticket.destinationName || "—"}</div>
-                          <div className="text-xs text-zinc-500">{ticket.destinationAddress || ticket.locationId || "No address snapshot"}</div>
                         </TableCell>
-                        <TableCell className="text-zinc-400">{ticket.deliveryRun?.runNumber ?? "Unassigned"}</TableCell>
+                        <TableCell className="text-zinc-400">{ticket.deliveryRun?.runNumber ? `Assigned to ${ticket.deliveryRun.runNumber}` : "Not assigned"}</TableCell>
                         <TableCell>{statusBadge(ticket.status)}</TableCell>
                         <TableCell className="text-right">
                           <button onClick={() => setSelectedTicket(ticket)} className="rounded-md border border-white/10 px-3 py-1.5 text-xs font-semibold text-zinc-200 hover:bg-white/10">Open</button>
@@ -552,12 +589,47 @@ export default function DeliveriesPage() {
                 <div className="rounded-lg border border-white/10 bg-[#151515] p-3">
                   <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">Open tickets</p>
                   <div className="max-h-52 space-y-2 overflow-y-auto">
-                    {openTickets.length === 0 ? <p className="text-xs text-zinc-500">No open tickets available.</p> : openTickets.map((ticket) => (
-                      <label key={ticket.id} className="flex items-start gap-2 rounded-md border border-white/5 p-2 text-xs text-zinc-300">
-                        <input type="checkbox" checked={newRun.ticketIds.includes(ticket.id)} onChange={(e) => setNewRun((prev) => ({ ...prev, ticketIds: e.target.checked ? [...prev.ticketIds, ticket.id] : prev.ticketIds.filter((id) => id !== ticket.id) }))} />
-                        <span><strong>{ticket.ticketNumber}</strong><br />{ticket.destinationName}</span>
-                      </label>
-                    ))}
+                    {activeTickets.length === 0 ? (
+                      <p className="text-xs text-zinc-500">No active tickets available.</p>
+                    ) : (
+                      activeTickets.map((ticket) => {
+                        const isAssigned = !!ticket.deliveryRunId;
+                        const runNum = ticket.deliveryRun?.runNumber;
+                        return (
+                          <label
+                            key={ticket.id}
+                            className={`flex items-start gap-2 rounded-md border p-2 text-xs transition-colors ${
+                              isAssigned
+                                ? "border-white/5 bg-white/[0.02] text-zinc-500 opacity-60"
+                                : "border-white/5 bg-[#151515] text-zinc-300 cursor-pointer hover:bg-white/[0.03]"
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              disabled={isAssigned}
+                              checked={newRun.ticketIds.includes(ticket.id)}
+                              onChange={(e) =>
+                                setNewRun((prev) => ({
+                                  ...prev,
+                                  ticketIds: e.target.checked
+                                    ? [...prev.ticketIds, ticket.id]
+                                    : prev.ticketIds.filter((id) => id !== ticket.id),
+                                }))
+                              }
+                            />
+                            <div className="flex-1">
+                              <div className="flex items-center justify-between gap-1">
+                                <strong>{ticket.ticketNumber}</strong>
+                                <span className="text-[10px] text-zinc-400">
+                                  {isAssigned ? `Assigned to ${runNum || "another run"}` : "Not assigned"}
+                                </span>
+                              </div>
+                              <p className="mt-0.5 truncate">{ticket.destinationName}</p>
+                            </div>
+                          </label>
+                        );
+                      })
+                    )}
                   </div>
                 </div>
                 <button onClick={handleCreateRun} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-500">
@@ -1094,7 +1166,7 @@ export default function DeliveriesPage() {
                     {stopsCount === 0 && (
                       <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                         <AlertTriangle className="h-4 w-4 shrink-0" />
-                        <span>Add delivery tickets/stops before estimating route.</span>
+                        <span>Add delivery tickets/stops before estimating route. Use Add Delivery Tickets to assign delivery tickets to this run.</span>
                       </div>
                     )}
                     {stopsCount > 0 && isStartAddressMissing && (
@@ -1145,66 +1217,314 @@ export default function DeliveriesPage() {
                   )}
                 </div>
 
-                <div className="space-y-2">
-                  {orderedTickets.map((ticket, index) => (
-                    <div key={ticket.id} className="rounded-xl border border-neutral-200 bg-white p-4">
-                      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                        <div>
-                          <p className="text-sm font-bold text-neutral-950">Stop #{index + 1} · {ticket.destinationName}</p>
-                          <p className="text-xs text-neutral-500">{ticket.ticketNumber} · Requisition {ticket.requisitionId}</p>
-                          <div className="mt-1 text-xs">
-                            {ticket.destinationAddress ? (
-                              <span className="text-neutral-600">{ticket.destinationAddress}</span>
-                            ) : (
-                              <span className="text-red-600 font-semibold flex items-center gap-1">
-                                <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> Destination address missing.
-                              </span>
-                            )}
-                          </div>
-                          <div className="mt-2 flex flex-wrap gap-2 text-xs text-neutral-500">
-                            <span>ETA: {formatDateTime(ticket.estimatedArrivalTime)}</span>
-                            <span>Arrived: {formatDateTime(ticket.arrivedAt)}</span>
-                            <span>Delivered: {formatDateTime(ticket.deliveredAt)}</span>
-                            <span>Received: {ticket.receivedBy || "—"}</span>
-                            <span>Issues: {(ticket.items ?? []).reduce((sum: number, item: any) => sum + Number(item.issueQty ?? 0), 0)}</span>
-                          </div>
-                        </div>
-                        <div className="flex flex-wrap gap-1">
-                          {statusBadge(ticket.status)}
-                          {hqAdmin && (
-                            <button
-                              onClick={async () => {
-                                const res = await updateTicketAddressFromProfile(ticket.id);
-                                if (res.success) {
-                                  setToast("Delivery address updated from store profile.");
-                                  await refresh();
-                                  const updatedRunRes = await getDeliveryRunById(routeRun.id);
-                                  if (updatedRunRes.success) {
-                                    setRouteRun(updatedRunRes.data);
-                                  }
-                                } else {
-                                  alert(`Address update failed: ${res.error?.message ?? "Unknown error"}`);
-                                }
-                              }}
-                              className="rounded border border-neutral-200 px-2 py-1 text-xs hover:bg-neutral-50"
-                            >
-                              Update Address
-                            </button>
-                          )}
-                          <button onClick={() => moveStop(routeRun, ticket.id, -1)} className="rounded border border-neutral-200 px-2 py-1 text-xs">Up</button>
-                          <button onClick={() => moveStop(routeRun, ticket.id, 1)} className="rounded border border-neutral-200 px-2 py-1 text-xs">Down</button>
-                          <button onClick={() => setSelectedTicket(ticket)} className="rounded border border-neutral-200 px-2 py-1 text-xs">Open Ticket</button>
-                          <button onClick={() => markArrived(ticket)} className="rounded border border-blue-200 bg-blue-50 px-2 py-1 text-xs text-blue-700">Mark Arrived</button>
-                          <button onClick={() => { setSelectedTicket(ticket); }} className="rounded border border-success-200 bg-success-50 px-2 py-1 text-xs text-success-700">Mark Delivered</button>
-                          <button onClick={() => reportIssue(ticket)} className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-700">Report Issue</button>
-                        </div>
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-neutral-500">Stops List</h4>
+                    {hqAdmin && orderedTickets.length > 0 && (
+                      <button
+                        onClick={() => {
+                          setSelectedStopsToAssign([]);
+                          setShowAddStopsPicker(true);
+                        }}
+                        className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-2.5 py-1 text-xs font-semibold text-neutral-700 hover:bg-neutral-50"
+                      >
+                        <Plus className="h-3.5 w-3.5 text-neutral-500" /> Add Tickets
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="space-y-2">
+                    {orderedTickets.length === 0 ? (
+                      <div className="rounded-xl border border-dashed border-neutral-200 bg-neutral-50 p-6 text-center">
+                        <p className="text-sm font-semibold text-neutral-950">No stops assigned to this run.</p>
+                        {hqAdmin && (
+                          <button
+                            onClick={() => {
+                              setSelectedStopsToAssign([]);
+                              setShowAddStopsPicker(true);
+                            }}
+                            className="mt-3 inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-500"
+                          >
+                            <Plus className="h-3.5 w-3.5" /> Add Delivery Tickets
+                          </button>
+                        )}
                       </div>
-                    </div>
-                  ))}
+                    ) : (
+                      orderedTickets.map((ticket, index) => (
+                        <div key={ticket.id} className="rounded-xl border border-neutral-200 bg-white p-4">
+                          {editingStopId === ticket.id ? (
+                            <div className="space-y-3 text-xs">
+                              <p className="font-bold text-neutral-500 uppercase">Edit Stop #{index + 1} Details</p>
+                              <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                                <div>
+                                  <label className="text-[10px] font-bold text-neutral-500 font-semibold">Destination Name</label>
+                                  <input
+                                    type="text"
+                                    value={stopEditDraft.destinationName}
+                                    onChange={(e) => setStopEditDraft({ ...stopEditDraft, destinationName: e.target.value })}
+                                    placeholder="Name"
+                                    className="w-full rounded-lg border border-neutral-200 bg-white px-2.5 py-1.5 text-xs text-neutral-900 font-medium"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="text-[10px] font-bold text-neutral-500 font-semibold">Destination Address</label>
+                                  <input
+                                    type="text"
+                                    value={stopEditDraft.destinationAddress}
+                                    onChange={(e) => setStopEditDraft({ ...stopEditDraft, destinationAddress: e.target.value })}
+                                    placeholder="Full address"
+                                    className="w-full rounded-lg border border-neutral-200 bg-white px-2.5 py-1.5 text-xs text-neutral-900 font-medium"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="text-[10px] font-bold text-neutral-500 font-semibold">Contact Person</label>
+                                  <input
+                                    type="text"
+                                    value={stopEditDraft.destinationContact}
+                                    onChange={(e) => setStopEditDraft({ ...stopEditDraft, destinationContact: e.target.value })}
+                                    placeholder="Contact Name"
+                                    className="w-full rounded-lg border border-neutral-200 bg-white px-2.5 py-1.5 text-xs text-neutral-900 font-medium"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="text-[10px] font-bold text-neutral-500 font-semibold">Contact Phone</label>
+                                  <input
+                                    type="text"
+                                    value={stopEditDraft.destinationPhone}
+                                    onChange={(e) => setStopEditDraft({ ...stopEditDraft, destinationPhone: e.target.value })}
+                                    placeholder="Phone"
+                                    className="w-full rounded-lg border border-neutral-200 bg-white px-2.5 py-1.5 text-xs text-neutral-900 font-medium"
+                                  />
+                                </div>
+                              </div>
+                              <div className="flex gap-2 pt-1">
+                                <button
+                                  onClick={async () => {
+                                    const res = await updateDeliveryTicket(ticket.id, stopEditDraft);
+                                    if (res.success) {
+                                      setToast("Stop details updated.");
+                                      setEditingStopId(null);
+                                      await refresh();
+                                      const updatedRunRes = await getDeliveryRunById(routeRun.id);
+                                      if (updatedRunRes.success) {
+                                        setRouteRun(updatedRunRes.data);
+                                      }
+                                    } else {
+                                      alert(`Failed to save changes: ${res.error?.message ?? "Unknown error"}`);
+                                    }
+                                  }}
+                                  className="rounded-lg bg-neutral-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-neutral-800"
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  onClick={() => setEditingStopId(null)}
+                                  className="rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-xs font-semibold text-neutral-700 hover:bg-neutral-50"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                              <div>
+                                <p className="text-sm font-bold text-neutral-950 font-semibold">Stop #{index + 1} · {ticket.destinationName}</p>
+                                <p className="text-xs text-neutral-500 font-medium">{ticket.ticketNumber} · Requisition {ticket.requisitionId}</p>
+                                <div className="mt-1 text-xs">
+                                  {ticket.destinationAddress ? (
+                                    <span className="text-neutral-600 font-medium">{ticket.destinationAddress}</span>
+                                  ) : (
+                                    <span className="text-red-600 font-semibold flex items-center gap-1">
+                                      <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> Destination address missing.
+                                    </span>
+                                  )}
+                                </div>
+                                {(ticket.destinationContact || ticket.destinationPhone) && (
+                                  <div className="mt-1 text-xs text-neutral-500 flex flex-wrap gap-x-3 gap-y-0.5">
+                                    {ticket.destinationContact && (
+                                      <span>
+                                        <span className="font-semibold text-neutral-600">Contact:</span> {ticket.destinationContact}
+                                      </span>
+                                    )}
+                                    {ticket.destinationPhone && (
+                                      <span>
+                                        <span className="font-semibold text-neutral-600">Phone:</span> {ticket.destinationPhone}
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
+                                <div className="mt-2 flex flex-wrap gap-2 text-xs text-neutral-500 font-medium">
+                                  <span>ETA: {formatDateTime(ticket.estimatedArrivalTime)}</span>
+                                  <span>Arrived: {formatDateTime(ticket.arrivedAt)}</span>
+                                  <span>Delivered: {formatDateTime(ticket.deliveredAt)}</span>
+                                  <span>Received: {ticket.receivedBy || "—"}</span>
+                                  <span>Issues: {(ticket.items ?? []).reduce((sum: number, item: any) => sum + Number(item.issueQty ?? 0), 0)}</span>
+                                </div>
+                              </div>
+                              <div className="flex flex-wrap gap-1">
+                                {statusBadge(ticket.status)}
+                                {hqAdmin && (
+                                  <>
+                                    <button
+                                      onClick={() => {
+                                        setEditingStopId(ticket.id);
+                                        setStopEditDraft({
+                                          destinationName: ticket.destinationName || "",
+                                          destinationAddress: ticket.destinationAddress || "",
+                                          destinationContact: ticket.destinationContact || "",
+                                          destinationPhone: ticket.destinationPhone || "",
+                                        });
+                                      }}
+                                      className="rounded border border-neutral-200 px-2 py-1 text-xs font-semibold hover:bg-neutral-50"
+                                    >
+                                      Edit Address
+                                    </button>
+                                    <button
+                                      onClick={async () => {
+                                        const res = await updateTicketAddressFromProfile(ticket.id);
+                                        if (res.success) {
+                                          setToast("Delivery address updated from store profile.");
+                                          await refresh();
+                                          const updatedRunRes = await getDeliveryRunById(routeRun.id);
+                                          if (updatedRunRes.success) {
+                                            setRouteRun(updatedRunRes.data);
+                                          }
+                                        } else {
+                                          alert(`Address update failed: ${res.error?.message ?? "Unknown error"}`);
+                                        }
+                                      }}
+                                      className="rounded border border-neutral-200 px-2 py-1 text-xs font-semibold hover:bg-neutral-50 text-blue-600 border-blue-200 bg-blue-50/30"
+                                    >
+                                      Update Address from Store Profile
+                                    </button>
+                                  </>
+                                )}
+                                <button onClick={() => moveStop(routeRun, ticket.id, -1)} className="rounded border border-neutral-200 px-2 py-1 text-xs font-semibold hover:bg-neutral-50">Up</button>
+                                <button onClick={() => moveStop(routeRun, ticket.id, 1)} className="rounded border border-neutral-200 px-2 py-1 text-xs font-semibold hover:bg-neutral-50">Down</button>
+                                <button onClick={() => setSelectedTicket(ticket)} className="rounded border border-neutral-200 px-2 py-1 text-xs font-semibold hover:bg-neutral-50">Open Ticket</button>
+                                <button onClick={() => markArrived(ticket)} className="rounded border border-blue-200 bg-blue-50 px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100">Mark Arrived</button>
+                                <button onClick={() => { setSelectedTicket(ticket); }} className="rounded border border-success-200 bg-success-50 px-2 py-1 text-xs font-semibold text-success-700 hover:bg-success-100">Mark Delivered</button>
+                                <button onClick={() => reportIssue(ticket)} className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-700 hover:bg-amber-100">Report Issue</button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
                 </div>
               </div>
             );
           })()}
+        </Drawer>
+
+        <Drawer
+          isOpen={showAddStopsPicker}
+          onClose={() => setShowAddStopsPicker(false)}
+          title="Add Delivery Tickets"
+          description={`Select open delivery tickets to add to run ${routeRun?.runNumber ?? ""}`}
+          variant="dialog"
+        >
+          <div className="space-y-4 text-neutral-700">
+            <div className="max-h-[60vh] space-y-2 overflow-y-auto pr-1">
+              {activeTickets.length === 0 ? (
+                <p className="text-sm text-neutral-500 text-center py-4">No active delivery tickets found.</p>
+              ) : (
+                activeTickets.map((ticket) => {
+                  const isAssigned = !!ticket.deliveryRunId;
+                  const runNum = ticket.deliveryRun?.runNumber || (ticket.deliveryRunId ? `Run ID: ${ticket.deliveryRunId}` : "");
+                  const isAddressComplete = !!ticket.destinationAddress?.trim();
+                  
+                  return (
+                    <label
+                      key={ticket.id}
+                      className={`flex items-start gap-3 rounded-xl border p-3 text-sm transition-colors ${
+                        isAssigned
+                          ? "border-neutral-100 bg-neutral-50/50 text-neutral-400 opacity-65 font-medium"
+                          : "border-neutral-200 bg-white text-neutral-700 cursor-pointer hover:bg-neutral-50 font-medium"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        disabled={isAssigned}
+                        checked={selectedStopsToAssign.includes(ticket.id)}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setSelectedStopsToAssign((prev) => [...prev, ticket.id]);
+                          } else {
+                            setSelectedStopsToAssign((prev) => prev.filter((id) => id !== ticket.id));
+                          }
+                        }}
+                        className="mt-0.5 rounded border-neutral-300 text-blue-600 focus:ring-blue-500 disabled:opacity-50"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-2">
+                          <strong className="font-mono text-xs text-neutral-900">{ticket.ticketNumber}</strong>
+                          <span className="text-[10px] font-semibold">
+                            {isAssigned ? (
+                              <span className="text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">
+                                Assigned: {runNum}
+                              </span>
+                            ) : (
+                              <span className="text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded">
+                                Available
+                              </span>
+                            )}
+                          </span>
+                        </div>
+                        <div className="mt-1 text-xs text-neutral-600 font-semibold truncate">
+                          {ticket.destinationName || "No Destination Name"}
+                        </div>
+                        <div className="text-[11px] text-neutral-500 truncate">
+                          {ticket.destinationAddress || "No destination address snapshot"}
+                        </div>
+                        <div className="mt-2 flex items-center justify-between text-[10px]">
+                          <span className="text-neutral-400 font-mono">Req: {ticket.requisitionId}</span>
+                          <span>
+                            {isAddressComplete ? (
+                              <span className="text-emerald-600 font-medium">Address: Complete</span>
+                            ) : (
+                              <span className="text-red-500 font-semibold">Address: Missing</span>
+                            )}
+                          </span>
+                        </div>
+                      </div>
+                    </label>
+                  );
+                })
+              )}
+            </div>
+
+            <div className="flex justify-end gap-2 border-t border-neutral-100 pt-3">
+              <button
+                onClick={() => setShowAddStopsPicker(false)}
+                className="rounded-lg border border-neutral-200 px-4 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={selectedStopsToAssign.length === 0}
+                onClick={async () => {
+                  if (!routeRun) return;
+                  const res = await addTicketsToDeliveryRun(routeRun.id, selectedStopsToAssign);
+                  if (res.success) {
+                    setToast(`${selectedStopsToAssign.length} ticket(s) added to run.`);
+                    setShowAddStopsPicker(false);
+                    await refresh();
+                    const updatedRunRes = await getDeliveryRunById(routeRun.id);
+                    if (updatedRunRes.success) {
+                      setRouteRun(updatedRunRes.data);
+                    }
+                  } else {
+                    alert(`Failed to add tickets: ${res.error?.message ?? "Unknown error"}`);
+                  }
+                }}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
+              >
+                Add Selected Tickets
+              </button>
+            </div>
+          </div>
         </Drawer>
 
         <Drawer isOpen={!!runReport} onClose={() => setRunReport(null)} title={`Delivery Run Report ${runReport?.run?.runNumber ?? ""}`} variant="dialog">

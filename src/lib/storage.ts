@@ -3195,12 +3195,18 @@ export async function inviteUser(payload: {
  */
 export async function setUserPassword(
   email: string,
-  newPassword: string
+  newPassword: string,
+  options: { profileId?: string; userId?: string } = {}
 ): Promise<{ success: boolean; error?: string }> {
   const res = await fetch('/api/users/set-password', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password: newPassword }),
+    body: JSON.stringify({
+      email,
+      password: newPassword,
+      profileId: options.profileId,
+      userId: options.userId,
+    }),
   });
   const json = await res.json();
   if (!res.ok) return { success: false, error: json.error ?? 'Failed to set password.' };
@@ -4409,9 +4415,23 @@ export async function updateDeliveryRun(id: string, patch: any) {
 
 export async function addTicketsToDeliveryRun(runId: string, ticketIds: string[]) {
   const uniqueIds = Array.from(new Set(ticketIds.filter(Boolean)));
+  if (uniqueIds.length === 0) return { success: true };
+
+  // Fetch current tickets for this run to find the max sequence
+  const { data: existingTickets, error: fetchErr } = await supabase
+    .from('delivery_tickets')
+    .select('stop_sequence')
+    .eq('delivery_run_id', runId);
+  if (fetchErr) return { success: false, error: fetchErr };
+
+  let maxSeq = 0;
+  if (existingTickets && existingTickets.length > 0) {
+    maxSeq = Math.max(...existingTickets.map(t => t.stop_sequence ?? 0));
+  }
+
   const results = await Promise.all(uniqueIds.map((ticketId, index) => supabase
     .from('delivery_tickets')
-    .update({ delivery_run_id: runId, status: 'assigned', stop_sequence: index + 1 })
+    .update({ delivery_run_id: runId, status: 'assigned', stop_sequence: maxSeq + index + 1 })
     .eq('id', ticketId)
     .not('status', 'in', '(delivered,cancelled)')));
   const failed = results.find((res) => res.error);
@@ -4848,6 +4868,42 @@ export async function getDrivers() {
   const { data, error } = await supabase.from('drivers').select('*').order('active', { ascending: false }).order('name');
   if (error) return [];
   return (data ?? []).map(mapDriverToFrontend);
+}
+
+export async function getActiveDriverByEmail(email: string) {
+  const authEmail = String(email ?? '').trim();
+  if (!authEmail) {
+    if (process.env.NODE_ENV === 'development') {
+      console.warn('[delivery-driver-scope] Missing auth email; cannot resolve driver row.');
+    }
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from('drivers')
+    .select('id, name, email, active, phone, hourly_rate, notes, created_at, updated_at')
+    .ilike('email', authEmail)
+    .eq('active', true)
+    .maybeSingle();
+
+  if (error) {
+    console.error('[delivery-driver-scope] Driver lookup failed:', {
+      authEmail,
+      message: error.message,
+    });
+    return null;
+  }
+
+  if (process.env.NODE_ENV === 'development') {
+    console.log('[delivery-driver-scope] Driver lookup result:', {
+      authEmail,
+      driverId: data?.id ?? null,
+      driverEmail: data?.email ?? null,
+      driverActive: data?.active ?? null,
+    });
+  }
+
+  return data ? mapDriverToFrontend(data) : null;
 }
 
 export async function createDriver(payload: any) {

@@ -325,7 +325,7 @@ function UsersPageContent() {
   const [locSuccess, setLocSuccess]       = useState("");
 
   // ── Set Password modal ────────────────────────────────────────────────────
-  const [pwdModal, setPwdModal]       = useState<{ id: string; name: string; email: string } | null>(null);
+  const [pwdModal, setPwdModal]       = useState<{ id: string; name: string; email: string; profileId?: string; userId?: string } | null>(null);
   const [pwdValue, setPwdValue]       = useState("");
   const [pwdShow, setPwdShow]         = useState(false);
   const [pwdSaving, setPwdSaving]     = useState(false);
@@ -629,7 +629,11 @@ function UsersPageContent() {
         setEditSaving(false);
         return;
       }
-      const pwdRes = await setUserPassword(editProfile.email || (editProfile as any).userEmail, editPwd.trim());
+      const pwdRes = await setUserPassword(
+        editProfile.email || (editProfile as any).userEmail,
+        editPwd.trim(),
+        { profileId: editProfile.id, userId: editProfile.userId }
+      );
       if (!pwdRes.success) {
         setEditError(pwdRes.error ?? "Failed to update password.");
         setEditSaving(false);
@@ -841,7 +845,13 @@ function UsersPageContent() {
   // ── Set Password modal ────────────────────────────────────────────────────
   const openPwdModal = (profile: any, e: React.MouseEvent) => {
     e.stopPropagation();
-    setPwdModal({ id: profile.id, name: profile.fullName ?? (profile.email || (profile as any).userEmail), email: (profile.email || (profile as any).userEmail) ?? "" });
+    setPwdModal({
+      id: profile.id,
+      profileId: profile.id,
+      userId: profile.userId,
+      name: profile.fullName ?? (profile.email || (profile as any).userEmail),
+      email: (profile.email || (profile as any).userEmail) ?? "",
+    });
     setPwdValue(""); setPwdShow(false); setPwdError(null); setPwdSuccess(false); setPwdCopied(false);
   };
   const closePwdModal = () => { setPwdModal(null); setPwdValue(""); setPwdError(null); setPwdSuccess(false); };
@@ -851,7 +861,10 @@ function UsersPageContent() {
     if (!pwdValue.trim())   { setPwdError("Password cannot be empty."); return; }
     if (pwdValue.length < 6){ setPwdError("Password must be at least 6 characters."); return; }
     setPwdSaving(true); setPwdError(null);
-    const res = await setUserPassword(pwdModal.email, pwdValue);
+    const res = await setUserPassword(pwdModal.email, pwdValue, {
+      profileId: (pwdModal as any).profileId,
+      userId: (pwdModal as any).userId,
+    });
     setPwdSaving(false);
     if (!res.success) { setPwdError(res.error ?? "Failed."); return; }
     setPwdSuccess(true);
