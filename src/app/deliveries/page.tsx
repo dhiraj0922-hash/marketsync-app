@@ -133,6 +133,8 @@ export default function DeliveriesPage() {
   const [selectedVehicleLog, setSelectedVehicleLog] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<string | null>(null);
+  const [currentDriver, setCurrentDriver] = useState<any | null>(null);
+  const [driverResolved, setDriverResolved] = useState(false);
   const [ticketFilter, setTicketFilter] = useState("all");
   const [locationFilter, setLocationFilter] = useState("all");
   const [ticketSearch, setTicketSearch] = useState("");
@@ -180,15 +182,18 @@ export default function DeliveriesPage() {
   const refresh = async () => {
     setLoading(true);
     try {
-      const currentDriver = driverUser ? await getActiveDriverByEmail(user?.email ?? "") : null;
+      const currentDriverRow = driverUser ? await getActiveDriverByEmail(user?.email ?? "") : null;
+      setCurrentDriver(currentDriverRow);
+      setDriverResolved(true);
+
       if (process.env.NODE_ENV === "development" && driverUser) {
         console.log("[DeliveriesDriverScope] resolved driver context", {
           authEmail: user?.email ?? null,
           userRole: user?.role ?? null,
-          driverId: currentDriver?.id ?? null,
-          driverEmail: currentDriver?.email ?? null,
-          driverActive: currentDriver?.active ?? null,
-          runsFilter: currentDriver?.id ? `delivery_runs.driver_id = ${currentDriver.id}` : "no driver row resolved",
+          driverId: currentDriverRow?.id ?? null,
+          driverEmail: currentDriverRow?.email ?? null,
+          driverActive: currentDriverRow?.active ?? null,
+          runsFilter: currentDriverRow?.id ? `delivery_runs.driver_id = ${currentDriverRow.id}` : "no driver row resolved",
         });
       }
       const scopedLocation = hqAdmin || driverUser ? undefined : userLocationId;
@@ -198,27 +203,38 @@ export default function DeliveriesPage() {
           : getDeliveryTickets({ locationId: scopedLocation ?? undefined }),
         hqAdmin
           ? getDeliveryRuns()
-          : driverUser && currentDriver?.id
-            ? getDeliveryRuns({ driverId: currentDriver.id })
+          : driverUser && currentDriverRow?.id
+            ? getDeliveryRuns({ driverId: currentDriverRow.id, driverEmail: user?.email ?? "" })
             : Promise.resolve([]),
         hqAdmin ? getVehicles() : Promise.resolve([]),
         loadLocations(),
         hqAdmin ? getVehicleDailyLogs() : Promise.resolve([]),
       ]);
+
+      const filteredRuns = driverUser
+        ? runRows.filter((run: any) => {
+            const stopsCount = run.tickets?.length ?? 0;
+            if (stopsCount === 0) {
+              return run.status === 'in_progress';
+            }
+            return true;
+          })
+        : runRows;
+
       if (process.env.NODE_ENV === "development" && driverUser) {
         console.log("[DeliveriesDriverScope] runs returned", {
           authEmail: user?.email ?? null,
-          driverId: currentDriver?.id ?? null,
-          count: runRows.length,
-          runNumbers: runRows.map((run: any) => run.runNumber),
+          driverId: currentDriverRow?.id ?? null,
+          count: filteredRuns.length,
+          runNumbers: filteredRuns.map((run: any) => run.runNumber),
         });
       }
       const driverTicketRows = driverUser
-        ? runRows.flatMap((run: any) => (run.tickets ?? []).map((ticket: any) => ({ ...ticket, deliveryRun: run })))
+        ? filteredRuns.flatMap((run: any) => (run.tickets ?? []).map((ticket: any) => ({ ...ticket, deliveryRun: run })))
         : ticketRows;
       setTickets(driverTicketRows);
-      setRuns(runRows);
-      setDrivers(hqAdmin ? await getDrivers() : currentDriver ? [currentDriver] : []);
+      setRuns(filteredRuns);
+      setDrivers(hqAdmin ? await getDrivers() : currentDriverRow ? [currentDriverRow] : []);
       setVehicles(vehicleRows);
       setLocations(locationRows);
       setVehicleLogs(vehicleLogRows);
@@ -243,6 +259,20 @@ export default function DeliveriesPage() {
       odometerEndKm: routeRun.odometerEndKm ?? "",
     });
   }, [routeRun]);
+
+  useEffect(() => {
+    if (process.env.NODE_ENV === "development") {
+      console.log("[driver-ui-guard]", {
+        role: user?.role,
+        isDriver: driverUser,
+        visibleRuns: runs.map(r => ({
+          runNumber: r.runNumber || r.run_number,
+          status: r.status,
+          stopCount: r.tickets?.length ?? 0
+        }))
+      });
+    }
+  }, [runs, user, driverUser]);
 
   const visibleTickets = useMemo(() => {
     const q = ticketSearch.trim().toLowerCase();
@@ -377,16 +407,28 @@ export default function DeliveriesPage() {
     await refresh();
   };
 
-  const handleEstimateRoute = async (run: any, optimize: boolean) => {
+  const handleEstimateRoute = async (run: any, optimize = false) => {
+    console.log("[Estimate Route Clicked]", {
+      runId: run?.id,
+      optimize,
+      returnToStart,
+      stops: run?.tickets?.length ?? 0,
+      startAddress: run?.startAddress,
+    });
+    if (!run?.id) {
+      setToast("No delivery run selected.");
+      return;
+    }
     setEstimatingRoute(true);
+    setToast(optimize ? "Optimizing route..." : "Estimating route...");
     try {
       const res = await estimateDeliveryRunRoute(run.id, { optimize, returnToStart });
       if (!res.success) {
-        alert(`Route calculation failed: ${res.error || (res as any).message}`);
+        setToast(`Route calculation failed: ${res.error || (res as any).message || "Unknown error"}`);
         return;
       }
       if (res.data && res.data.routeEstimateAvailable === false) {
-        alert(`Route estimation unavailable: ${res.data.message}`);
+        setToast(`Route estimation unavailable: ${res.data.message}`);
         return;
       }
       
@@ -405,7 +447,7 @@ export default function DeliveriesPage() {
       }
     } catch (err: any) {
       console.error("Route estimate error:", err);
-      alert(`Route calculation error: ${err.message || "Unknown error"}`);
+      setToast(`Route calculation error: ${err.message || "Unknown error"}`);
     } finally {
       setEstimatingRoute(false);
     }
@@ -488,8 +530,14 @@ export default function DeliveriesPage() {
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div>
             <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-zinc-500">Delivery Management</p>
-            <h1 className="mt-2 text-2xl font-semibold tracking-tight text-white">Tickets & Runs</h1>
-            <p className="mt-1 text-sm text-zinc-500">Operational delivery documents and driver runs. Inventory is not deducted here.</p>
+            <h1 className="mt-2 text-2xl font-semibold tracking-tight text-white">
+              {driverUser ? "My Routes & Stops" : "Tickets & Runs"}
+            </h1>
+            <p className="mt-1 text-sm text-zinc-500">
+              {driverUser
+                ? "View and execute your assigned delivery runs and stops."
+                : "Operational delivery documents and driver runs. Inventory is not deducted here."}
+            </p>
           </div>
           <button onClick={refresh} className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-[#151515] px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/10">
             <RefreshCw className="h-4 w-4" /> Refresh
@@ -502,7 +550,12 @@ export default function DeliveriesPage() {
             ["runs", driverUser ? "My Routes" : "Delivery Runs", Route],
             ["drivers", "Drivers", UserRound],
             ["vehicles", "Vehicles", Truck],
-          ].filter(([key]) => hqAdmin || (driverUser && (key === "tickets" || key === "runs")) || key === "tickets").map(([key, label, Icon]: any) => (
+          ].filter(([key]) => {
+            if (driverUser) {
+              return key === "tickets" || key === "runs";
+            }
+            return hqAdmin || key === "tickets";
+          }).map(([key, label, Icon]: any) => (
             <button
               key={key}
               onClick={() => setActiveTab(key)}
@@ -515,7 +568,11 @@ export default function DeliveriesPage() {
           ))}
         </div>
 
-        {loading ? (
+        {driverUser && driverResolved && !currentDriver ? (
+          <div className="rounded-xl border border-dashed border-white/10 bg-[#101010] p-10 text-center">
+            <p className="text-sm font-semibold text-white">No active driver profile found for this login email. Ask HQ to add this email in Drivers.</p>
+          </div>
+        ) : loading ? (
           <div className="rounded-xl border border-white/10 bg-[#111] p-10 text-center text-sm text-zinc-500">Loading deliveries...</div>
         ) : activeTab === "tickets" ? (
           <Card className="rounded-xl border-white/10 bg-[#111]">
@@ -640,7 +697,20 @@ export default function DeliveriesPage() {
             </Card>}
 
             <div className="space-y-4">
-              {runs.length === 0 ? <EmptyState title="No delivery runs yet" detail="Create a run and assign open delivery tickets as stops." /> : runs.map((run) => {
+              {runs.length === 0 ? (
+                driverUser ? (
+                  <div className="rounded-xl border border-dashed border-white/10 bg-[#101010] p-10 text-center">
+                    <p className="text-sm font-semibold text-white">No assigned delivery runs found for {user?.email ?? "your email"}.</p>
+                    {(hqAdmin || process.env.NODE_ENV === "development") && (
+                      <p className="mt-2 text-xs text-zinc-500 font-mono">
+                        Check delivery_runs.driver_id matches drivers.id.
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <EmptyState title="No delivery runs yet" detail="Create a run and assign open delivery tickets as stops." />
+                )
+              ) : runs.map((run) => {
                 const orderedTickets = [...(run.tickets ?? [])].sort((a, b) => (a.stopSequence ?? 999) - (b.stopSequence ?? 999));
                 const matchingVehicleLog = run.vehicleId
                   ? vehicleLogs.find((log) => log.vehicleId === run.vehicleId && log.logDate === run.runDate)
@@ -701,10 +771,16 @@ export default function DeliveriesPage() {
                               <p className="text-xs text-zinc-500">{ticket.ticketNumber} · {ticket.destinationAddress || ticket.locationId}</p>
                             </div>
                             <div className="flex shrink-0 items-center gap-1">
-                              <button onClick={() => moveStop(run, ticket.id, -1)} className="rounded border border-white/10 px-2 py-1 text-xs text-zinc-300">Up</button>
-                              <button onClick={() => moveStop(run, ticket.id, 1)} className="rounded border border-white/10 px-2 py-1 text-xs text-zinc-300">Down</button>
+                              {hqAdmin && (
+                                <>
+                                  <button onClick={() => moveStop(run, ticket.id, -1)} className="rounded border border-white/10 px-2 py-1 text-xs text-zinc-300">Up</button>
+                                  <button onClick={() => moveStop(run, ticket.id, 1)} className="rounded border border-white/10 px-2 py-1 text-xs text-zinc-300">Down</button>
+                                </>
+                              )}
                               <button onClick={() => setSelectedTicket(ticket)} className="rounded border border-white/10 px-2 py-1 text-xs text-zinc-300">Open</button>
-                              <button onClick={async () => { await removeTicketFromDeliveryRun(ticket.id); await refresh(); }} className="rounded border border-red-500/30 px-2 py-1 text-xs text-red-300">Remove</button>
+                              {hqAdmin && (
+                                <button onClick={async () => { await removeTicketFromDeliveryRun(ticket.id); await refresh(); }} className="rounded border border-red-500/30 px-2 py-1 text-xs text-red-300">Remove</button>
+                              )}
                             </div>
                           </div>
                         ))}
@@ -809,10 +885,10 @@ export default function DeliveriesPage() {
                 {hqAdmin && ticketStatuses.map((status) => (
                   <button key={status} onClick={async () => { const res = await updateDeliveryTicketStatus(selectedTicket.id, status); if (!res.success) alert(res.error?.message ?? "Update failed"); else { setSelectedTicket({ ...selectedTicket, status }); await refresh(); } }} className="rounded-lg border border-neutral-200 bg-white px-3 py-2 text-xs font-semibold text-neutral-700 hover:bg-neutral-50">{labelize(status)}</button>
                 ))}
-                {hqAdmin && <button onClick={saveTicketItems} className="rounded-lg bg-neutral-900 px-3 py-2 text-sm font-semibold text-white">Save Lines</button>}
-                {hqAdmin && <button onClick={() => markArrived()} className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white">Mark Arrived</button>}
-                {hqAdmin && <button onClick={() => reportIssue()} className="rounded-lg bg-amber-600 px-3 py-2 text-sm font-semibold text-white">Report Issue</button>}
-                {hqAdmin && <button onClick={markDelivered} className="rounded-lg bg-success-600 px-3 py-2 text-sm font-semibold text-white">Mark Delivered</button>}
+                {(hqAdmin || driverUser) && <button onClick={saveTicketItems} className="rounded-lg bg-neutral-900 px-3 py-2 text-sm font-semibold text-white">Save Lines</button>}
+                {(hqAdmin || driverUser) && <button onClick={() => markArrived()} className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white">Mark Arrived</button>}
+                {(hqAdmin || driverUser) && <button onClick={() => reportIssue()} className="rounded-lg bg-amber-600 px-3 py-2 text-sm font-semibold text-white">Report Issue</button>}
+                {(hqAdmin || driverUser) && <button onClick={markDelivered} className="rounded-lg bg-success-600 px-3 py-2 text-sm font-semibold text-white">Mark Delivered</button>}
               </div>
             </div>
           )}
@@ -853,10 +929,10 @@ export default function DeliveriesPage() {
                           <td className="py-2 text-right">{item.approvedQty}</td>
                           <td className="py-2 text-right">{item.shippedQty}</td>
                           <td className="py-2 text-right">
-                            {hqAdmin ? <input type="number" min="0" value={item.deliveredQty} onChange={(e) => setTicketItemDrafts((prev) => prev.map((row, idx) => idx === index ? { ...row, deliveredQty: Number(e.target.value) } : row))} className="w-20 rounded border border-neutral-200 px-2 py-1 text-right" /> : item.deliveredQty}
+                            {(hqAdmin || driverUser) ? <input type="number" min="0" value={item.deliveredQty} onChange={(e) => setTicketItemDrafts((prev) => prev.map((row, idx) => idx === index ? { ...row, deliveredQty: Number(e.target.value) } : row))} className="w-20 rounded border border-neutral-200 px-2 py-1 text-right" /> : item.deliveredQty}
                           </td>
                           <td className="py-2 text-right">
-                            {hqAdmin ? (
+                            {(hqAdmin || driverUser) ? (
                               <div className="flex justify-end gap-2">
                                 <input type="number" min="0" value={item.issueQty} onChange={(e) => setTicketItemDrafts((prev) => prev.map((row, idx) => idx === index ? { ...row, issueQty: Number(e.target.value) } : row))} className="w-16 rounded border border-neutral-200 px-2 py-1 text-right" />
                                 <input value={item.issueReason ?? ""} onChange={(e) => setTicketItemDrafts((prev) => prev.map((row, idx) => idx === index ? { ...row, issueReason: e.target.value } : row))} placeholder="Reason" className="w-32 rounded border border-neutral-200 px-2 py-1" />
@@ -874,94 +950,94 @@ export default function DeliveriesPage() {
                 </div>
               </div>
               {hqAdmin && (
-                <div className="space-y-4">
-                  <div className="rounded-xl border border-neutral-200 bg-white p-4 space-y-3">
-                    <p className="text-xs font-bold uppercase tracking-wider text-neutral-500 font-semibold">Edit Destination Address & Info</p>
-                    
+                <div className="rounded-xl border border-neutral-200 bg-white p-4 space-y-3">
+                  <p className="text-xs font-bold uppercase tracking-wider text-neutral-500 font-semibold">Edit Destination Address & Info</p>
+                  
+                  <div>
+                    <label className="block text-[10px] font-semibold uppercase text-neutral-500">Destination Name</label>
+                    <input
+                      value={selectedTicket.destinationName ?? ""}
+                      onChange={(e) => setSelectedTicket({ ...selectedTicket, destinationName: e.target.value })}
+                      onBlur={async () => {
+                        await updateDeliveryTicket(selectedTicket.id, { destinationName: selectedTicket.destinationName });
+                        await refresh();
+                      }}
+                      placeholder="Destination Name"
+                      className="mt-1 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-semibold uppercase text-neutral-500">Destination Address</label>
+                    <textarea
+                      value={selectedTicket.destinationAddress ?? ""}
+                      onChange={(e) => setSelectedTicket({ ...selectedTicket, destinationAddress: e.target.value })}
+                      onBlur={async () => {
+                        await updateDeliveryTicket(selectedTicket.id, { destinationAddress: selectedTicket.destinationAddress });
+                        await refresh();
+                      }}
+                      placeholder="Destination Address"
+                      className="mt-1 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm min-h-16"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
                     <div>
-                      <label className="block text-[10px] font-semibold uppercase text-neutral-500">Destination Name</label>
+                      <label className="block text-[10px] font-semibold uppercase text-neutral-500">Contact Person</label>
                       <input
-                        value={selectedTicket.destinationName ?? ""}
-                        onChange={(e) => setSelectedTicket({ ...selectedTicket, destinationName: e.target.value })}
+                        value={selectedTicket.destinationContact ?? ""}
+                        onChange={(e) => setSelectedTicket({ ...selectedTicket, destinationContact: e.target.value })}
                         onBlur={async () => {
-                          await updateDeliveryTicket(selectedTicket.id, { destinationName: selectedTicket.destinationName });
+                          await updateDeliveryTicket(selectedTicket.id, { destinationContact: selectedTicket.destinationContact });
                           await refresh();
                         }}
-                        placeholder="Destination Name"
+                        placeholder="Contact name"
                         className="mt-1 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm"
                       />
                     </div>
-
                     <div>
-                      <label className="block text-[10px] font-semibold uppercase text-neutral-500">Destination Address</label>
-                      <textarea
-                        value={selectedTicket.destinationAddress ?? ""}
-                        onChange={(e) => setSelectedTicket({ ...selectedTicket, destinationAddress: e.target.value })}
+                      <label className="block text-[10px] font-semibold uppercase text-neutral-500">Contact Phone</label>
+                      <input
+                        value={selectedTicket.destinationPhone ?? ""}
+                        onChange={(e) => setSelectedTicket({ ...selectedTicket, destinationPhone: e.target.value })}
                         onBlur={async () => {
-                          await updateDeliveryTicket(selectedTicket.id, { destinationAddress: selectedTicket.destinationAddress });
+                          await updateDeliveryTicket(selectedTicket.id, { destinationPhone: selectedTicket.destinationPhone });
                           await refresh();
                         }}
-                        placeholder="Destination Address"
-                        className="mt-1 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm min-h-16"
+                        placeholder="Contact phone"
+                        className="mt-1 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm"
                       />
                     </div>
-
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <label className="block text-[10px] font-semibold uppercase text-neutral-500">Contact Person</label>
-                        <input
-                          value={selectedTicket.destinationContact ?? ""}
-                          onChange={(e) => setSelectedTicket({ ...selectedTicket, destinationContact: e.target.value })}
-                          onBlur={async () => {
-                            await updateDeliveryTicket(selectedTicket.id, { destinationContact: selectedTicket.destinationContact });
-                            await refresh();
-                          }}
-                          placeholder="Contact name"
-                          className="mt-1 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] font-semibold uppercase text-neutral-500">Contact Phone</label>
-                        <input
-                          value={selectedTicket.destinationPhone ?? ""}
-                          onChange={(e) => setSelectedTicket({ ...selectedTicket, destinationPhone: e.target.value })}
-                          onBlur={async () => {
-                            await updateDeliveryTicket(selectedTicket.id, { destinationPhone: selectedTicket.destinationPhone });
-                            await refresh();
-                          }}
-                          placeholder="Contact phone"
-                          className="mt-1 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="pt-2">
-                      <button
-                        onClick={async () => {
-                          const res: any = await updateTicketAddressFromProfile(selectedTicket.id);
-                          if (res.success && res.data) {
-                            setToast("Delivery address updated from store profile.");
-                            setSelectedTicket(res.data);
-                            await refresh();
-                          } else {
-                            alert(`Address update failed: ${res.error?.message ?? "Unknown error"}`);
-                          }
-                        }}
-                        className="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-xs font-semibold text-neutral-700 hover:bg-neutral-100"
-                      >
-                        <RefreshCw className="h-3.5 w-3.5" /> Update Address from Store Profile
-                      </button>
-                    </div>
                   </div>
 
-                  <div className="rounded-xl border border-neutral-200 bg-white p-4">
-                    <label className="text-xs font-semibold uppercase text-neutral-500">Received by</label>
-                    <input value={receivedBy} onChange={(e) => setReceivedBy(e.target.value)} placeholder="Receiver name" className="mt-1 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm" />
-                    <label className="mt-3 block text-xs font-semibold uppercase text-neutral-500">Ticket notes</label>
-                    <textarea value={selectedTicket.notes ?? ""} onChange={(e) => setSelectedTicket({ ...selectedTicket, notes: e.target.value })} onBlur={async () => { await updateDeliveryTicket(selectedTicket.id, { notes: selectedTicket.notes }); await refresh(); }} className="mt-1 min-h-20 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm" />
-                    <label className="mt-3 block text-xs font-semibold uppercase text-neutral-500">Delivery notes</label>
-                    <textarea value={selectedTicket.deliveryNotes ?? ""} onChange={(e) => setSelectedTicket({ ...selectedTicket, deliveryNotes: e.target.value })} onBlur={async () => { await updateDeliveryTicket(selectedTicket.id, { deliveryNotes: selectedTicket.deliveryNotes }); await refresh(); }} className="mt-1 min-h-20 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm" />
+                  <div className="pt-2">
+                    <button
+                      onClick={async () => {
+                        const res: any = await updateTicketAddressFromProfile(selectedTicket.id);
+                        if (res.success && res.data) {
+                          setToast("Delivery address updated from store profile.");
+                          setSelectedTicket(res.data);
+                          await refresh();
+                        } else {
+                          alert(`Address update failed: ${res.error?.message ?? "Unknown error"}`);
+                        }
+                      }}
+                      className="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-xs font-semibold text-neutral-700 hover:bg-neutral-100"
+                    >
+                      <RefreshCw className="h-3.5 w-3.5" /> Update Address from Store Profile
+                    </button>
                   </div>
+                </div>
+              )}
+
+              {(hqAdmin || driverUser) && (
+                <div className="rounded-xl border border-neutral-200 bg-white p-4">
+                  <label className="text-xs font-semibold uppercase text-neutral-500">Received by</label>
+                  <input value={receivedBy} onChange={(e) => setReceivedBy(e.target.value)} placeholder="Receiver name" className="mt-1 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm" />
+                  <label className="mt-3 block text-xs font-semibold uppercase text-neutral-500">Ticket notes</label>
+                  <textarea value={selectedTicket.notes ?? ""} onChange={(e) => setSelectedTicket({ ...selectedTicket, notes: e.target.value })} onBlur={async () => { await updateDeliveryTicket(selectedTicket.id, { notes: selectedTicket.notes }); await refresh(); }} className="mt-1 min-h-20 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm" />
+                  <label className="mt-3 block text-xs font-semibold uppercase text-neutral-500">Delivery notes</label>
+                  <textarea value={selectedTicket.deliveryNotes ?? ""} onChange={(e) => setSelectedTicket({ ...selectedTicket, deliveryNotes: e.target.value })} onBlur={async () => { await updateDeliveryTicket(selectedTicket.id, { deliveryNotes: selectedTicket.deliveryNotes }); await refresh(); }} className="mt-1 min-h-20 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm" />
                 </div>
               )}
             </div>
@@ -976,6 +1052,11 @@ export default function DeliveriesPage() {
             const isStartAddressMissing = !routeRun.startAddress?.trim();
             const isAnyStopAddressMissing = orderedTickets.some((t: any) => !t.destinationAddress?.trim());
             const isEstimateDisabled = stopsCount === 0 || isStartAddressMissing || isAnyStopAddressMissing || estimatingRoute;
+            const estimateDisabledReasons = [
+              stopsCount === 0 ? "Add delivery tickets/stops" : null,
+              isStartAddressMissing ? "Start address missing" : null,
+              stopsCount > 0 && isAnyStopAddressMissing ? "One or more stops missing destination address" : null,
+            ].filter(Boolean);
 
             return (
               <div className="space-y-4 text-neutral-700">
@@ -1093,20 +1174,24 @@ export default function DeliveriesPage() {
                 <div className="rounded-xl border border-neutral-200 bg-white p-4 space-y-3">
                   <p className="text-xs font-bold uppercase tracking-wider text-neutral-500">Google Maps Route Integration</p>
                   <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      disabled={isEstimateDisabled}
-                      onClick={() => handleEstimateRoute(routeRun, false)}
-                      className="inline-flex items-center justify-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50 disabled:opacity-50"
-                    >
-                      {estimatingRoute ? "Estimating..." : "Estimate Route"}
-                    </button>
-                    <button
-                      disabled={isEstimateDisabled}
-                      onClick={() => handleEstimateRoute(routeRun, true)}
-                      className="inline-flex items-center justify-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50 disabled:opacity-50"
-                    >
-                      {estimatingRoute ? "Optimizing..." : "Optimize Route"}
-                    </button>
+                    {hqAdmin && (
+                      <>
+                        <button
+                          disabled={isEstimateDisabled}
+                          onClick={() => handleEstimateRoute(routeRun, false)}
+                          className="inline-flex items-center justify-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50 disabled:opacity-50"
+                        >
+                          {estimatingRoute ? "Estimating..." : "Estimate Route"}
+                        </button>
+                        <button
+                          disabled={isEstimateDisabled}
+                          onClick={() => handleEstimateRoute(routeRun, true)}
+                          className="inline-flex items-center justify-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50 disabled:opacity-50"
+                        >
+                          {estimatingRoute ? "Optimizing..." : "Optimize Route"}
+                        </button>
+                      </>
+                    )}
                     <button
                       onClick={() => handleOpenInGoogleMaps(routeRun)}
                       className="inline-flex items-center justify-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50"
@@ -1114,15 +1199,22 @@ export default function DeliveriesPage() {
                       Open in Google Maps
                     </button>
                   </div>
-                  <label className="flex items-center gap-2 text-xs font-semibold text-neutral-600">
-                    <input
-                      type="checkbox"
-                      checked={returnToStart}
-                      onChange={(e) => setReturnToStart(e.target.checked)}
-                      className="rounded border-neutral-300 text-blue-600 focus:ring-blue-500"
-                    />
-                    Return to start (HQ / Start Address)
-                  </label>
+                  {hqAdmin && estimateDisabledReasons.length > 0 && (
+                    <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800">
+                      {estimateDisabledReasons.join(" · ")}
+                    </div>
+                  )}
+                  {hqAdmin && (
+                    <label className="flex items-center gap-2 text-xs font-semibold text-neutral-600">
+                      <input
+                        type="checkbox"
+                        checked={returnToStart}
+                        onChange={(e) => setReturnToStart(e.target.checked)}
+                        className="rounded border-neutral-300 text-blue-600 focus:ring-blue-500"
+                      />
+                      Return to start (HQ / Start Address)
+                    </label>
+                  )}
                 </div>
 
                 {/* Google Route Result Section */}
@@ -1398,10 +1490,10 @@ export default function DeliveriesPage() {
                                     >
                                       Update Address from Store Profile
                                     </button>
+                                    <button onClick={() => moveStop(routeRun, ticket.id, -1)} className="rounded border border-neutral-200 px-2 py-1 text-xs font-semibold hover:bg-neutral-50">Up</button>
+                                    <button onClick={() => moveStop(routeRun, ticket.id, 1)} className="rounded border border-neutral-200 px-2 py-1 text-xs font-semibold hover:bg-neutral-50">Down</button>
                                   </>
                                 )}
-                                <button onClick={() => moveStop(routeRun, ticket.id, -1)} className="rounded border border-neutral-200 px-2 py-1 text-xs font-semibold hover:bg-neutral-50">Up</button>
-                                <button onClick={() => moveStop(routeRun, ticket.id, 1)} className="rounded border border-neutral-200 px-2 py-1 text-xs font-semibold hover:bg-neutral-50">Down</button>
                                 <button onClick={() => setSelectedTicket(ticket)} className="rounded border border-neutral-200 px-2 py-1 text-xs font-semibold hover:bg-neutral-50">Open Ticket</button>
                                 <button onClick={() => markArrived(ticket)} className="rounded border border-blue-200 bg-blue-50 px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100">Mark Arrived</button>
                                 <button onClick={() => { setSelectedTicket(ticket); }} className="rounded border border-success-200 bg-success-50 px-2 py-1 text-xs font-semibold text-success-700 hover:bg-success-100">Mark Delivered</button>

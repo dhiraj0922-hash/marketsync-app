@@ -4245,6 +4245,8 @@ const mapDeliveryRunToFrontend = (db: any): any => ({
   routeEstimatedAt: db.route_estimated_at ?? null,
   routePolyline: db.route_polyline ?? null,
   googleRouteSummary: db.google_route_summary ?? null,
+  driverEmail: db.driver_email ?? null,
+  driverName: db.driver_name ?? null,
   driver: db.drivers ? mapDriverToFrontend(db.drivers) : null,
   vehicle: db.vehicles ? mapVehicleToFrontend(db.vehicles) : null,
   tickets: Array.isArray(db.delivery_tickets)
@@ -4620,7 +4622,62 @@ export async function markDeliveryTicketDelivered(id: string, receivedBy: string
   });
 }
 
-export async function getDeliveryRuns(filters: { status?: string; runDate?: string; driverId?: string } = {}) {
+let cachedDriverEmailExists: boolean | null = null;
+let cachedDriverNameExists: boolean | null = null;
+
+async function hasDriverEmailColumn(): Promise<boolean> {
+  if (cachedDriverEmailExists !== null) return cachedDriverEmailExists;
+  try {
+    const { error } = await supabase.from('delivery_runs').select('driver_email').limit(1);
+    cachedDriverEmailExists = !error || (error.code !== '42703' && !error.message?.includes('driver_email') && !error.message?.includes('column does not exist'));
+  } catch (e) {
+    cachedDriverEmailExists = false;
+  }
+  return cachedDriverEmailExists ?? false;
+}
+
+async function hasDriverNameColumn(): Promise<boolean> {
+  if (cachedDriverNameExists !== null) return cachedDriverNameExists;
+  try {
+    const { error } = await supabase.from('delivery_runs').select('driver_name').limit(1);
+    cachedDriverNameExists = !error || (error.code !== '42703' && !error.message?.includes('driver_name') && !error.message?.includes('column does not exist'));
+  } catch (e) {
+    cachedDriverNameExists = false;
+  }
+  return cachedDriverNameExists ?? false;
+}
+
+async function enrichDriverSnapshot(payload: any) {
+  const driverId = payload.driver_id || payload.driverId;
+  const out: any = {};
+  
+  const hasEmail = await hasDriverEmailColumn();
+  const hasName = await hasDriverNameColumn();
+
+  if (!driverId) {
+    if (hasEmail) out.driver_email = null;
+    if (hasName) out.driver_name = null;
+    return out;
+  }
+
+  try {
+    const { data: driver } = await supabase
+      .from('drivers')
+      .select('name, email')
+      .eq('id', driverId)
+      .maybeSingle();
+
+    if (driver) {
+      if (hasEmail) out.driver_email = driver.email || null;
+      if (hasName) out.driver_name = driver.name || null;
+    }
+  } catch (err) {
+    console.error('[driver-route-debug] Error in enrichDriverSnapshot:', err);
+  }
+  return out;
+}
+
+export async function getDeliveryRuns(filters: { status?: string; runDate?: string; driverId?: string; driverEmail?: string } = {}) {
   let query = supabase
     .from('delivery_runs')
     .select('*, drivers(*), vehicles(*), delivery_tickets(*, delivery_ticket_items(*))')
@@ -4628,13 +4685,58 @@ export async function getDeliveryRuns(filters: { status?: string; runDate?: stri
     .order('created_at', { ascending: false });
   if (filters.status && filters.status !== 'all') query = query.eq('status', filters.status);
   if (filters.runDate) query = query.eq('run_date', filters.runDate);
-  if (filters.driverId) query = query.eq('driver_id', filters.driverId);
+  
+  if (filters.driverId) {
+    const hasEmailCol = await hasDriverEmailColumn();
+    if (hasEmailCol && filters.driverEmail) {
+      query = query.or(`driver_id.eq.${filters.driverId},driver_email.ilike.${filters.driverEmail}`);
+    } else {
+      query = query.eq('driver_id', filters.driverId);
+    }
+  }
+
   const { data, error } = await query;
   if (error) {
     console.error('getDeliveryRuns:', error);
     return [];
   }
-  return (data ?? []).map(mapDeliveryRunToFrontend);
+
+  const runs = (data ?? []).map(mapDeliveryRunToFrontend);
+
+  // Background self-healing
+  if (filters.driverId && filters.driverEmail) {
+    const hasEmailCol = await hasDriverEmailColumn();
+    if (hasEmailCol) {
+      const runsToRepair = runs.filter((run: any) => {
+        const emailMatch = run.driverEmail && String(run.driverEmail).trim().toLowerCase() === String(filters.driverEmail).trim().toLowerCase();
+        return emailMatch && run.driverId !== filters.driverId;
+      });
+
+      if (runsToRepair.length > 0) {
+        console.warn(`[driver-route-debug] Found ${runsToRepair.length} runs with missing/wrong driver_id. Repairing...`);
+        Promise.all(
+          runsToRepair.map(async (run: any) => {
+            try {
+              const { error: repairError } = await supabase
+                .from('delivery_runs')
+                .update({ driver_id: filters.driverId })
+                .eq('id', run.id);
+              if (repairError) {
+                console.error(`[driver-route-debug] Failed to self-heal run ${run.id}:`, repairError);
+              } else {
+                console.log(`[driver-route-debug] Successfully self-healed run ${run.id} driver_id to ${filters.driverId}`);
+                run.driverId = filters.driverId;
+              }
+            } catch (err) {
+              console.error(`[driver-route-debug] Exception self-healing run ${run.id}:`, err);
+            }
+          })
+        ).catch(err => console.error('[driver-route-debug] Self-heal group failed:', err));
+      }
+    }
+  }
+
+  return runs;
 }
 
 export async function getDeliveryRunById(id: string) {
@@ -4674,20 +4776,24 @@ export async function createDeliveryRun(payload: any) {
     }
   }
 
+  const driverEnrich = await enrichDriverSnapshot({ driverId: payload.driverId });
+  const insertObj = {
+    run_number: runNumber,
+    run_date: payload.runDate,
+    driver_id: payload.driverId || null,
+    vehicle_id: payload.vehicleId || null,
+    status: payload.status ?? 'draft',
+    estimated_distance_km: Number(payload.estimatedDistanceKm ?? 0),
+    estimated_duration_minutes: Number(payload.estimatedDurationMinutes ?? 0),
+    notes: payload.notes ?? '',
+    start_address: payload.startAddress || defaultStartAddress,
+    created_by: userId,
+    ...driverEnrich
+  };
+
   const { data, error } = await supabase
     .from('delivery_runs')
-    .insert({
-      run_number: runNumber,
-      run_date: payload.runDate,
-      driver_id: payload.driverId || null,
-      vehicle_id: payload.vehicleId || null,
-      status: payload.status ?? 'draft',
-      estimated_distance_km: Number(payload.estimatedDistanceKm ?? 0),
-      estimated_duration_minutes: Number(payload.estimatedDurationMinutes ?? 0),
-      notes: payload.notes ?? '',
-      start_address: payload.startAddress || defaultStartAddress,
-      created_by: userId,
-    })
+    .insert(insertObj)
     .select()
     .single();
   if (error) return { success: false, error };
@@ -4695,9 +4801,15 @@ export async function createDeliveryRun(payload: any) {
 }
 
 export async function updateDeliveryRun(id: string, patch: any) {
+  const dbPatch = mapDeliveryRunPatchToDB(patch);
+  if ('driver_id' in dbPatch) {
+    const driverEnrich = await enrichDriverSnapshot({ driver_id: dbPatch.driver_id });
+    Object.assign(dbPatch, driverEnrich);
+  }
+
   const { data, error } = await supabase
     .from('delivery_runs')
-    .update(mapDeliveryRunPatchToDB(patch))
+    .update(dbPatch)
     .eq('id', id)
     .select()
     .single();
