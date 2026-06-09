@@ -428,6 +428,9 @@ export default function DeliveriesPage() {
   };
 
   const handleEstimateRoute = async (run: any, optimize = false) => {
+    console.log("selectedRun.id", run?.id);
+    console.log("selectedRun.runNumber", run?.runNumber);
+    console.log("selectedRun.run_number", run?.run_number);
     console.log("[Estimate Route Clicked]", {
       selectedRunId: run?.id,
       selectedRunNumber: run?.runNumber,

@@ -50,6 +50,7 @@ import {
   ChevronDown,
   History,
   ChevronRight,
+  Bell,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -100,9 +101,9 @@ const addDaysISO = (dateISO: string, days: number) => {
 
 function varianceLabel(v: number | null) {
   if (v === null) return null;
-  if (v === 0) return { label: "No change", color: "text-zinc-500", icon: <Minus className="h-3.5 w-3.5" /> };
-  if (v > 0)   return { label: `+${fmt(v)}`, color: "text-emerald-400",   icon: <TrendingUp className="h-3.5 w-3.5" /> };
-  return          { label: fmt(v),           color: "text-red-400",    icon: <TrendingDown className="h-3.5 w-3.5" /> };
+  if (v === 0) return { label: "No change", color: "text-slate-500", icon: <Minus className="h-3.5 w-3.5" /> };
+  if (v > 0)   return { label: `+${fmt(v)}`, color: "text-emerald-700",   icon: <TrendingUp className="h-3.5 w-3.5" /> };
+  return          { label: fmt(v),           color: "text-red-600",    icon: <TrendingDown className="h-3.5 w-3.5" /> };
 }
 
 function blankRows(items: SaleItem[]): CountRow[] {
@@ -497,83 +498,74 @@ function FgCountContent() {
   // ── UI ─────────────────────────────────────────────────────────────────────
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center p-16 text-zinc-500 gap-2">
+      <div className="-m-6 flex min-h-[calc(100vh-4rem)] items-center justify-center gap-2 bg-slate-50 p-16 text-slate-500">
         <Loader2 className="h-5 w-5 animate-spin" /> Loading FG Count…
       </div>
     );
   }
 
   return (
-    <div className="-m-6 min-h-[calc(100vh-4rem)] bg-[#070707] p-6 text-zinc-100">
-      <style>{`
-        body .flex.bg-neutral-50.text-neutral-900.min-h-screen {
-          background: #070707 !important;
-          color: #e4e4e7 !important;
-        }
-        body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] {
-          background: #111111 !important;
-          border-color: #262626 !important;
-        }
-        body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] a,
-        body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] button {
-          color: #a1a1aa !important;
-        }
-        body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] a[class*="bg-brand-50"],
-        body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] a:hover {
-          background: #2563eb !important;
-          color: #ffffff !important;
-        }
-        body div[class*="sm:w-56"][class*="bg-white"][class*="border-r"] svg {
-          color: currentColor !important;
-        }
-        body header[class*="bg-white"][class*="border-b"] {
-          background: #111111 !important;
-          border-color: #262626 !important;
-          box-shadow: none !important;
-        }
-        body header[class*="bg-white"] h1,
-        body header[class*="bg-white"] button,
-        body header[class*="bg-white"] span {
-          color: #e4e4e7 !important;
-        }
-        body header[class*="bg-white"] input,
-        body header[class*="bg-white"] [role="button"] {
-          background: #171717 !important;
-          border-color: #262626 !important;
-          color: #e4e4e7 !important;
-        }
-      `}</style>
-      <div className="mx-auto max-w-[1408px] space-y-5">
+    <div className="-m-6 min-h-[calc(100vh-4rem)] bg-slate-50 p-4 text-slate-900 sm:p-6">
+      <div className="mx-auto max-w-[1440px] space-y-6">
 
       {/* ── Header ─────────────────────────────────────────────────────── */}
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+      <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-center gap-3">
+            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-emerald-600 text-white shadow-sm">
+              <ClipboardCheck className="h-5 w-5" />
+            </div>
+            <div>
+              <p className="text-sm font-black tracking-[0.18em] text-slate-950">STOCK DHARMA</p>
+              <p className="text-xs font-medium text-slate-500">Page title: FG Count</p>
+            </div>
+          </div>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <div className="relative min-w-0 sm:w-80">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <input
+                type="text"
+                placeholder="Search finished goods..."
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-900 outline-none transition focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
+              />
+            </div>
+            <button className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-500 hover:bg-slate-50" aria-label="Notifications">
+              <Bell className="h-4 w-4" />
+            </button>
+            <div className="rounded-xl bg-slate-900 px-3 py-2 text-sm font-bold text-white">HQ Admin</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-zinc-500">FG Count</p>
-          <h2 className="mt-2 flex items-center gap-2 text-2xl font-semibold tracking-tight text-white">
-            <ClipboardCheck className="h-6 w-6 text-blue-400" />
+          <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-emerald-700">Finished Goods Control</p>
+          <h2 className="mt-2 flex items-center gap-2 text-3xl font-bold tracking-tight text-slate-950">
             Finished Goods Count
           </h2>
-          <p className="mt-1 text-sm text-zinc-500">
-            Enter physical counts below. Saves update live stock and log variances.
+          <p className="mt-1 text-sm text-slate-500">
+            Enter physical counts, save date-based sessions, and review count variance history.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={openHistory}
-            className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#151515] px-3 py-2 text-sm font-medium text-zinc-300 transition-colors hover:bg-[#1f1f1f]"
+            className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition-colors hover:bg-slate-50"
           >
             <History className="h-4 w-4" /> FG Count History
           </button>
           <button
             onClick={load}
-            className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#151515] px-3 py-2 text-sm font-medium text-zinc-300 transition-colors hover:bg-[#1f1f1f]"
+            className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition-colors hover:bg-slate-50"
           >
             <RefreshCw className="h-4 w-4" /> Refresh
           </button>
           <button
             onClick={saveAll}
             disabled={!countDate || isSessionLoading || isSavingAll || visible.every(r => r.countInput === "" || r.saved)}
-            className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-blue-600/20 transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {isSavingAll
               ? <><Loader2 className="h-4 w-4 animate-spin" /> Saving…</>
@@ -582,29 +574,29 @@ function FgCountContent() {
         </div>
       </div>
       {isSessionLoading && (
-        <div className="flex items-center gap-2 rounded-lg border border-white/10 bg-[#151515] px-3 py-2 text-sm text-zinc-400">
+        <div className="flex items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-700">
           <Loader2 className="h-4 w-4 animate-spin" />
           Loading count sheet for {countDate}…
         </div>
       )}
 
       {/* ── Session controls ───────────────────────────────────────────── */}
-      <Card className="rounded-xl border-white/10 bg-[#111111] shadow-[0_18px_50px_rgba(0,0,0,0.32)]">
+      <Card className="rounded-2xl border-slate-200 bg-white shadow-sm">
         <CardContent className="grid grid-cols-1 gap-3 px-4 py-4 md:grid-cols-3">
           <div>
-            <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500">
+            <label className="mb-1.5 block text-[11px] font-bold uppercase tracking-[0.16em] text-slate-500">
               Count Date <span className="text-red-500">*</span>
             </label>
             <input
               type="date"
               value={countDate}
               onChange={e => handleCountDateChange(e.target.value)}
-              className="w-full rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-100"
               required
             />
           </div>
           <div>
-            <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500">
+            <label className="mb-1.5 block text-[11px] font-bold uppercase tracking-[0.16em] text-slate-500">
               Session Name
             </label>
             <input
@@ -612,18 +604,18 @@ function FgCountContent() {
               value={sessionName}
               onChange={e => setSessionName(e.target.value)}
               placeholder="Night Closing Count, Weekly Audit, etc."
-              className="w-full rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-100"
             />
           </div>
           <div>
-            <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500">
+            <label className="mb-1.5 block text-[11px] font-bold uppercase tracking-[0.16em] text-slate-500">
               Counted By
             </label>
             <input
               type="text"
               value={countedByLabel}
               readOnly
-              className="w-full rounded-lg border border-white/10 bg-[#0d0d0d] px-3 py-2 text-sm text-zinc-400"
+              className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-500"
             />
           </div>
         </CardContent>
@@ -632,18 +624,18 @@ function FgCountContent() {
       {/* ── Count summary cards ─────────────────────────────────────────── */}
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         {[
-          { label: "Items Entered",    value: enteredCount,   color: "text-blue-400",    icon: ClipboardCheck, bg: "bg-blue-500" },
-          { label: "Variances Found",  value: varianceItems,  color: "text-violet-400",  icon: AlertTriangle, bg: "bg-violet-500" },
-          { label: "Count Gains",      value: gainItems,      color: "text-emerald-400", icon: TrendingUp, bg: "bg-emerald-500" },
-          { label: "Count Losses",     value: lossItems,      color: "text-red-400",     icon: TrendingDown, bg: "bg-red-500" },
+          { label: "Items Entered",    value: enteredCount,   color: "text-blue-700",    icon: ClipboardCheck, bg: "bg-blue-50 text-blue-700 ring-blue-100" },
+          { label: "Variances Found",  value: varianceItems,  color: "text-slate-950",  icon: AlertTriangle, bg: "bg-amber-50 text-amber-700 ring-amber-100" },
+          { label: "Count Gains",      value: gainItems,      color: "text-emerald-700", icon: TrendingUp, bg: "bg-emerald-50 text-emerald-700 ring-emerald-100" },
+          { label: "Count Losses",     value: lossItems,      color: "text-red-700",     icon: TrendingDown, bg: "bg-red-50 text-red-700 ring-red-100" },
         ].map(s => (
-          <div key={s.label} className="rounded-xl border border-white/10 bg-[#151515] p-5 shadow-[0_18px_50px_rgba(0,0,0,0.28)]">
+          <div key={s.label} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500">{s.label}</p>
+                <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-500">{s.label}</p>
                 <p className={`mt-3 text-3xl font-semibold tracking-tight ${s.color}`}>{s.value}</p>
               </div>
-              <div className={`rounded-lg p-2.5 text-white shadow-lg ${s.bg}`}>
+              <div className={`rounded-xl p-2.5 ring-1 ${s.bg}`}>
                 <s.icon className="h-4 w-4" />
               </div>
             </div>
@@ -653,91 +645,91 @@ function FgCountContent() {
 
       {/* ── Value cards (making_cost based) ─────────────────────────────── */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        <div className="rounded-xl border border-white/10 bg-[#111111] p-4 shadow-[0_18px_50px_rgba(0,0,0,0.24)]">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500">System FG Value</p>
-          <p className="mt-2 text-2xl font-semibold tabular-nums text-white">{$fmt(systemFgValue)}</p>
-          <p className="mt-1 text-[10px] text-zinc-600">Σ (system stock × making cost)</p>
+        <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-500">System FG Value</p>
+          <p className="mt-2 text-2xl font-semibold tabular-nums text-slate-950">{$fmt(systemFgValue)}</p>
+          <p className="mt-1 text-[10px] text-slate-400">Σ (system stock × making cost)</p>
         </div>
-        <div className="rounded-xl border border-blue-500/20 bg-[#101827] p-4 shadow-[0_18px_50px_rgba(0,0,0,0.24)]">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-blue-200/60">Physical FG Value</p>
-          <p className="mt-2 text-2xl font-semibold tabular-nums text-blue-200">
-            {enteredCount > 0 ? $fmt(physicalFgValue) : <span className="text-zinc-600">—</span>}
+        <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4 shadow-sm">
+          <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-blue-600">Physical FG Value</p>
+          <p className="mt-2 text-2xl font-semibold tabular-nums text-blue-700">
+            {enteredCount > 0 ? $fmt(physicalFgValue) : <span className="text-blue-300">—</span>}
           </p>
-          <p className="mt-1 text-[10px] text-blue-100/40">Σ (physical count × making cost)</p>
+          <p className="mt-1 text-[10px] text-blue-500/70">Σ (physical count × making cost)</p>
         </div>
-        <div className={`rounded-xl border p-4 shadow-[0_18px_50px_rgba(0,0,0,0.24)] ${
+        <div className={`rounded-2xl border p-4 shadow-sm ${
           varianceValue === 0 || enteredCount === 0
-            ? "border-white/10 bg-[#111111]"
+            ? "border-slate-200 bg-white"
             : varianceValue > 0
-            ? "border-emerald-500/20 bg-emerald-500/10"
-            : "border-red-500/20 bg-red-500/10"
+            ? "border-emerald-200 bg-emerald-50"
+            : "border-red-200 bg-red-50"
         }`}>
-          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500">Variance Value</p>
+          <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-500">Variance Value</p>
           <p className={`mt-2 text-2xl font-semibold tabular-nums ${
             enteredCount === 0 || varianceValue === 0
-              ? "text-zinc-600"
+              ? "text-slate-400"
               : varianceValue > 0
-              ? "text-emerald-300"
-              : "text-red-300"
+              ? "text-emerald-700"
+              : "text-red-700"
           }`}>
             {enteredCount > 0
               ? <>{varianceValue > 0 ? "+" : ""}{$fmt(varianceValue)}</>
               : "—"}
           </p>
-          <p className="mt-1 text-[10px] text-zinc-600">Σ (variance qty × making cost)</p>
+          <p className="mt-1 text-[10px] text-slate-400">Σ (variance qty × making cost)</p>
         </div>
       </div>
 
       {/* ── Filters ────────────────────────────────────────────────────── */}
-      <Card className="rounded-xl border-white/10 bg-[#111111] shadow-[0_18px_50px_rgba(0,0,0,0.24)]">
+      <Card className="rounded-2xl border-slate-200 bg-white shadow-sm">
         <CardContent className="flex flex-wrap items-center gap-3 px-4 py-3">
           {/* Search */}
           <div className="relative min-w-[220px] flex-1">
-            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
               placeholder="Search item name…"
               value={search}
               onChange={e => setSearch(e.target.value)}
-              className="w-full rounded-lg border border-white/10 bg-[#171717] py-2 pl-8 pr-3 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-8 pr-3 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-100"
             />
           </div>
           {/* Category */}
           <div className="relative min-w-[180px]">
-            <Filter className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
+            <Filter className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
             <select
               value={filterCat}
               onChange={e => setFilterCat(e.target.value)}
-              className="w-full appearance-none rounded-lg border border-white/10 bg-[#171717] py-2 pl-8 pr-7 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              className="w-full appearance-none rounded-xl border border-slate-200 bg-white py-2 pl-8 pr-7 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-100"
             >
               {categories.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
-            <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
+            <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
           </div>
           {/* Enter-key tip */}
-          <p className="hidden text-xs italic text-zinc-600 sm:block">
-            Tip: press <kbd className="rounded border border-white/10 bg-[#1f1f1f] px-1 py-0.5 font-mono text-[10px]">Enter</kbd> to save and move to the next row
+          <p className="hidden text-xs italic text-slate-400 sm:block">
+            Tip: press <kbd className="rounded border border-slate-200 bg-slate-50 px-1 py-0.5 font-mono text-[10px] text-slate-600">Enter</kbd> to save and move to the next row
           </p>
         </CardContent>
       </Card>
 
       {/* ── Count table ────────────────────────────────────────────────── */}
-      <Card className="overflow-hidden rounded-xl border-white/10 bg-[#111111] shadow-[0_18px_50px_rgba(0,0,0,0.32)]">
+      <Card className="overflow-hidden rounded-2xl border-slate-200 bg-white shadow-sm">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
-            <thead className="border-b border-white/5 bg-[#151515]">
+            <thead className="border-b border-slate-200 bg-slate-50">
               <tr>
                 {["Item", "Category", "Making Cost", "System Stock", "System Value", "Physical Count", "Physical Value", "Variance", "Variance Value", "Status"].map(h => (
-                  <th key={h} className="whitespace-nowrap px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+                  <th key={h} className="whitespace-nowrap px-4 py-3 text-left text-[11px] font-bold uppercase tracking-[0.14em] text-slate-500">
                     {h}
                   </th>
                 ))}
               </tr>
             </thead>
-            <tbody className="divide-y divide-white/5">
+            <tbody className="divide-y divide-slate-100">
               {visible.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="px-4 py-10 text-center text-sm text-zinc-500">
+                  <td colSpan={10} className="px-4 py-10 text-center text-sm text-slate-500">
                     No items match your filters.
                   </td>
                 </tr>
@@ -748,32 +740,32 @@ function FgCountContent() {
                     key={row.item.id}
                     className={`transition-colors ${
                       row.saved
-                        ? "bg-emerald-500/10"
+                        ? "bg-emerald-50"
                         : row.error
-                        ? "bg-red-500/10"
-                        : "hover:bg-white/[0.03]"
+                        ? "bg-red-50"
+                        : "hover:bg-slate-50"
                     }`}
                   >
                     {/* Item name */}
                     <td className="px-4 py-2.5">
-                      <p className="font-semibold leading-tight text-white">{row.item.name}</p>
-                      <p className="mt-0.5 font-mono text-[10px] text-zinc-600">{row.item.id}</p>
+                      <p className="font-semibold leading-tight text-slate-950">{row.item.name}</p>
+                      <p className="mt-0.5 font-mono text-[10px] text-slate-400">{row.item.id}</p>
                     </td>
 
                     {/* Category */}
                     <td className="px-4 py-2.5">
-                      <span className="text-xs text-zinc-500">{row.item.category ?? "—"}</span>
+                      <span className="text-xs text-slate-500">{row.item.category ?? "—"}</span>
                     </td>
 
                     {/* Making Cost */}
                     <td className="px-4 py-2.5">
                       {row.item.makingCost > 0 ? (
-                        <span className="font-mono text-xs tabular-nums text-zinc-300">
+                        <span className="font-mono text-xs tabular-nums text-slate-700">
                           {$fmt(row.item.makingCost)}
-                          <span className="text-zinc-600">/{row.item.baseUnit}</span>
+                          <span className="text-slate-400">/{row.item.baseUnit}</span>
                         </span>
                       ) : (
-                        <span className="inline-flex items-center gap-1 rounded border border-amber-500/20 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300">
+                        <span className="inline-flex items-center gap-1 rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
                           No cost
                         </span>
                       )}
@@ -781,15 +773,15 @@ function FgCountContent() {
 
                     {/* System stock */}
                     <td className="px-4 py-2.5">
-                      <span className="font-mono font-semibold tabular-nums text-zinc-300">
+                      <span className="font-mono font-semibold tabular-nums text-slate-800">
                         {fmt(row.item.instock)}
                       </span>
-                      <span className="ml-1 text-xs text-zinc-600">{row.item.baseUnit}</span>
+                      <span className="ml-1 text-xs text-slate-400">{row.item.baseUnit}</span>
                     </td>
 
                     {/* System Value */}
                     <td className="px-4 py-2.5">
-                      <span className="font-mono text-xs tabular-nums text-zinc-400">
+                      <span className="font-mono text-xs tabular-nums text-slate-500">
                         {$fmt(row.item.instock * row.item.makingCost)}
                       </span>
                     </td>
@@ -809,17 +801,17 @@ function FgCountContent() {
                           disabled={row.saving}
                           className={`w-24 rounded-lg border px-2.5 py-1.5 text-sm font-medium tabular-nums transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 ${
                             row.error
-                              ? "border-red-500/30 bg-red-500/10 text-red-300"
+                              ? "border-red-200 bg-red-50 text-red-700"
                               : row.saved
-                              ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
-                              : "border-white/10 bg-[#171717] text-zinc-100"
+                              ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                              : "border-slate-200 bg-white text-slate-900"
                           }`}
                         />
                         {row.countInput !== "" && !row.saved && (
                           <button
                             onClick={() => saveRow(row)}
                             disabled={row.saving}
-                            className="rounded-lg bg-blue-500/15 p-1.5 text-blue-300 transition-colors hover:bg-blue-500/25 disabled:opacity-50"
+                            className="rounded-lg bg-blue-50 p-1.5 text-blue-700 transition-colors hover:bg-blue-100 disabled:opacity-50"
                             title="Save this row"
                           >
                             {row.saving
@@ -829,18 +821,18 @@ function FgCountContent() {
                         )}
                       </div>
                       {row.error && (
-                        <p className="mt-0.5 text-[10px] text-red-400">{row.error}</p>
+                        <p className="mt-0.5 text-[10px] text-red-600">{row.error}</p>
                       )}
                     </td>
 
                     {/* Physical Value */}
                     <td className="px-4 py-2.5">
                       {row.countInput !== "" && !isNaN(parseFloat(row.countInput)) ? (
-                        <span className="font-mono text-xs font-semibold tabular-nums text-blue-300">
+                        <span className="font-mono text-xs font-semibold tabular-nums text-blue-700">
                           {$fmt(parseFloat(row.countInput) * row.item.makingCost)}
                         </span>
                       ) : (
-                        <span className="text-xs text-zinc-700">—</span>
+                        <span className="text-xs text-slate-300">—</span>
                       )}
                     </td>
 
@@ -851,7 +843,7 @@ function FgCountContent() {
                           {vLabel.icon} {vLabel.label}
                         </span>
                       ) : (
-                        <span className="text-xs text-zinc-700">—</span>
+                        <span className="text-xs text-slate-300">—</span>
                       )}
                     </td>
 
@@ -860,34 +852,34 @@ function FgCountContent() {
                       {row.variance !== null ? (
                         <span className={`font-mono tabular-nums text-xs font-semibold ${
                           row.variance === 0
-                            ? "text-zinc-500"
+                            ? "text-slate-500"
                             : row.variance > 0
-                            ? "text-emerald-400"
-                            : "text-red-400"
+                            ? "text-emerald-700"
+                            : "text-red-600"
                         }`}>
                           {row.variance > 0 ? "+" : ""}{$fmt(row.variance * row.item.makingCost)}
                         </span>
                       ) : (
-                        <span className="text-xs text-zinc-700">—</span>
+                        <span className="text-xs text-slate-300">—</span>
                       )}
                     </td>
 
                     {/* Status */}
                     <td className="px-4 py-2.5">
                       {row.saved ? (
-                        <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">
+                        <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
                           <CheckCircle2 className="h-3 w-3" /> Saved
                         </span>
                       ) : row.error ? (
-                        <span className="inline-flex items-center gap-1 rounded-full border border-red-500/20 bg-red-500/10 px-2 py-0.5 text-[11px] font-semibold text-red-300">
+                        <span className="inline-flex items-center gap-1 rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[11px] font-semibold text-red-700">
                           <AlertTriangle className="h-3 w-3" /> Error
                         </span>
                       ) : row.countInput !== "" ? (
-                        <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-[11px] font-semibold text-amber-300">
+                        <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-700">
                           Pending
                         </span>
                       ) : (
-                        <span className="text-[11px] text-zinc-700">—</span>
+                        <span className="text-[11px] text-slate-300">—</span>
                       )}
                     </td>
                   </tr>
@@ -899,7 +891,7 @@ function FgCountContent() {
 
         {/* Footer summary */}
         {saved > 0 && (
-          <div className="flex items-center gap-2 border-t border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm font-medium text-emerald-300">
+          <div className="flex items-center gap-2 border-t border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-700">
             <CheckCircle2 className="h-4 w-4" />
             {saved} item{saved !== 1 ? "s" : ""} saved this session. Stock updated and variances logged.
           </div>

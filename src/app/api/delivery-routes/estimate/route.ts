@@ -11,6 +11,8 @@ export async function POST(req: NextRequest) {
     const { runId, optimize, returnToStart } = body;
 
     console.log("[Route Estimate Body]", body);
+    console.log("[Route Estimate Body runId]", body?.runId, typeof body?.runId);
+    console.log("[Route Estimate Supabase URL]", process.env.NEXT_PUBLIC_SUPABASE_URL);
 
     if (!runId) {
       return NextResponse.json({ error: "runId is required" }, { status: 400 });
@@ -28,46 +30,47 @@ export async function POST(req: NextRequest) {
 
     // 2. Load delivery run directly. Avoid embedded relationship .single()
     // coercion; route estimation needs only the run snapshot fields here.
+    const requestedRunId = String(runId || "").trim();
     let runRow = null;
-    let runError = null;
-    let lookupMode = "id";
 
-    const isUuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(runId);
-    if (isUuid) {
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestedRunId)) {
       const { data, error } = await supabase
         .from("delivery_runs")
         .select("*")
-        .eq("id", runId)
+        .eq("id", requestedRunId)
         .maybeSingle();
-      runRow = data;
-      runError = error;
-    }
 
-    if (runError) {
-      console.error("[Route Estimate Supabase Error UUID lookup]", runError);
+      if (error) console.error("[Run lookup by id error]", error);
+      runRow = data;
     }
 
     if (!runRow) {
-      lookupMode = "run_number";
       const { data, error } = await supabase
         .from("delivery_runs")
         .select("*")
-        .eq("run_number", runId)
+        .eq("run_number", requestedRunId)
         .maybeSingle();
+
+      if (error) console.error("[Run lookup by run_number error]", error);
       runRow = data;
-      if (error) {
-        console.error("[Route Estimate Supabase Error run_number lookup]", error);
-        runError = error;
-      }
     }
 
     if (!runRow) {
-      const errRes: any = { success: false, message: "Delivery run not found." };
-      if (process.env.NODE_ENV === "development") {
-        errRes.requestedRunId = runId;
-        errRes.lookupMode = lookupMode;
-      }
-      return NextResponse.json(errRes, { status: 404 });
+      const { data: recentRuns } = await supabase
+        .from("delivery_runs")
+        .select("id, run_number, run_date, status")
+        .order("created_at", { ascending: false })
+        .limit(5);
+
+      return NextResponse.json({
+        success: false,
+        message: "Delivery run not found.",
+        debug: {
+          requestedRunId,
+          supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL,
+          recentRuns
+        }
+      }, { status: 404 });
     }
 
     const run = {
