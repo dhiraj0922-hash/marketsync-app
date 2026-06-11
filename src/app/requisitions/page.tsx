@@ -1365,6 +1365,69 @@ function HQAdminView({
   // Reset draft when the selected requisition changes (drawer opens/closes)
   useEffect(() => { setFulfillDraftMap(new Map()); }, [selectedReq?.id]);
 
+  const getSafeFulfillQty = useCallback((li: any) => {
+    const requested = Number(li.quantityRequested ?? 0);
+    const hqStock = li.hqAvailableStock;
+    if (requested <= 0) return 0;
+    if (hqStock != null) return Math.max(0, Math.min(requested, Number(hqStock) || 0));
+    return requested;
+  }, []);
+
+  const setAllFulfillQuantitiesToRequested = useCallback(() => {
+    setFulfillDraftMap(() => {
+      const next = new Map<string, number>();
+      hqReqItems.forEach((li: any) => {
+        next.set(li.id, getSafeFulfillQty(li));
+      });
+      return next;
+    });
+  }, [getSafeFulfillQty, hqReqItems]);
+
+  const setLineFulfillQuantity = useCallback((lineId: string, qty: number) => {
+    setFulfillDraftMap(prev => new Map(prev).set(lineId, qty));
+  }, []);
+
+  const persistFulfillmentDrafts = useCallback(async () => {
+    const changed: Array<{ item: any; newVal: number; current: number }> = [];
+
+    for (const li of hqReqItems) {
+      const requested = Number(li.quantityRequested ?? 0);
+      const hqStock = li.hqAvailableStock;
+      const maxFulfill = Math.min(requested, hqStock ?? requested);
+      const current = Number(li.quantityFulfilled ?? 0);
+      const draft = fulfillDraftMap.get(li.id);
+      const newVal = Math.max(0, Math.min(maxFulfill, Number(draft ?? current) || 0));
+
+      if (newVal !== current) {
+        changed.push({ item: li, newVal, current });
+      }
+    }
+
+    for (const change of changed) {
+      const res = await updateRequisitionItemFulfilled(change.item.id, change.newVal, change.item.requisitionId);
+      if (!res.success) {
+        throw new Error(res.error?.message ?? `Failed to save ${change.item.itemName ?? "line item"}`);
+      }
+      setHqReqItems(prev => prev.map(li =>
+        li.id === change.item.id ? { ...li, quantityFulfilled: change.newVal } : li
+      ));
+      if (res.newStatus) {
+        setSelectedReq((prev: any) => prev ? { ...prev, status: res.newStatus } : prev);
+        setRequisitions((prev: any[]) => prev.map(r =>
+          r.id === change.item.requisitionId ? { ...r, status: res.newStatus } : r
+        ));
+      }
+    }
+
+    if (changed.length > 0 && selectedReq?.id) {
+      setReqItemsCache(prev => {
+        const next = new Map(prev);
+        next.delete(selectedReq.id);
+        return next;
+      });
+    }
+  }, [fulfillDraftMap, hqReqItems, selectedReq?.id]);
+
   // Initialise missing entries from loaded line items
   useEffect(() => {
     if (!hqReqItems.length) return;
@@ -1372,19 +1435,13 @@ function HQAdminView({
       const next = new Map(prev);
       hqReqItems.forEach((li: any) => {
         if (next.has(li.id)) return; // preserve in-session edits
-        const current   = Number(li.quantityFulfilled ?? 0);
-        const requested = Number(li.quantityRequested  ?? 0);
-        const hqStock   = li.hqAvailableStock;          // null for raw-item lines
-        // If already partially fulfilled keep current value; otherwise default
-        // to min(requested, hqStock) so HQ doesn't accidentally over-commit.
-        const defaultVal = current > 0
-          ? current
-          : hqStock != null ? Math.min(requested, hqStock) : requested;
+        const current = Number(li.quantityFulfilled ?? 0);
+        const defaultVal = current > 0 ? current : getSafeFulfillQty(li);
         next.set(li.id, defaultVal);
       });
       return next;
     });
-  }, [hqReqItems]);
+  }, [getSafeFulfillQty, hqReqItems]);
 
   // ── Fulfillment lock ──────────────────────────────────────────────────────────
   // Pure UI lock set by "Complete Fulfillment". Disables per-line inputs and
@@ -2096,23 +2153,19 @@ function HQAdminView({
                     {FULFILLABLE_STATUSES.has((selectedReq?.status ?? "").toLowerCase()) && !isFulfillmentLocked && (
                       <button
                         onClick={async () => {
-                          // ── 1. Validate: no unsaved draft changes ────────────────
-                          const unsaved = hqReqItems.some((li: any) => {
-                            const draft  = fulfillDraftMap.get(li.id);
-                            const stored = Number(li.quantityFulfilled ?? 0);
-                            return draft !== undefined && draft !== stored;
-                          });
-                          if (unsaved) {
-                            alert("You have unsaved changes. Click off the input fields to save each line before completing.");
+                          try {
+                            await persistFulfillmentDrafts();
+                          } catch (error: any) {
+                            alert(`Failed to save fulfillment quantities: ${error?.message ?? "Unknown error"}`);
                             return;
                           }
 
-                          // ── 2. Always write "fulfilled" to DB ─────────────────────
+                          // ── 1. Always write "fulfilled" to DB ─────────────────────
                           // DB CHECK constraint only allows: draft/submitted/approved/rejected/fulfilled.
                           // partial and backordered are computed UI-display statuses only.
                           const finalStatus = "fulfilled";
 
-                          // ── 3. Persist to DB — minimal UPDATE, no location_id ────
+                          // ── 2. Persist to DB — minimal UPDATE, no location_id ────
                           const res = await updateRequisitionStatus(selectedReq.id, finalStatus);
                           if (!res.success) {
                             alert(`Failed to save status: ${res.error?.message}`);
@@ -2127,7 +2180,7 @@ function HQAdminView({
                             console.error("Failed to load backorders after fulfillment completion", boErr);
                           }
 
-                          // ── 4. Compute fulfilled total for local state ─────────────
+                          // ── 3. Compute fulfilled total for local state ─────────────
                           // Used to update the main table value column immediately without
                           // waiting for a page reload or cache re-fetch.
                           const fulfilledTotal = hqReqItems.reduce((sum: number, li: any) => {
@@ -2135,7 +2188,7 @@ function HQAdminView({
                             return sum + qty * Number(li.unitPrice ?? 0);
                           }, 0);
 
-                          // ── 5. Sync local state ───────────────────────────────────────
+                          // ── 4. Sync local state ───────────────────────────────────────
                           // Update both status AND totalAmount so the main table "Value"
                           // column shows the supplied amount ($260.31) not the requested
                           // total ($380.88) even for rows whose cache was previously busted.
@@ -2153,7 +2206,7 @@ function HQAdminView({
                           // can compute the visual badge and amount without another DB round-trip.
                           setReqItemsCache(prev => new Map(prev).set(selectedReq.id, hqReqItems));
 
-                          // ── 6. Lock UI ────────────────────────────────────────────────
+                          // ── 5. Lock UI ────────────────────────────────────────────────
                           setIsFulfillmentLocked(true);
                         }}
                         className="px-4 py-2 text-sm font-semibold bg-success-600 text-white rounded-lg hover:bg-success-700 transition-colors shadow-sm flex items-center gap-2"
@@ -2186,6 +2239,21 @@ function HQAdminView({
                 <span className="shrink-0 font-semibold text-neutral-500 text-xs uppercase tracking-wider pt-0.5">Notes:</span>
                 <span className="text-neutral-700">{selectedReq?.notes || <span className="text-neutral-400 italic">No notes provided.</span>}</span>
               </div>
+              {FULFILLABLE_STATUSES.has((selectedReq?.status ?? "").toLowerCase()) && !isFulfillmentLocked && hqReqItems.length > 0 && (
+                <div className="flex flex-col gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <p className="text-sm font-semibold text-emerald-900">Fulfillment shortcut</p>
+                    <p className="text-xs text-emerald-700">Defaults each line to requested quantity, capped by available HQ stock.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={setAllFulfillQuantitiesToRequested}
+                    className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700"
+                  >
+                    <PackageCheck className="h-4 w-4" /> Fulfill All as Requested
+                  </button>
+                </div>
+              )}
               <div className="bg-white border border-neutral-200 rounded-lg overflow-hidden overflow-x-auto">
                 <Table>
                   <TableHeader className="bg-neutral-50/50 text-[11px] uppercase text-neutral-500 tracking-wider">
@@ -2197,12 +2265,13 @@ function HQAdminView({
                       <TableHead className="py-1.5 text-right">Backorder</TableHead>
                       <TableHead className="py-1.5 text-right">Unit Price</TableHead>
                       <TableHead className="py-1.5 text-right">Fulfilled $</TableHead>
+                      <TableHead className="py-1.5 text-right">Action</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {hqItemsLoading ? (
                       <TableRow>
-                        <TableCell colSpan={7} className="text-center py-6 text-neutral-400 text-sm">
+                        <TableCell colSpan={8} className="text-center py-6 text-neutral-400 text-sm">
                           <div className="flex items-center justify-center gap-2">
                             <Loader2 className="h-4 w-4 animate-spin" /> Loading items…
                           </div>
@@ -2210,7 +2279,7 @@ function HQAdminView({
                       </TableRow>
                     ) : hqReqItems.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={7} className="text-center py-6 text-neutral-400 text-sm">
+                        <TableCell colSpan={8} className="text-center py-6 text-neutral-400 text-sm">
                           No items found for this requisition.
                         </TableCell>
                       </TableRow>
@@ -2225,7 +2294,7 @@ function HQAdminView({
                       return Object.entries(groups).map(([commissary, groupItems]) => (
                         <React.Fragment key={commissary}>
                           <TableRow className="bg-neutral-50">
-                            <TableCell colSpan={7} className="py-1 px-3">
+                            <TableCell colSpan={8} className="py-1 px-3">
                               <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold border ${COMMISSARY_COLORS[commissary] ?? "bg-neutral-50 text-neutral-600 border-neutral-200"}`}>
                                 {commissary}
                               </span>
@@ -2239,13 +2308,29 @@ function HQAdminView({
                             const backorder  = Math.max(0, requested - draftQty);
                             const unitPrice  = Number(item.unitPrice ?? 0);
                             const lineTotal  = draftQty * unitPrice;
-                            const lineStatus = draftQty >= requested ? "fulfilled" : draftQty > 0 ? "partial" : "backordered";
+                            const lineStatus = hqStock != null && hqStock <= 0
+                              ? "out_of_stock"
+                              : draftQty >= requested
+                              ? "fulfilled"
+                              : draftQty > 0
+                              ? "partial"
+                              : "backordered";
                             return (
                               <TableRow key={item.id} className="hover:bg-neutral-50/50">
                                 {/* Item + line status */}
                                 <TableCell className="py-2 px-3">
                                   <div className="font-medium text-sm text-neutral-900">{item.itemName}</div>
-                                  <div className="mt-0.5"><StatusBadge status={lineStatus} /></div>
+                                  <div className="mt-0.5">
+                                    {lineStatus === "out_of_stock" ? (
+                                      <span className="inline-flex rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-xs font-semibold text-red-700">Out of Stock</span>
+                                    ) : lineStatus === "partial" ? (
+                                      <span className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-700">Partial</span>
+                                    ) : lineStatus === "backordered" ? (
+                                      <span className="inline-flex rounded-full border border-rose-200 bg-rose-50 px-2 py-0.5 text-xs font-semibold text-rose-700">Backorder</span>
+                                    ) : (
+                                      <span className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">Fulfilled</span>
+                                    )}
+                                  </div>
                                 </TableCell>
                                 {/* Requested qty */}
                                 <TableCell className="py-2 text-right">
@@ -2274,7 +2359,7 @@ function HQAdminView({
                                     value={draftQty}
                                     onChange={(e) => {
                                       const clamped = Math.max(0, Math.min(maxFulfill, Number(e.target.value)));
-                                      setFulfillDraftMap(prev => new Map(prev).set(item.id, clamped));
+                                      setLineFulfillQuantity(item.id, clamped);
                                     }}
                                     onBlur={async () => {
                                       const newVal  = fulfillDraftMap.get(item.id) ?? Number(item.quantityFulfilled ?? 0);
@@ -2283,7 +2368,7 @@ function HQAdminView({
                                       // UI guard: never exceed HQ stock
                                       if (hqStock != null && newVal > hqStock) {
                                         alert(`Cannot fulfill ${newVal} — only ${hqStock} in HQ stock.`);
-                                        setFulfillDraftMap(prev => new Map(prev).set(item.id, current));
+                                        setLineFulfillQuantity(item.id, current);
                                         return;
                                       }
                                       // Optimistic update
@@ -2294,7 +2379,7 @@ function HQAdminView({
                                       if (!res.success) {
                                         alert(`Failed to save: ${res.error?.message}`);
                                         // Rollback
-                                        setFulfillDraftMap(prev => new Map(prev).set(item.id, current));
+                                        setLineFulfillQuantity(item.id, current);
                                         setHqReqItems(prev => prev.map(li =>
                                           li.id === item.id ? { ...li, quantityFulfilled: current } : li
                                         ));
@@ -2331,6 +2416,19 @@ function HQAdminView({
                                 {/* Fulfilled line total */}
                                 <TableCell className="py-2 text-right">
                                   <span className="text-sm font-semibold text-success-700">${lineTotal.toFixed(2)}</span>
+                                </TableCell>
+                                <TableCell className="py-2 text-right">
+                                  {isEditable ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => setLineFulfillQuantity(item.id, 0)}
+                                      className="rounded-md border border-rose-200 bg-white px-2 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
+                                    >
+                                      Mark Backorder
+                                    </button>
+                                  ) : (
+                                    <span className="text-xs text-neutral-300">—</span>
+                                  )}
                                 </TableCell>
                               </TableRow>
                             );
