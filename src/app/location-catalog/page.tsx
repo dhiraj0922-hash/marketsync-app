@@ -76,7 +76,7 @@ function LocationCatalogContent() {
     setLoading(true);
     try {
       const [cat, si, supps, locs] = await Promise.all([
-        loadOutletCatalog(true),
+        loadOutletCatalog(true, user),
         loadSaleItems(),
         loadSuppliers(),
         loadLocations(),
@@ -86,7 +86,7 @@ function LocationCatalogContent() {
       setSuppliers(Array.isArray(supps) ? supps : []);
       setLocations(Array.isArray(locs) ? locs : []);
     } finally { setLoading(false); }
-  }, []);
+  }, [user]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => { if (toast) { const t = setTimeout(() => setToast(null), 4000); return () => clearTimeout(t); } }, [toast]);

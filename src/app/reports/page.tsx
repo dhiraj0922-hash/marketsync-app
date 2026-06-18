@@ -190,7 +190,7 @@ function ReportsContent({ user }: { user: any }) {
     } else if (tab === "stock_health") {
       try {
         const [cat, outlet] = await Promise.all([
-          loadOutletCatalog(),
+          loadOutletCatalog(false, user),
           loadOutletInventoryV2(locationId || user.locationId)
         ]);
         setStockCatalog(Array.isArray(cat) ? cat : []);
@@ -210,7 +210,7 @@ function ReportsContent({ user }: { user: any }) {
       if (e) setError(e); else setProfitReport(data);
     }
     setLoading(false);
-  }, [tab, locationId, dateFrom, dateTo, movBucket, user.locationId]);
+  }, [tab, locationId, dateFrom, dateTo, movBucket, user.locationId, user]);
 
   // Auto-run on tab switch when no data yet
   useEffect(() => { runReport(); }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps

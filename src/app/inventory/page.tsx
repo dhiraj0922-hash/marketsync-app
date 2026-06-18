@@ -523,6 +523,7 @@ export default function Inventory() {
   const [copyInventoryLoading, setCopyInventoryLoading] = useState(false);
   const [copyInventoryResult, setCopyInventoryResult] = useState<CopyInventoryItemsToLocationsResult | null>(null);
   const [isDuplicateAuditOpen, setIsDuplicateAuditOpen] = useState(false);
+  const [isDuplicateAuditLoading, setIsDuplicateAuditLoading] = useState(false);
   const [duplicateAuditSearch, setDuplicateAuditSearch] = useState("");
   const [duplicateAuditFilter, setDuplicateAuditFilter] = useState("all");
   const [expandedDuplicateAuditGroups, setExpandedDuplicateAuditGroups] = useState<Record<string, boolean>>({});
@@ -534,10 +535,38 @@ export default function Inventory() {
   const [movementAuditRows, setMovementAuditRows] = useState<any[]>([]);
 
   useEffect(() => {
+    if (isDuplicateAuditOpen && recipesData.length === 0) {
+      async function loadAuditData() {
+        setIsDuplicateAuditLoading(true);
+        try {
+          const [recipes, orders, prodMovements, movementRowsResult] = await Promise.all([
+            loadRecipes(),
+            loadOrders(),
+            loadProductionMovements(),
+            supabase
+              .from('inventory_movements')
+              .select('item_id, movement_type, reference_type, reference_id')
+              .range(0, 49999),
+          ]);
+          setRecipesData(Array.isArray(recipes) ? recipes : []);
+          setOrdersData(Array.isArray(orders) ? orders : []);
+          setProductionMovementsData(Array.isArray(prodMovements) ? prodMovements : []);
+          setMovementAuditRows(Array.isArray((movementRowsResult as any)?.data) ? (movementRowsResult as any).data : []);
+        } catch (e) {
+          console.error("Failed to load duplicate audit data", e);
+        } finally {
+          setIsDuplicateAuditLoading(false);
+        }
+      }
+      loadAuditData();
+    }
+  }, [isDuplicateAuditOpen, recipesData.length]);
+
+  useEffect(() => {
     async function fetchData() {
       setIsLoading(true);
       try {
-        const [inv, act, cats, batches, sups, allPurchOpts, locs, recipes, orders, prodMovements, movementRowsResult] = await Promise.all([
+        const [inv, act, cats, batches, sups, allPurchOpts, locs] = await Promise.all([
           loadInventory(),
           loadInventoryActivity(),
           loadCategories('inventory'),
@@ -545,20 +574,9 @@ export default function Inventory() {
           loadSuppliers(),
           loadPurchaseOptions(),   // bulk-load all rows up-front for startup merge
           loadLocations(),         // needed for allocation location picker
-          loadRecipes(),
-          loadOrders(),
-          loadProductionMovements(),
-          supabase
-            .from('inventory_movements')
-            .select('item_id, movement_type, reference_type, reference_id')
-            .range(0, 49999),
         ]);
         setAllLocations(locs);
         setPurchaseOptionsData(Array.isArray(allPurchOpts) ? allPurchOpts : []);
-        setRecipesData(Array.isArray(recipes) ? recipes : []);
-        setOrdersData(Array.isArray(orders) ? orders : []);
-        setProductionMovementsData(Array.isArray(prodMovements) ? prodMovements : []);
-        setMovementAuditRows(Array.isArray((movementRowsResult as any)?.data) ? (movementRowsResult as any).data : []);
         // Scope to current user's location
         const userLocationId: string = resolveLocationId(user);
 
@@ -5301,7 +5319,13 @@ export default function Inventory() {
           </button>
         }
       >
-        <div className="space-y-5">
+        {isDuplicateAuditLoading ? (
+          <div className="flex flex-col items-center justify-center py-12 space-y-3">
+            <Loader2 className="h-8 w-8 animate-spin text-amber-500" />
+            <p className="text-sm text-neutral-500">Loading duplicate audit datasets (recipes, movements, orders)...</p>
+          </div>
+        ) : (
+          <div className="space-y-5">
           <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
             <div className="flex gap-3">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
@@ -5526,7 +5550,8 @@ export default function Inventory() {
               ))}
             </div>
           )}
-        </div>
+          </div>
+        )}
       </Drawer>
 
       {/* Import History Drawer */}

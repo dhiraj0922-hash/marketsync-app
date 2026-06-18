@@ -211,8 +211,8 @@ function LocationManagerView({
     setIsLoading(true);
     try {
       const [rows, localCat, bo] = await Promise.all([
-        loadRequisitions(),
-        loadOutletCatalog(false), // active items only
+        loadRequisitions(profile.locationId),
+        loadOutletCatalog(false, profile), // active items only
         loadBackorders(profile.locationId || undefined),
       ]);
       setRequisitions(Array.isArray(rows) ? rows : []);
@@ -2856,17 +2856,27 @@ export default function Requisitions() {
   useEffect(() => {
     async function boot() {
       clearProfileCache();
-      const [prof, inv, fg, si] = await Promise.all([
-        getCurrentUserProfile(),
-        loadInventory(),
-        loadFinishedGoods(),
-        loadSaleItems(),
-      ]);
-      setProfile(prof);
-      setInventoryItems(Array.isArray(inv) ? inv : []);
-      setFinishedGoods(Array.isArray(fg) ? fg : []);
-      setSaleItems(Array.isArray(si) ? si : []);
-      setIsBootstrapping(false);
+      try {
+        const prof = await getCurrentUserProfile();
+        setProfile(prof);
+        if (prof) {
+          const isHqRequisitionRole = ["hq_master", "hq_admin", "hq_ops"].includes(prof.role);
+          if (isHqRequisitionRole) {
+            // HQAdminView will load finishedGoods and requisitions internally on mount
+          } else if (prof.role === "location_manager") {
+            const [inv, si] = await Promise.all([
+              loadInventory(prof.locationId),
+              loadSaleItems(),
+            ]);
+            setInventoryItems(Array.isArray(inv) ? inv : []);
+            setSaleItems(Array.isArray(si) ? si : []);
+          }
+        }
+      } catch (e) {
+        console.error("Bootstrapping requisitions failed:", e);
+      } finally {
+        setIsBootstrapping(false);
+      }
     }
     boot();
   }, []);

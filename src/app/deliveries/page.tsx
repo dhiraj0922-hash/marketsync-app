@@ -158,6 +158,9 @@ export default function DeliveriesPage() {
   const [locationFilter, setLocationFilter] = useState("all");
   const [ticketSearch, setTicketSearch] = useState("");
   const [ticketDateFilter, setTicketDateFilter] = useState("");
+  const [runDateFilter, setRunDateFilter] = useState("");
+  const [showAllRuns, setShowAllRuns] = useState(false);
+  const [showAllTickets, setShowAllTickets] = useState(false);
   const [newRun, setNewRun] = useState({
     runDate: new Date().toISOString().slice(0, 10),
     driverId: "",
@@ -227,11 +230,25 @@ export default function DeliveriesPage() {
       const [ticketRows, runRows, vehicleRows, locationRows, vehicleLogRows] = await Promise.all([
         driverUser
           ? Promise.resolve([])
-          : getDeliveryTickets({ locationId: scopedLocation ?? undefined }),
+          : getDeliveryTickets({
+              locationId: scopedLocation ?? undefined,
+              status: ticketFilter !== 'all' ? ticketFilter : undefined,
+              fromDate: ticketDateFilter || undefined,
+              toDate: ticketDateFilter || undefined,
+              showAll: showAllTickets,
+            }),
         hqAdmin
-          ? getDeliveryRuns()
+          ? getDeliveryRuns({
+              runDate: runDateFilter || undefined,
+              showAll: showAllRuns,
+            })
           : driverUser && currentDriverRow?.id
-            ? getDeliveryRuns({ driverId: currentDriverRow.id, driverEmail: user?.email ?? "" })
+            ? getDeliveryRuns({
+                driverId: currentDriverRow.id,
+                driverEmail: user?.email ?? "",
+                runDate: runDateFilter || undefined,
+                showAll: showAllRuns,
+              })
             : Promise.resolve([]),
         hqAdmin ? getVehicles() : Promise.resolve([]),
         loadLocations(),
@@ -264,7 +281,7 @@ export default function DeliveriesPage() {
 
   useEffect(() => {
     refresh();
-  }, [hqAdmin, userLocationId]);
+  }, [hqAdmin, userLocationId, ticketFilter, ticketDateFilter, runDateFilter, showAllTickets, showAllRuns]);
 
   useEffect(() => {
     setTicketItemDrafts(selectedTicket?.items ? selectedTicket.items.map((item: any) => ({ ...item })) : []);
@@ -752,6 +769,15 @@ export default function DeliveriesPage() {
                     onChange={(event) => setTicketDateFilter(event.target.value)}
                     className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:border-emerald-300"
                   />
+                  <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={showAllTickets}
+                      onChange={(e) => setShowAllTickets(e.target.checked)}
+                      className="rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                    />
+                    Load older history
+                  </label>
                 </div>
               </div>
             </CardHeader>
@@ -884,6 +910,27 @@ export default function DeliveriesPage() {
             </Card>}
 
             <div className="space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3 bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
+                <p className="text-sm font-semibold text-slate-950">Delivery Runs</p>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="date"
+                    value={runDateFilter}
+                    onChange={(e) => setRunDateFilter(e.target.value)}
+                    className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
+                  />
+                  <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={showAllRuns}
+                      onChange={(e) => setShowAllRuns(e.target.checked)}
+                      className="rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                    />
+                    Load older history
+                  </label>
+                </div>
+              </div>
+
               {runs.length === 0 ? (
                 driverUser ? (
                   <div className="rounded-xl border border-dashed border-slate-200 bg-white p-10 text-center shadow-sm">

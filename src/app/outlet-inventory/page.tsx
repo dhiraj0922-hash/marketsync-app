@@ -159,11 +159,11 @@ export default function OutletInventoryPage() {
     if (!locId) return;
     setLoading(true);
     try {
-      const [cat, outlet] = await Promise.all([loadOutletCatalog(), loadOutletInventoryV2(locId)]);
+      const [cat, outlet] = await Promise.all([loadOutletCatalog(false, user), loadOutletInventoryV2(locId)]);
       setCatalog(Array.isArray(cat) ? cat : []);
       setOutletData(Array.isArray(outlet) ? outlet : []);
     } finally { setLoading(false); }
-  }, []);
+  }, [user]);
 
   useEffect(() => {
     (async () => {

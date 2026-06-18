@@ -4381,7 +4381,13 @@ function mapDeliveryRunPatchToDB(patch: any) {
   return out;
 }
 
-export async function getDeliveryTickets(filters: { status?: string; locationId?: string; fromDate?: string; toDate?: string } = {}) {
+export async function getDeliveryTickets(filters: {
+  status?: string;
+  locationId?: string;
+  fromDate?: string;
+  toDate?: string;
+  showAll?: boolean;
+} = {}) {
   let query = supabase
     .from('delivery_tickets')
     .select('*, delivery_runs(*, drivers(*), vehicles(*)), delivery_ticket_items(*)')
@@ -4390,6 +4396,14 @@ export async function getDeliveryTickets(filters: { status?: string; locationId?
   if (filters.locationId && filters.locationId !== 'all') query = query.eq('location_id', filters.locationId);
   if (filters.fromDate) query = query.gte('created_at', `${filters.fromDate}T00:00:00`);
   if (filters.toDate) query = query.lte('created_at', `${filters.toDate}T23:59:59`);
+
+  // If not requesting all history, and no specific date/status filter is applied, limit the query.
+  if (!filters.showAll && !filters.fromDate && !filters.toDate && (!filters.status || filters.status === 'all')) {
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    query = query.or(`status.not.in.(delivered,cancelled),created_at.gte.${thirtyDaysAgo.toISOString()}`);
+  }
+
   const { data, error } = await query;
   if (error) {
     console.error('getDeliveryTickets:', error);
@@ -4695,7 +4709,13 @@ async function enrichDriverSnapshot(payload: any) {
   return out;
 }
 
-export async function getDeliveryRuns(filters: { status?: string; runDate?: string; driverId?: string; driverEmail?: string } = {}) {
+export async function getDeliveryRuns(filters: {
+  status?: string;
+  runDate?: string;
+  driverId?: string;
+  driverEmail?: string;
+  showAll?: boolean;
+} = {}) {
   let query = supabase
     .from('delivery_runs')
     .select('*, drivers(*), vehicles(*), delivery_tickets(*, delivery_ticket_items(*))')
@@ -4711,6 +4731,14 @@ export async function getDeliveryRuns(filters: { status?: string; runDate?: stri
     } else {
       query = query.eq('driver_id', filters.driverId);
     }
+  }
+
+  // If not requesting all history, and no specific runDate / status is queried, limit the query.
+  if (!filters.showAll && !filters.runDate && (!filters.status || filters.status === 'all')) {
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    const thirtyDaysAgoIso = thirtyDaysAgo.toISOString().split('T')[0];
+    query = query.or(`status.not.in.(completed,cancelled),run_date.gte.${thirtyDaysAgoIso}`);
   }
 
   const { data, error } = await query;
@@ -6468,7 +6496,10 @@ function mapCatalogItem(db: any): OutletCatalogItem {
 }
 
 /** Load outlet catalog items (global — same for every location) */
-export async function loadOutletCatalog(all: boolean = false): Promise<OutletCatalogItem[]> {
+export async function loadOutletCatalog(
+  all: boolean = false,
+  userProfile?: { role: string | null; location_id?: string | null; locationId?: string | null } | null
+): Promise<OutletCatalogItem[]> {
   let query = supabase
     .from('outlet_catalog_items')
     .select('*');
@@ -6486,46 +6517,54 @@ export async function loadOutletCatalog(all: boolean = false): Promise<OutletCat
   if (!Array.isArray(data)) return [];
 
   try {
-    const { data: authData } = await supabase.auth.getUser();
-    const user = authData?.user;
-    if (user) {
-      const { data: profile } = await supabase
-        .from('user_profiles')
-        .select('role, location_id')
-        .eq('user_id', user.id)
-        .single();
-      
-      if (profile) {
-        const role = (profile.role ?? '').toLowerCase().trim();
-        const isHq = role === 'hq_admin' || role === 'hq admin' || role === 'admin';
-        const isLocMgr = role === 'location_manager' || role === 'location manager';
-        const locationId = profile.location_id;
+    let profile = userProfile;
+    if (!profile) {
+      const { data: authData } = await supabase.auth.getUser();
+      const user = authData?.user;
+      if (user) {
+        const { data: dbProfile } = await supabase
+          .from('user_profiles')
+          .select('role, location_id')
+          .eq('user_id', user.id)
+          .single();
+        profile = dbProfile;
+      }
+    }
+    
+    if (profile) {
+      const role = (profile.role ?? '').toLowerCase().trim();
+      const isHq = role === 'hq_admin' || role === 'hq admin' || role === 'admin';
+      const isLocMgr = role === 'location_manager' || role === 'location manager';
+      const locationId = profile.location_id ?? profile.locationId;
 
-        if (!isHq && isLocMgr && locationId) {
-          // Fetch finished goods visibility modes
-          const { data: fgs } = await supabase
+      if (!isHq && isLocMgr && locationId) {
+        // Fetch finished goods visibility modes in parallel
+        const [fgsResult, availRowsResult] = await Promise.all([
+          supabase
             .from('hq_sale_items')
-            .select('id, location_availability_mode');
-          
-          const { data: availRows } = await supabase
+            .select('id, location_availability_mode'),
+          supabase
             .from('finished_good_location_availability')
             .select('finished_good_id, is_available')
             .eq('location_id', locationId)
-            .eq('is_available', true);
-          
-          const allowedFgIds = new Set(availRows?.map(r => r.finished_good_id) || []);
-          const fgModes = new Map(fgs?.map(f => [f.id, f.location_availability_mode ?? 'all']) || []);
+            .eq('is_available', true)
+        ]);
+        
+        const fgs = fgsResult.data;
+        const availRows = availRowsResult.data;
+        
+        const allowedFgIds = new Set(availRows?.map(r => r.finished_good_id) || []);
+        const fgModes = new Map(fgs?.map(f => [f.id, f.location_availability_mode ?? 'all']) || []);
 
-          const mapped = data.map(mapCatalogItem);
-          const filtered = mapped.filter(c => {
-            if (!c.hqSaleItemId) return true; // not a finished good
-            const mode = fgModes.get(c.hqSaleItemId) ?? 'all';
-            if (mode === 'all') return true;
-            if (mode === 'selected') return allowedFgIds.has(c.hqSaleItemId);
-            return false; // hq_only
-          });
-          return filtered;
-        }
+        const mapped = data.map(mapCatalogItem);
+        const filtered = mapped.filter(c => {
+          if (!c.hqSaleItemId) return true; // not a finished good
+          const mode = fgModes.get(c.hqSaleItemId) ?? 'all';
+          if (mode === 'all') return true;
+          if (mode === 'selected') return allowedFgIds.has(c.hqSaleItemId);
+          return false; // hq_only
+        });
+        return filtered;
       }
     }
   } catch (err) {
