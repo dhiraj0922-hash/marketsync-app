@@ -2497,7 +2497,10 @@ export async function updateRequisitionStatus(
 // ----------------------------------------------------------------------------
 
 export async function loadBackorders(locationId?: string): Promise<any[]> {
-  let query = supabase.from('requisition_backorders').select('*').order('created_at', { ascending: false });
+  let query = supabase
+    .from('requisition_backorders')
+    .select('*, original_requisition_item:requisition_items(pack_qty_snapshot, finished_good_id)')
+    .order('created_at', { ascending: false });
   if (locationId) {
     query = query.eq('location_id', locationId);
   }
@@ -2506,42 +2509,53 @@ export async function loadBackorders(locationId?: string): Promise<any[]> {
     console.error('[Backorders] load error', error);
     return [];
   }
-  return (data || []).map(row => ({
-    id: row.id,
-    locationId: row.location_id,
-    location_id: row.location_id,
-    originalRequisitionId: row.original_requisition_id,
-    original_requisition_id: row.original_requisition_id,
-    originalRequisitionItemId: row.original_requisition_item_id,
-    original_requisition_item_id: row.original_requisition_item_id,
-    itemId: row.item_id,
-    item_id: row.item_id,
-    itemName: row.item_name,
-    item_name: row.item_name,
-    requestedQty: Number(row.requested_qty ?? 0),
-    requested_qty: Number(row.requested_qty ?? 0),
-    fulfilledQty: Number(row.fulfilled_qty ?? 0),
-    fulfilled_qty: Number(row.fulfilled_qty ?? 0),
-    backorderQty: Number(row.backorder_qty ?? 0),
-    backorder_qty: Number(row.backorder_qty ?? 0),
-    remainingQty: Number(row.remaining_qty ?? 0),
-    remaining_qty: Number(row.remaining_qty ?? 0),
-    unit: row.unit,
-    unitPrice: Number(row.unit_price ?? 0),
-    unit_price: Number(row.unit_price ?? 0),
-    sourceType: row.source_type,
-    source_type: row.source_type,
-    supplierName: row.supplier_name,
-    supplier_name: row.supplier_name,
-    status: row.status,
-    createdAt: row.created_at,
-    created_at: row.created_at,
-    updatedAt: row.updated_at,
-    updated_at: row.updated_at,
-    fulfilledAt: row.fulfilled_at,
-    fulfilled_at: row.fulfilled_at,
-    notes: row.notes,
-  }));
+  return (data || []).map(row => {
+    const isFG = row.source_type === 'finished_good' || !!row.original_requisition_item?.finished_good_id;
+    const packQty = row.original_requisition_item?.pack_qty_snapshot != null ? Number(row.original_requisition_item.pack_qty_snapshot) : 1;
+    return {
+      id: row.id,
+      locationId: row.location_id,
+      location_id: row.location_id,
+      originalRequisitionId: row.original_requisition_id,
+      original_requisition_id: row.original_requisition_id,
+      originalRequisitionItemId: row.original_requisition_item_id,
+      original_requisition_item_id: row.original_requisition_item_id,
+      itemId: row.item_id,
+      item_id: row.item_id,
+      itemName: row.item_name,
+      item_name: row.item_name,
+      requestedQty: Number(row.requested_qty ?? 0),
+      requested_qty: Number(row.requested_qty ?? 0),
+      fulfilledQty: Number(row.fulfilled_qty ?? 0),
+      fulfilled_qty: Number(row.fulfilled_qty ?? 0),
+      backorderQty: Number(row.backorder_qty ?? 0),
+      backorder_qty: Number(row.backorder_qty ?? 0),
+      remainingQty: Number(row.remaining_qty ?? 0),
+      remaining_qty: Number(row.remaining_qty ?? 0),
+      unit: row.unit,
+      unitPrice: Number(row.unit_price ?? 0),
+      unit_price: Number(row.unit_price ?? 0),
+      sourceType: row.source_type,
+      source_type: row.source_type,
+      supplierName: row.supplier_name,
+      supplier_name: row.supplier_name,
+      status: row.status,
+      createdAt: row.created_at,
+      created_at: row.created_at,
+      updatedAt: row.updated_at,
+      updated_at: row.updated_at,
+      fulfilledAt: row.fulfilled_at,
+      fulfilled_at: row.fulfilled_at,
+      notes: row.notes,
+      // Helper fields
+      isFGMode: isFG,
+      packQty,
+      packCount: Number(row.requested_qty ?? 0),
+      baseQty: Number(row.requested_qty ?? 0) * packQty,
+      packPrice: Number(row.unit_price ?? 0),
+      lineTotal: Number(row.requested_qty ?? 0) * Number(row.unit_price ?? 0),
+    };
+  });
 }
 
 export async function loadBackorderFulfillments(backorderId: string): Promise<any[]> {
@@ -2685,7 +2699,7 @@ export async function fulfillBackorder(
     // ── 1. FG mode ──
     const { data: fg, error: fgFetchError } = await supabase
       .from('hq_sale_items')
-      .select('instock, name')
+      .select('instock, name, pack_qty')
       .eq('id', itemId)
       .single();
 
@@ -2693,13 +2707,15 @@ export async function fulfillBackorder(
       return { success: false, error: fgFetchError ?? { message: `Finished Good SKU ${itemId} not found at HQ.` } };
     }
 
+    const packQty = fg.pack_qty != null ? Number(fg.pack_qty) : 1;
+    const baseQtyToFulfill = qtyToFulfill * packQty;
     const hqStock = Number(fg.instock ?? 0);
-    if (hqStock < qtyToFulfill) {
-      return { success: false, error: { message: `Insufficient HQ stock. Available: ${hqStock}, needed: ${qtyToFulfill}.` } };
+    if (hqStock < baseQtyToFulfill) {
+      return { success: false, error: { message: `Insufficient HQ stock. Available: ${hqStock} base units, needed: ${baseQtyToFulfill} base units (${qtyToFulfill} packs).` } };
     }
 
     // Deduct stock
-    const stockRes = await updateSaleItemStock(itemId, -qtyToFulfill);
+    const stockRes = await updateSaleItemStock(itemId, -baseQtyToFulfill);
     if (!stockRes.success) {
       return { success: false, error: stockRes.error };
     }
@@ -4128,6 +4144,10 @@ function mapReqItemRow(row: any) {
     ?? (isFGMode ? row.hq_sale_items?.base_unit : null)
     ?? null;
 
+  const packQtySnapshot = row.pack_qty_snapshot != null ? Number(row.pack_qty_snapshot) : (isFGMode ? (row.hq_sale_items?.pack_qty != null ? Number(row.hq_sale_items.pack_qty) : 1) : 1);
+  const packPriceSnapshot = isFGMode && row.unit_price != null ? Number(row.unit_price) : null;
+  const quantityRequested = Number(row.quantity_requested);
+
   return {
     id:                row.id,
     requisitionId:     row.requisition_id,
@@ -4140,7 +4160,7 @@ function mapReqItemRow(row: any) {
     sourceCommissary:  row.source_commissary_snapshot ?? 'Commissary HQ',
     itemName,
     unit,
-    quantityRequested: Number(row.quantity_requested),
+    quantityRequested,
     quantityApproved:  row.quantity_approved  != null ? Number(row.quantity_approved)  : null,
     quantityFulfilled: row.quantity_fulfilled != null ? Number(row.quantity_fulfilled) : null,
     unitPrice:         row.unit_price  != null ? Number(row.unit_price)  : null,
@@ -4155,6 +4175,13 @@ function mapReqItemRow(row: any) {
     fulfillmentNote:   row.fulfillment_note ?? '',
     fulfilledBy:       row.fulfilled_by ?? null,
     fulfilledAt:       row.fulfilled_at ?? null,
+    // Helper fields
+    packPriceSnapshot,
+    packQtySnapshot,
+    packQty:           packQtySnapshot,
+    packCount:         quantityRequested,
+    baseQty:           quantityRequested * packQtySnapshot,
+    packPrice:         row.unit_price != null ? Number(row.unit_price) : 0,
   };
 }
 
@@ -5504,7 +5531,7 @@ export async function updateRequisitionItemFulfilled(
   // Fetch finished_good_id alongside item_id to detect FG mode.
   const { data: currentRow, error: fetchCurrentError } = await supabase
     .from("requisition_items")
-    .select("item_id, finished_good_id, quantity_fulfilled")
+    .select("item_id, finished_good_id, quantity_fulfilled, pack_qty_snapshot")
     .eq("id", itemId)
     .single();
 
@@ -5520,13 +5547,15 @@ export async function updateRequisitionItemFulfilled(
   if (currentRow.finished_good_id) {
     console.log(`[Fulfillment] FG-mode: sale_item=${currentRow.finished_good_id} delta=${delta}`);
 
-    if (delta > 0) {
-      const stockRes = await updateSaleItemStock(currentRow.finished_good_id, -delta);
+    if (delta !== 0) {
+      const packQtySnapshot = currentRow.pack_qty_snapshot != null ? Number(currentRow.pack_qty_snapshot) : 1;
+      const baseQtyDeduct = delta * packQtySnapshot;
+      const stockRes = await updateSaleItemStock(currentRow.finished_good_id, -baseQtyDeduct);
       if (!stockRes.success) {
         console.error('[Fulfillment] ✗ FG stock deduct failed', stockRes.error);
         return { success: false, error: stockRes.error };
       }
-      console.log(`[Fulfillment] FG stock deducted. new instock=${stockRes.newStock}`);
+      console.log(`[Fulfillment] FG stock deducted by ${baseQtyDeduct} base units. new instock=${stockRes.newStock}`);
     }
 
     // Write fulfilled qty and recalculate status (shared Steps 8 & 9)
@@ -7544,7 +7573,9 @@ export async function getFulfillmentSummary(): Promise<any[]> {
         totalRequested: 0,
         totalAllocated: 0,
         totalBackorder: 0,
-        items: []
+        items: [],
+        isFGMode: item.isFGMode,
+        packQty: item.packQty,
       });
     }
     const group = summaryMap.get(key);
@@ -7570,6 +7601,13 @@ export async function getFulfillmentSummary(): Promise<any[]> {
       fulfillmentNote: item.fulfillmentNote || '',
       deliveryTicketId: ticket?.id || null,
       deliveryTicketNumber: ticket?.ticket_number || null,
+      isFGMode: item.isFGMode,
+      packQty: item.packQty,
+      packCount: item.packCount,
+      baseQty: item.baseQty,
+      packPrice: item.packPrice,
+      lineTotal: item.lineTotal,
+      unit: item.unit,
     });
   }
   

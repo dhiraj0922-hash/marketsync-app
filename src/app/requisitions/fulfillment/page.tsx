@@ -411,15 +411,32 @@ export default function FulfillmentPage() {
                     <div>
                       <CardTitle className="text-base text-neutral-950 font-bold">{group.itemName}</CardTitle>
                       <CardDescription className="text-xs mt-0.5">
-                        Unit: {group.unit || "ea"} · Total Required: <span className="font-bold text-neutral-900">{group.totalRequested}</span>
+                        {group.isFGMode ? (
+                          <>
+                            Pack Size: {group.packQty} {group.unit || "ea"} · Total Required: <span className="font-bold text-neutral-900">{group.totalRequested} pack{group.totalRequested !== 1 ? 's' : ''} ({group.totalRequested * group.packQty} {group.unit || "ea"})</span>
+                          </>
+                        ) : (
+                          <>
+                            Unit: {group.unit || "ea"} · Total Required: <span className="font-bold text-neutral-900">{group.totalRequested} {group.unit || "ea"}</span>
+                          </>
+                        )}
                       </CardDescription>
                     </div>
                   </div>
                   
                   <div className="flex items-center gap-3">
                     <div className="hidden sm:flex gap-4 text-xs font-semibold text-neutral-600 bg-white border border-neutral-200 rounded-lg px-3 py-1.5 shadow-sm">
-                      <div>Allocated: <span className="text-brand-600">{group.totalAllocated}</span></div>
-                      <div>Backordered: <span className="text-danger-600">{group.totalBackorder}</span></div>
+                      {group.isFGMode ? (
+                        <>
+                          <div>Allocated: <span className="text-brand-600">{group.totalAllocated} pack{group.totalAllocated !== 1 ? 's' : ''} ({group.totalAllocated * group.packQty} {group.unit})</span></div>
+                          <div>Backordered: <span className="text-danger-600">{group.totalBackorder} pack{group.totalBackorder !== 1 ? 's' : ''} ({group.totalBackorder * group.packQty} {group.unit})</span></div>
+                        </>
+                      ) : (
+                        <>
+                          <div>Allocated: <span className="text-brand-600">{group.totalAllocated} {group.unit}</span></div>
+                          <div>Backordered: <span className="text-danger-600">{group.totalBackorder} {group.unit}</span></div>
+                        </>
+                      )}
                     </div>
                     <Badge variant={status.variant as any}>{status.label}</Badge>
                     <button
@@ -457,27 +474,57 @@ export default function FulfillmentPage() {
                                 </div>
                               </TableCell>
                               <TableCell className="py-3.5 text-center text-sm font-semibold text-neutral-700">
-                                {item.quantityRequested} {item.unit || "ea"}
+                                {item.isFGMode ? (
+                                  <>
+                                    {item.quantityRequested} pack{item.quantityRequested !== 1 ? 's' : ''} ({item.quantityRequested * (item.packQty || 1)} {item.unit || "ea"})
+                                  </>
+                                ) : (
+                                  <>
+                                    {item.quantityRequested} {item.unit || "ea"}
+                                  </>
+                                )}
                               </TableCell>
                               <TableCell className="py-3.5 px-4">
-                                <input
-                                  type="number"
-                                  min="0"
-                                  step="any"
-                                  value={draft.allocatedQty}
-                                  onChange={e => handleFieldChange(item.id, "allocatedQty", e.target.value === "" ? 0 : parseFloat(e.target.value))}
-                                  className={`w-full border rounded-lg p-2 text-sm text-center font-semibold focus:outline-none focus:ring-1 focus:ring-brand-500 ${draft.dirty ? "border-amber-300 bg-amber-50/30" : "border-neutral-200 bg-white"}`}
-                                />
+                                <div className="flex flex-col items-center gap-1">
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    step={item.isFGMode ? "1" : "any"}
+                                    value={draft.allocatedQty}
+                                    onChange={e => {
+                                      const val = e.target.value === "" ? 0 : parseFloat(e.target.value);
+                                      const resolvedVal = item.isFGMode ? Math.round(val) : val;
+                                      handleFieldChange(item.id, "allocatedQty", resolvedVal);
+                                    }}
+                                    className={`w-full border rounded-lg p-2 text-sm text-center font-semibold focus:outline-none focus:ring-1 focus:ring-brand-500 ${draft.dirty ? "border-amber-300 bg-amber-50/30" : "border-neutral-200 bg-white"}`}
+                                  />
+                                  {item.isFGMode && (
+                                    <span className="text-[10px] text-neutral-500 font-medium">
+                                      packs ({draft.allocatedQty * (item.packQty || 1)} {item.unit || "ea"})
+                                    </span>
+                                  )}
+                                </div>
                               </TableCell>
                               <TableCell className="py-3.5 px-4">
-                                <input
-                                  type="number"
-                                  min="0"
-                                  step="any"
-                                  value={draft.backorderQty}
-                                  onChange={e => handleFieldChange(item.id, "backorderQty", e.target.value === "" ? 0 : parseFloat(e.target.value))}
-                                  className={`w-full border rounded-lg p-2 text-sm text-center font-semibold focus:outline-none focus:ring-1 focus:ring-brand-500 ${draft.dirty ? "border-amber-300 bg-amber-50/30" : "border-neutral-200 bg-white"}`}
-                                />
+                                <div className="flex flex-col items-center gap-1">
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    step={item.isFGMode ? "1" : "any"}
+                                    value={draft.backorderQty}
+                                    onChange={e => {
+                                      const val = e.target.value === "" ? 0 : parseFloat(e.target.value);
+                                      const resolvedVal = item.isFGMode ? Math.round(val) : val;
+                                      handleFieldChange(item.id, "backorderQty", resolvedVal);
+                                    }}
+                                    className={`w-full border rounded-lg p-2 text-sm text-center font-semibold focus:outline-none focus:ring-1 focus:ring-brand-500 ${draft.dirty ? "border-amber-300 bg-amber-50/30" : "border-neutral-200 bg-white"}`}
+                                  />
+                                  {item.isFGMode && (
+                                    <span className="text-[10px] text-neutral-500 font-medium">
+                                      packs ({draft.backorderQty * (item.packQty || 1)} {item.unit || "ea"})
+                                    </span>
+                                  )}
+                                </div>
                               </TableCell>
                               <TableCell className="py-3.5 px-4">
                                 <input

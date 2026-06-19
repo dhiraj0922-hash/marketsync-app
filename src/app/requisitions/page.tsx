@@ -296,6 +296,8 @@ function LocationManagerView({
             status,
             sourceType: 'hq_supplied' as const,
             added: lineItems.some(li => li.finishedGoodId === s.id),
+            packQty,
+            baseUnit: s.baseUnit,
           };
         });
     } else {
@@ -393,6 +395,7 @@ function LocationManagerView({
       if (lineItems.some(li => li.finishedGoodId === saleItem.id)) return;
       const packQty = (saleItem.packQty != null && saleItem.packQty > 0) ? saleItem.packQty : 1;
       const packPrice = saleItem.effectivePrice * packQty;
+      const packCount = Math.ceil(quantity / packQty);
       setLineItems(prev => [
         ...prev,
         {
@@ -405,7 +408,7 @@ function LocationManagerView({
           unit:              saleItem.baseUnit,
           packQty,
           unitPrice:         packPrice,
-          quantityRequested: quantity,
+          quantityRequested: packCount,
           sourceCommissary:  saleItem.sourceCommissary,
         },
       ]);
@@ -707,11 +710,14 @@ function LocationManagerView({
                                 }
                                 // If item is already in cart and user changes qty, sync cart qty too
                                 if (newQty > 0 && item.added) {
-                                  setLineItems(prev => prev.map(li =>
-                                    (li.catalogItemId ?? li.finishedGoodId ?? li.itemId) === item.id
-                                      ? { ...li, quantityRequested: newQty }
-                                      : li
-                                  ));
+                                  setLineItems(prev => prev.map(li => {
+                                    if ((li.catalogItemId ?? li.finishedGoodId ?? li.itemId) === item.id) {
+                                      const isFG = !!li.finishedGoodId;
+                                      const resolvedQty = isFG ? Math.ceil(newQty / (li.packQty || 1)) : newQty;
+                                      return { ...li, quantityRequested: resolvedQty };
+                                    }
+                                    return li;
+                                  }));
                                 }
                               }}
                               className="h-10 w-20 rounded-lg border border-slate-200 px-3 text-sm outline-none ring-emerald-600 focus:ring-2"
@@ -930,10 +936,18 @@ function LocationManagerView({
                               <div className="font-semibold text-slate-900">{bo.itemName}</div>
                               <div className="text-slate-500 text-xs mt-0.5">{bo.itemId} ({bo.sourceType})</div>
                             </TableCell>
-                            <TableCell className="py-4 text-right text-sm text-slate-700">{bo.requestedQty} {bo.unit}</TableCell>
-                            <TableCell className="py-4 text-right text-sm text-slate-700">{bo.fulfilledQty} {bo.unit}</TableCell>
-                            <TableCell className="py-4 text-right text-sm font-semibold text-rose-600">{bo.remainingQty} {bo.unit}</TableCell>
-                            <TableCell className="py-4 text-right text-sm text-slate-700">${Number(bo.unitPrice).toFixed(2)}</TableCell>
+                            <TableCell className="py-4 text-right text-sm text-slate-700 font-semibold">
+                              {bo.isFGMode ? `${bo.requestedQty} pack${bo.requestedQty !== 1 ? 's' : ''} (${bo.requestedQty * bo.packQty} ${bo.unit})` : `${bo.requestedQty} ${bo.unit}`}
+                            </TableCell>
+                            <TableCell className="py-4 text-right text-sm text-slate-700">
+                              {bo.isFGMode ? `${bo.fulfilledQty} pack${bo.fulfilledQty !== 1 ? 's' : ''} (${bo.fulfilledQty * bo.packQty} ${bo.unit})` : `${bo.fulfilledQty} ${bo.unit}`}
+                            </TableCell>
+                            <TableCell className="py-4 text-right text-sm font-semibold text-rose-600">
+                              {bo.isFGMode ? `${bo.remainingQty} pack${bo.remainingQty !== 1 ? 's' : ''} (${bo.remainingQty * bo.packQty} ${bo.unit})` : `${bo.remainingQty} ${bo.unit}`}
+                            </TableCell>
+                            <TableCell className="py-4 text-right text-sm text-slate-700">
+                              {bo.isFGMode ? `$${Number(bo.unitPrice).toFixed(2)}/pack` : `$${Number(bo.unitPrice).toFixed(2)}`}
+                            </TableCell>
                             <TableCell className="py-4"><StatusBadge status={bo.status} /></TableCell>
                           </TableRow>
                         )) : (
@@ -988,7 +1002,15 @@ function LocationManagerView({
                                 }
                               </div>
                               <p className="mt-1 text-xs text-slate-500">
-                                {li.unit} · ${li.unitPrice.toFixed(2)} each
+                                {li.finishedGoodId ? (
+                                  <>
+                                    Pack Size: {li.packQty} {li.unit} · Pack Price: ${li.unitPrice.toFixed(2)}
+                                  </>
+                                ) : (
+                                  <>
+                                    {li.unit} · ${li.unitPrice.toFixed(2)} each
+                                  </>
+                                )}
                                 {li.supplierSnapshot && <span className="ml-1 text-slate-400">· {li.supplierSnapshot}</span>}
                               </p>
                             </div>
@@ -997,13 +1019,18 @@ function LocationManagerView({
                             </button>
                           </div>
                           <div className="mt-3 flex items-center justify-between gap-3">
-                            <input
-                              type="number"
-                              min={1}
-                              value={li.quantityRequested}
-                              onChange={(e) => updateQty(id, Number(e.target.value))}
-                              className="h-10 w-24 rounded-lg border border-slate-200 px-3 text-sm outline-none ring-emerald-600 focus:ring-2"
-                            />
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="number"
+                                min={1}
+                                value={li.quantityRequested}
+                                onChange={(e) => updateQty(id, Number(e.target.value))}
+                                className="h-10 w-20 rounded-lg border border-slate-200 px-3 text-sm outline-none ring-emerald-600 focus:ring-2"
+                              />
+                              <span className="text-xs text-slate-500 font-medium">
+                                {li.finishedGoodId ? `pack(s) (${li.quantityRequested * li.packQty} ${li.unit})` : li.unit}
+                              </span>
+                            </div>
                             <span className="text-sm font-semibold text-slate-950">${(li.quantityRequested * li.unitPrice).toFixed(2)}</span>
                           </div>
                         </div>
@@ -1113,6 +1140,7 @@ function LocationManagerView({
                       const unitPrice  = Number(li.unitPrice ?? 0);
                       const lineTotal  = fulfilled * unitPrice;
                       const lineStatus = fulfilled >= requested ? "fulfilled" : fulfilled > 0 ? "partial" : "backordered";
+                      const packQty    = li.isFGMode ? (li.packQtySnapshot ?? 1) : 1;
                       return (
                         <TableRow key={li.id} className="hover:bg-neutral-50/50">
                           <TableCell className="py-2 px-3">
@@ -1120,28 +1148,36 @@ function LocationManagerView({
                             {(() => {
                               const bo = backorders.find(b => b.original_requisition_item_id === li.id);
                               if (!bo) return null;
+                              const boQty = Number(bo.backorder_qty ?? 0);
+                              const boRem = Number(bo.remaining_qty ?? 0);
                               return (
                                 <div className="text-[10px] text-neutral-500 mt-1 border-t border-dashed border-neutral-200 pt-1 space-y-0.5">
-                                  <div className="font-semibold text-rose-600">Backordered: {bo.backorder_qty} {li.unit_snapshot || li.unitSnapshot || ''}</div>
-                                  <div className="font-medium text-amber-600">Remaining: {bo.remaining_qty} {li.unit_snapshot || li.unitSnapshot || ''}</div>
+                                  <div className="font-semibold text-rose-600">
+                                    Backordered: {li.isFGMode ? `${boQty} pack${boQty !== 1 ? 's' : ''} (${boQty * packQty} ${li.unit})` : `${boQty} ${li.unit_snapshot || li.unitSnapshot || ''}`}
+                                  </div>
+                                  <div className="font-medium text-amber-600">
+                                    Remaining: {li.isFGMode ? `${boRem} pack${boRem !== 1 ? 's' : ''} (${boRem * packQty} ${li.unit})` : `${boRem} ${li.unit_snapshot || li.unitSnapshot || ''}`}
+                                  </div>
                                   <div className="text-neutral-500 capitalize">Status: {bo.status.replace(/_/g, ' ')}</div>
                                 </div>
                               );
                             })()}
                           </TableCell>
-                          <TableCell className="py-2 text-right text-sm text-neutral-700">{requested}</TableCell>
+                          <TableCell className="py-2 text-right text-sm text-neutral-700">
+                            {li.isFGMode ? `${requested} pack${requested !== 1 ? 's' : ''} (${requested * packQty} ${li.unit})` : requested}
+                          </TableCell>
                           <TableCell className="py-2 text-right">
                             {li.quantityFulfilled != null
-                              ? <span className="text-sm font-semibold text-success-700">{fulfilled}</span>
+                              ? <span className="text-sm font-semibold text-success-700">{li.isFGMode ? `${fulfilled} pack${fulfilled !== 1 ? 's' : ''} (${fulfilled * packQty} ${li.unit})` : fulfilled}</span>
                               : <span className="text-neutral-400 text-xs">—</span>}
                           </TableCell>
                           <TableCell className="py-2 text-right">
                             {backorder > 0
-                              ? <span className="text-sm font-bold text-danger-600">{backorder}</span>
+                              ? <span className="text-sm font-bold text-danger-600">{li.isFGMode ? `${backorder} pack${backorder !== 1 ? 's' : ''} (${backorder * packQty} ${li.unit})` : backorder}</span>
                               : <span className="text-xs text-success-600 font-bold">—</span>}
                           </TableCell>
                           <TableCell className="py-2 text-right text-sm text-neutral-700">
-                            {unitPrice > 0 ? `$${unitPrice.toFixed(2)}` : <span className="text-neutral-400">—</span>}
+                            {unitPrice > 0 ? (li.isFGMode ? `$${unitPrice.toFixed(2)}/pack` : `$${unitPrice.toFixed(2)}`) : <span className="text-neutral-400">—</span>}
                           </TableCell>
                           <TableCell className="py-2 text-right">
                             <span className="text-sm font-semibold text-neutral-800">${lineTotal.toFixed(2)}</span>
@@ -2305,11 +2341,15 @@ function HQAdminView({
                             const requested  = Number(item.quantityRequested ?? 0);
                             const draftQty   = fulfillDraftMap.get(item.id) ?? Number(item.quantityFulfilled ?? 0);
                             const hqStock    = item.hqAvailableStock;
-                            const maxFulfill = Math.min(requested, hqStock ?? requested);
+                            const packQty    = item.isFGMode ? (item.packQtySnapshot ?? 1) : 1;
+                            const hqStockPacks = item.isFGMode && hqStock != null ? Math.floor(hqStock / packQty) : hqStock;
+                            const maxFulfill = Math.min(requested, hqStockPacks ?? requested);
                             const backorder  = Math.max(0, requested - draftQty);
                             const unitPrice  = Number(item.unitPrice ?? 0);
                             const lineTotal  = draftQty * unitPrice;
-                            const lineStatus = hqStock != null && hqStock <= 0
+                            const lineStatus = item.isFGMode && hqStock != null && hqStock < packQty
+                              ? "out_of_stock"
+                              : hqStock != null && hqStock <= 0
                               ? "out_of_stock"
                               : draftQty >= requested
                               ? "fulfilled"
@@ -2335,83 +2375,98 @@ function HQAdminView({
                                 </TableCell>
                                 {/* Requested qty */}
                                 <TableCell className="py-2 text-right">
-                                  <span className="text-sm font-medium text-neutral-800">{requested}</span>
-                                  {item.unit && <span className="text-xs text-neutral-400 ml-1">{item.unit}</span>}
+                                  <span className="text-sm font-medium text-neutral-800">
+                                    {item.isFGMode ? `${requested} pack${requested !== 1 ? 's' : ''} (${requested * packQty} ${item.unit})` : requested}
+                                  </span>
+                                  {!item.isFGMode && item.unit && <span className="text-xs text-neutral-400 ml-1">{item.unit}</span>}
                                 </TableCell>
                                 {/* HQ available stock */}
                                 <TableCell className="py-2 text-right">
                                   {hqStock != null ? (
                                     <span className={`text-sm font-semibold ${
-                                      hqStock <= 0          ? "text-danger-600"  :
-                                      hqStock < requested   ? "text-warning-600" :
+                                      hqStock <= 0 || (item.isFGMode && hqStock < packQty) ? "text-danger-600"  :
+                                      (item.isFGMode ? hqStockPacks < requested : hqStock < requested) ? "text-warning-600" :
                                                               "text-success-600"
-                                    }`}>{hqStock}</span>
+                                    }`}>
+                                      {item.isFGMode ? `${hqStockPacks} pack${hqStockPacks !== 1 ? 's' : ''} (${hqStock} ${item.unit})` : `${hqStock} ${item.unit || "ea"}`}
+                                    </span>
                                   ) : (
                                     <span className="text-neutral-400 text-sm">—</span>
                                   )}
                                 </TableCell>
                                 {/* Fulfill qty — controlled, disabled on non-approved */}
                                 <TableCell className="py-2 text-center">
-                                  <input
-                                    type="number"
-                                    min={0}
-                                    max={maxFulfill}
-                                    disabled={!isEditable}
-                                    value={draftQty}
-                                    onChange={(e) => {
-                                      const clamped = Math.max(0, Math.min(maxFulfill, Number(e.target.value)));
-                                      setLineFulfillQuantity(item.id, clamped);
-                                    }}
-                                    onBlur={async () => {
-                                      const newVal  = fulfillDraftMap.get(item.id) ?? Number(item.quantityFulfilled ?? 0);
-                                      const current = Number(item.quantityFulfilled ?? 0);
-                                      if (newVal === current) return;
-                                      // UI guard: never exceed HQ stock
-                                      if (hqStock != null && newVal > hqStock) {
-                                        alert(`Cannot fulfill ${newVal} — only ${hqStock} in HQ stock.`);
-                                        setLineFulfillQuantity(item.id, current);
-                                        return;
-                                      }
-                                      // Optimistic update
-                                      setHqReqItems(prev => prev.map(li =>
-                                        li.id === item.id ? { ...li, quantityFulfilled: newVal } : li
-                                      ));
-                                      const res = await updateRequisitionItemFulfilled(item.id, newVal, item.requisitionId);
-                                      if (!res.success) {
-                                        alert(`Failed to save: ${res.error?.message}`);
-                                        // Rollback
-                                        setLineFulfillQuantity(item.id, current);
+                                  <div className="flex flex-col items-center">
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      max={maxFulfill}
+                                      disabled={!isEditable}
+                                      value={draftQty}
+                                      onChange={(e) => {
+                                        const clamped = Math.max(0, Math.min(maxFulfill, Number(e.target.value)));
+                                        setLineFulfillQuantity(item.id, clamped);
+                                      }}
+                                      onBlur={async () => {
+                                        const newVal  = fulfillDraftMap.get(item.id) ?? Number(item.quantityFulfilled ?? 0);
+                                        const current = Number(item.quantityFulfilled ?? 0);
+                                        if (newVal === current) return;
+                                        // UI guard: never exceed HQ stock
+                                        const maxAllowedVal = item.isFGMode && hqStock != null ? Math.floor(hqStock / packQty) : hqStock;
+                                        if (maxAllowedVal != null && newVal > maxAllowedVal) {
+                                          alert(item.isFGMode 
+                                            ? `Cannot fulfill ${newVal} pack(s) — only ${maxAllowedVal} pack(s) (${hqStock} ${item.unit}) available in HQ stock.`
+                                            : `Cannot fulfill ${newVal} — only ${hqStock} in HQ stock.`
+                                          );
+                                          setLineFulfillQuantity(item.id, current);
+                                          return;
+                                        }
+                                        // Optimistic update
                                         setHqReqItems(prev => prev.map(li =>
-                                          li.id === item.id ? { ...li, quantityFulfilled: current } : li
+                                          li.id === item.id ? { ...li, quantityFulfilled: newVal } : li
                                         ));
-                                      } else if (res.newStatus) {
-                                        setSelectedReq((prev: any) => prev ? { ...prev, status: res.newStatus } : prev);
-                                        setRequisitions((prev: any[]) => prev.map(r =>
-                                          r.id === item.requisitionId ? { ...r, status: res.newStatus } : r
-                                        ));
-                                        // Bust cache so re-open reflects latest fulfilled qtys
-                                        setReqItemsCache(prev => { const m = new Map(prev); m.delete(item.requisitionId); return m; });
-                                      }
-                                    }}
-                                    className={`w-20 px-2 py-1 text-sm font-bold rounded-md border text-center ${
-                                      !isEditable
-                                        ? "bg-neutral-50 text-neutral-400 border-neutral-200 cursor-not-allowed"
-                                        : lineStatus === "fulfilled"
-                                          ? "border-success-300 bg-success-50 text-success-800"
-                                          : "border-neutral-300 bg-white text-neutral-800"
-                                    } focus:outline-none focus:ring-2 focus:ring-brand-400`}
-                                  />
+                                        const res = await updateRequisitionItemFulfilled(item.id, newVal, item.requisitionId);
+                                        if (!res.success) {
+                                          alert(`Failed to save: ${res.error?.message}`);
+                                          // Rollback
+                                          setLineFulfillQuantity(item.id, current);
+                                          setHqReqItems(prev => prev.map(li =>
+                                            li.id === item.id ? { ...li, quantityFulfilled: current } : li
+                                          ));
+                                        } else if (res.newStatus) {
+                                          setSelectedReq((prev: any) => prev ? { ...prev, status: res.newStatus } : prev);
+                                          setRequisitions((prev: any[]) => prev.map(r =>
+                                            r.id === item.requisitionId ? { ...r, status: res.newStatus } : r
+                                          ));
+                                          // Bust cache so re-open reflects latest fulfilled qtys
+                                          setReqItemsCache(prev => { const m = new Map(prev); m.delete(item.requisitionId); return m; });
+                                        }
+                                      }}
+                                      className={`w-20 px-2 py-1 text-sm font-bold rounded-md border text-center ${
+                                        !isEditable
+                                          ? "bg-neutral-50 text-neutral-400 border-neutral-200 cursor-not-allowed"
+                                          : lineStatus === "fulfilled"
+                                            ? "border-success-300 bg-success-50 text-success-800"
+                                            : "border-neutral-300 bg-white text-neutral-800"
+                                      } focus:outline-none focus:ring-2 focus:ring-brand-400`}
+                                    />
+                                    {item.isFGMode && (
+                                      <span className="text-[10px] text-neutral-500 font-medium mt-0.5">
+                                        {draftQty * packQty} {item.unit}
+                                      </span>
+                                    )}
+                                  </div>
                                 </TableCell>
                                 {/* Backorder */}
                                 <TableCell className="py-2 text-right">
                                   {backorder > 0
-                                    ? <span className="text-sm font-bold text-danger-600">{backorder}</span>
+                                    ? <span className="text-sm font-bold text-danger-600">{item.isFGMode ? `${backorder} pack${backorder !== 1 ? 's' : ''} (${backorder * packQty} ${item.unit})` : backorder}</span>
                                     : <span className="text-xs font-bold text-success-600">—</span>}
                                 </TableCell>
                                 {/* Unit price */}
                                 <TableCell className="py-2 text-right">
                                   {unitPrice > 0
-                                    ? <span className="text-sm font-medium text-neutral-700">${unitPrice.toFixed(2)}</span>
+                                    ? <span className="text-sm font-medium text-neutral-700">{item.isFGMode ? `$${unitPrice.toFixed(2)}/pack` : `$${unitPrice.toFixed(2)}`}</span>
                                     : <span className="text-neutral-400 text-xs">—</span>}
                                 </TableCell>
                                 {/* Fulfilled line total */}
