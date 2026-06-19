@@ -4098,6 +4098,168 @@ export async function sendHqRequisitionNotification(
 
 
 
+export async function saveRequisitionEdits(
+  requisitionId: string,
+  notes: string,
+  lineItems: {
+    requisitionItemId?: string | null;
+    item_id?:             string | null;
+    itemId?:              string | null;
+    finishedGoodId?:      string | null;
+    finished_good_id?:    string | null;
+    catalog_item_id?:     string | null;
+    catalogItemId?:       string | null;
+    sourceType?:          string | null;
+    source_type?:         string | null;
+    supplierSnapshot?:    string | null;
+    supplier_snapshot?:   string | null;
+    packQty?:             number | null;
+    pack_qty_snapshot?:   number | null;
+    itemName?:            string | null;
+    item_name_snapshot?:  string | null;
+    unit?:                string | null;
+    unit_snapshot?:       string | null;
+    sourceCommissary?:    string | null;
+    source_commissary_snapshot?: string | null;
+    quantityRequested?:   number;
+    quantity_requested?:  number;
+    unitPrice?:           number;
+    unit_price?:          number;
+  }[]
+): Promise<{ success: boolean; error?: any }> {
+  console.log(`[saveRequisitionEdits] START edit for reqId=${requisitionId}`);
+
+  // 1. Re-check status before saving edits (Safety Rule 1)
+  const { data: req, error: fetchError } = await supabase
+    .from("requisitions")
+    .select("status")
+    .eq("id", requisitionId)
+    .single();
+
+  if (fetchError || !req) {
+    return { success: false, error: fetchError ?? { message: "Requisition not found." } };
+  }
+
+  const statusClean = String(req.status || '').toLowerCase();
+  const isEditable = ['submitted', 'pending', 'requested'].includes(statusClean);
+  if (!isEditable) {
+    return {
+      success: false,
+      error: { message: `This requisition is currently in '${req.status}' status and has been locked by HQ. It can no longer be edited.` }
+    };
+  }
+
+  // Calculate new totals (Safety Rule 2: items and total_amount updated based on requested items)
+  const grandTotal = parseFloat(
+    lineItems.reduce((s, li) => {
+      const q = li.quantityRequested ?? li.quantity_requested ?? 0;
+      const p = li.unitPrice ?? li.unit_price ?? 0;
+      return s + (q * p);
+    }, 0).toFixed(2)
+  );
+
+  // 2. Update requisition header
+  const { error: headerError } = await supabase
+    .from("requisitions")
+    .update({
+      notes: notes || "",
+      items: lineItems.length,
+      total_amount: grandTotal,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", requisitionId);
+
+  if (headerError) {
+    console.error("[saveRequisitionEdits] header update FAILED", headerError);
+    return { success: false, error: headerError };
+  }
+
+  // 3. Sync requisition_items (Safety Rule 2: preserve all non-requested columns)
+  // Fetch existing rows from db
+  const { data: dbItems, error: dbItemsError } = await supabase
+    .from("requisition_items")
+    .select("id")
+    .eq("requisition_id", requisitionId);
+
+  if (dbItemsError) {
+    console.error("[saveRequisitionEdits] failed fetching db items", dbItemsError);
+    return { success: false, error: dbItemsError };
+  }
+
+  const dbIds = dbItems?.map((x: any) => x.id) || [];
+  const keepIds = lineItems.map(li => li.requisitionItemId).filter(Boolean) as string[];
+  
+  // A. Deletions: delete DB rows that are not in the edit payload (Safety Rule 2: preserve all other tables, only delete these req items)
+  const toDelete = dbIds.filter(id => !keepIds.includes(id));
+  if (toDelete.length > 0) {
+    console.log(`[saveRequisitionEdits] Deleting removed items:`, toDelete);
+    const { error: deleteError } = await supabase
+      .from("requisition_items")
+      .delete()
+      .in("id", toDelete);
+      
+    if (deleteError) {
+      console.error("[saveRequisitionEdits] items deletion FAILED", deleteError);
+      return { success: false, error: deleteError };
+    }
+  }
+
+  // B. Updates and Inserts
+  for (const li of lineItems) {
+    const qty = Number(li.quantityRequested ?? li.quantity_requested ?? 0);
+    const price = Number(li.unitPrice ?? li.unit_price ?? 0);
+    const lineTotal = parseFloat((qty * price).toFixed(2));
+
+    if (li.requisitionItemId) {
+      // Update existing item. ONLY update quantity_requested and line_total. (Safety Rule 2)
+      const { error: updateError } = await supabase
+        .from("requisition_items")
+        .update({
+          quantity_requested: qty,
+          line_total: lineTotal,
+        })
+        .eq("id", li.requisitionItemId);
+
+      if (updateError) {
+        console.error(`[saveRequisitionEdits] item update FAILED on id=${li.requisitionItemId}`, updateError);
+        return { success: false, error: updateError };
+      }
+    } else {
+      // Insert new item. Stamp snapshots, unit price, quantity_requested, line_total. Preserve all other fields at default. (Safety Rule 2)
+      const insertRow = {
+        requisition_id:              requisitionId,
+        item_id:                     li.catalogItemId ? null : (li.finishedGoodId ? null : (li.itemId ?? li.item_id ?? null)),
+        finished_good_id:            li.finishedGoodId ?? li.finished_good_id ?? null,
+        catalog_item_id:             li.catalogItemId ?? li.catalog_item_id ?? null,
+        source_type:                 li.sourceType ?? li.source_type ?? 'hq_supplied',
+        supplier_snapshot:           li.supplierSnapshot ?? li.supplier_snapshot ?? null,
+        pack_qty_snapshot:           li.packQty ?? li.pack_qty_snapshot ?? 1,
+        item_name_snapshot:          li.itemName ?? li.item_name_snapshot ?? null,
+        unit_snapshot:               li.unit ?? li.unit_snapshot ?? null,
+        source_commissary_snapshot:  li.sourceType === 'local_vendor' || li.source_type === 'local_vendor' ? null : (li.sourceCommissary ?? li.source_commissary_snapshot ?? "Commissary HQ"),
+        quantity_requested:          qty,
+        unit_price:                  price,
+        line_total:                  lineTotal,
+        quantity_approved:           null,
+        quantity_fulfilled:          null,
+      };
+
+      const { error: insertError } = await supabase
+        .from("requisition_items")
+        .insert(insertRow);
+
+      if (insertError) {
+        console.error("[saveRequisitionEdits] item insert FAILED", insertError);
+        return { success: false, error: insertError };
+      }
+    }
+  }
+
+  console.log(`[saveRequisitionEdits] Requisition ${requisitionId} successfully updated.`);
+  return { success: true };
+}
+
+
 export async function loadRequisitionItems(
   requisitionId: string
 ): Promise<{ success: boolean; data?: any[]; error?: any }> {

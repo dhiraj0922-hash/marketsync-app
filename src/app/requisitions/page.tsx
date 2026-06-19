@@ -29,6 +29,7 @@ import {
   Truck,
   X,
   Warehouse,
+  Save,
 } from "lucide-react";
 import { isActiveLocation, isStoreLocation } from "@/lib/locationRegistry";
 import {
@@ -52,6 +53,7 @@ import {
   fulfillBackorder,
   createDeliveryTicketFromRequisition,
   getDeliveryTicketForRequisition,
+  saveRequisitionEdits,
   type SaleItem,
   type OutletCatalogItem,
 } from "@/lib/storage";
@@ -79,6 +81,7 @@ interface LineItemDraft {
   unitPrice:         number;         // pack price = effectivePrice * packQty (captured at selection)
   quantityRequested: number;         // number of packs (or units when packQty=1)
   sourceCommissary:  string;         // snapshot: which commissary fulfills this line
+  requisitionItemId?: string | null;
 }
 
 // ─── Commissary routing constants ─────────────────────────────────────────────
@@ -189,6 +192,7 @@ function LocationManagerView({
   const [searchQuery, setSearchQuery] = useState("");
   const [filterStatus, setFilterStatus] = useState("all");
   const [draftNotes, setDraftNotes] = useState("");
+  const [editingRequisitionId, setEditingRequisitionId] = useState<string | null>(null);
   const [lineItems, setLineItems] = useState<LineItemDraft[]>([]);
   const [catalogSearch, setCatalogSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("all");
@@ -516,6 +520,95 @@ function LocationManagerView({
     window.setTimeout(() => setDraftNotice(null), 4000);
   };
 
+  const handleStartEditRequisition = () => {
+    if (!selectedReq) return;
+    
+    const draftItems: LineItemDraft[] = reqLineItems.map((li: any) => {
+      const isLocal = li.sourceType === 'local_vendor' || li.source_type === 'local_vendor';
+      
+      return {
+        itemId:            isLocal ? null : (li.finishedGoodId || li.finished_good_id ? null : (li.itemId ?? li.item_id)),
+        finishedGoodId:    isLocal ? null : (li.finishedGoodId ?? li.finished_good_id ?? null),
+        catalogItemId:     isLocal ? (li.catalogItemId ?? li.catalog_item_id ?? li.itemId ?? li.item_id) : null,
+        sourceType:        isLocal ? 'local_vendor' : 'hq_supplied',
+        supplierSnapshot:  li.supplierSnapshot ?? li.supplier_snapshot ?? null,
+        itemName:          li.itemName ?? li.item_name_snapshot,
+        unit:              li.unit ?? li.unit_snapshot,
+        packQty:           li.packQtySnapshot ?? li.packQty ?? 1,
+        unitPrice:         li.unitPrice ?? li.unit_price ?? 0,
+        quantityRequested: li.quantityRequested ?? li.quantity_requested ?? 0,
+        sourceCommissary:  li.sourceCommissary ?? li.source_commissary_snapshot ?? 'Commissary HQ',
+        requisitionItemId: li.id,
+      };
+    });
+    
+    setLineItems(draftItems);
+    setDraftNotes(selectedReq.notes || "");
+    setEditingRequisitionId(selectedReq.id);
+    setSelectedReq(null);
+    setReqLineItems([]);
+  };
+
+  const handleUpdateRequisition = async () => {
+    if (!editingRequisitionId) return;
+    setSaveError(null);
+    if (lineItems.length === 0) { setSaveError("Add at least one item."); return; }
+    if (lineItems.some(li => li.quantityRequested <= 0)) {
+      setSaveError("All items must have a quantity greater than 0.");
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      const res = await saveRequisitionEdits(
+        editingRequisitionId,
+        draftNotes,
+        lineItems.map(li => ({
+          requisitionItemId:           li.requisitionItemId ?? null,
+          item_id:                     li.catalogItemId ? null : (li.finishedGoodId ? null : li.itemId),
+          finished_good_id:            li.finishedGoodId ?? null,
+          catalog_item_id:             li.catalogItemId ?? null,
+          source_type:                 li.sourceType,
+          supplier_snapshot:           li.supplierSnapshot ?? null,
+          pack_qty_snapshot:           li.packQty ?? 1,
+          item_name_snapshot:          li.itemName,
+          unit_snapshot:               li.unit,
+          source_commissary_snapshot:  li.sourceType === 'local_vendor' ? null : (li.sourceCommissary ?? "Commissary HQ"),
+          quantity_requested:          li.quantityRequested,
+          unit_price:                  li.unitPrice,
+          line_total:                  parseFloat((li.quantityRequested * li.unitPrice).toFixed(2)),
+        }))
+      );
+
+      if (!res.success) {
+        setSaveError(res.error?.message ?? "Save failed. Check console.");
+        return;
+      }
+
+      const notifyRes = await sendHqRequisitionNotification(editingRequisitionId);
+      if (notifyRes.success) {
+        showSubmitNotice("success", "Changes saved. HQ notification email sent.");
+      } else {
+        console.warn("[Requisitions] HQ notification failed:", notifyRes.error);
+        showSubmitNotice("warning", "Changes saved. HQ email notification failed.");
+      }
+
+      setLineItems([]);
+      setDraftNotes("");
+      setEditingRequisitionId(null);
+      await fetchReqs();
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleCancelEdit = () => {
+    setLineItems([]);
+    setDraftNotes("");
+    setEditingRequisitionId(null);
+    setSaveError(null);
+  };
+
   const renderStockBadge = (status: string) => {
     if (status === "available") return <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">In Stock</span>;
     if (status === "low_stock") return <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-700">Low Stock</span>;
@@ -619,6 +712,26 @@ function LocationManagerView({
             </div>
           ))}
         </section>
+
+        {editingRequisitionId && (
+          <div className="rounded-2xl border border-indigo-200 bg-indigo-50/80 p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 shadow-sm animate-in fade-in slide-in-from-top duration-200">
+            <div className="flex items-start sm:items-center gap-3">
+              <AlertCircle className="h-5 w-5 text-indigo-600 shrink-0 mt-0.5 sm:mt-0 animate-pulse" />
+              <div>
+                <p className="text-sm font-semibold text-indigo-900">Editing Requisition Mode Active</p>
+                <p className="text-xs text-indigo-700 mt-0.5">
+                  You are editing requisition <strong className="font-semibold text-indigo-900">{editingRequisitionId}</strong>. You can modify quantities, remove items, or add new items from the catalog. Click "Save Changes" to apply or "Cancel Edit" to discard.
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={handleCancelEdit}
+              className="text-xs font-bold uppercase tracking-wider text-indigo-600 hover:text-indigo-800 transition py-1 px-3 border border-indigo-200 rounded-lg hover:bg-indigo-100/50 bg-white shrink-0 self-start sm:self-center"
+            >
+              Cancel Edit
+            </button>
+          </div>
+        )}
 
         <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
           <main className="space-y-6">
@@ -1055,22 +1168,46 @@ function LocationManagerView({
                   </div>
                 </div>
                 <div className="grid gap-2">
-                  <button
-                    type="button"
-                    onClick={handleSaveDraft}
-                    className="min-h-11 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-                  >
-                    Save Draft
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleCreate}
-                    disabled={isSaving || lineItems.length === 0}
-                    className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-emerald-700 px-4 text-sm font-semibold text-white transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
-                    {isSaving ? "Submitting..." : "Submit Requisition"}
-                  </button>
+                  {editingRequisitionId ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={handleCancelEdit}
+                        disabled={isSaving}
+                        className="min-h-11 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Cancel Edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleUpdateRequisition}
+                        disabled={isSaving || lineItems.length === 0}
+                        className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                        {isSaving ? "Saving..." : "Save Changes"}
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={handleSaveDraft}
+                        className="min-h-11 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                      >
+                        Save Draft
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleCreate}
+                        disabled={isSaving || lineItems.length === 0}
+                        className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-emerald-700 px-4 text-sm font-semibold text-white transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                        {isSaving ? "Submitting..." : "Submit Requisition"}
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
             </section>
@@ -1083,6 +1220,33 @@ function LocationManagerView({
         onClose={() => { setSelectedReq(null); setReqLineItems([]); }}
         title={`Requisition ${selectedReq?.id}`}
         description={`Created ${selectedReq?.date} · Status: ${selectedReq?.status}`}
+        footer={
+          selectedReq ? (
+            <div className="flex items-center justify-between w-full">
+              <div>
+                {!['submitted', 'pending', 'requested'].includes(String(selectedReq.status || '').toLowerCase()) ? (
+                  <span className="text-xs font-semibold text-slate-500 bg-slate-100 rounded-lg px-2.5 py-1 border border-slate-200">
+                    Locked after HQ acceptance
+                  </span>
+                ) : (
+                  <span className="text-xs font-semibold text-emerald-700 bg-emerald-50 rounded-lg px-2.5 py-1 border border-emerald-200">
+                    Editable pre-acceptance
+                  </span>
+                )}
+              </div>
+              <div>
+                {['submitted', 'pending', 'requested'].includes(String(selectedReq.status || '').toLowerCase()) && (
+                  <button
+                    onClick={handleStartEditRequisition}
+                    className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 text-sm font-semibold text-white transition hover:bg-indigo-700"
+                  >
+                    Edit Request
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : null
+        }
       >
         <div className="space-y-3">
           {/* Notes — compact inline */}
