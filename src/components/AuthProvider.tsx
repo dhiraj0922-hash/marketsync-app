@@ -209,6 +209,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     // ── Auth state listener ───────────────────────────────────────────────
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (process.env.NODE_ENV === "development") {
+        console.log(`[AuthProvider] auth state change: event=${event} uid=${session?.user?.id ?? "none"}`);
+      }
+
       // INITIAL_SESSION is handled by bootstrap() — skip to avoid the race
       if (event === "INITIAL_SESSION") return;
 
@@ -218,6 +222,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // Token refreshed silently — the JWT is renewed but the profile row
         // has NOT changed. Skip the profile re-fetch entirely.
         // lastGoodUser already holds the correct role.
+        return;
+      }
+
+      if (event === "USER_UPDATED" && session?.user) {
+        if (bootstrapDone.current) {
+          await loadProfile(session.user, /* isBootstrap */ false);
+          markLoadingFalse();
+        }
         return;
       }
 
@@ -256,6 +268,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // ── Redirect effect ───────────────────────────────────────────────────────
   useEffect(() => {
     if (loading) return;
+    if (bootstrapError) return;
+    if (user?.profileError) return;
+
     // Block unauthenticated users AND explicitly deactivated users.
     // user.isActive === false (strict) avoids blocking during cold-start
     // when isActive is undefined (profile not yet resolved).
@@ -266,18 +281,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } else if (user && user.isActive !== false && !canAccessPath(user, pathname)) {
       router.push(getAllowedHomePath(user));
     }
-  }, [user, loading, pathname, router]);
+  }, [user, loading, bootstrapError, pathname, router]);
 
   // ── Loading screen ────────────────────────────────────────────────────────
-  if (loading && pathname !== "/login") {
+  if ((loading || bootstrapError || user?.profileError) && pathname !== "/login") {
+    const errorType = bootstrapError || (user?.profileError ? "profile_fetch_failed" : null);
     return (
       <div className="min-h-screen bg-neutral-50 flex items-center justify-center">
         <div className="flex flex-col items-center gap-4">
-          {bootstrapError ? (
+          {errorType ? (
             // Error / timeout state — clear message + retry
             <>
               <div className="text-neutral-700 text-sm font-semibold text-center max-w-xs">
-                {bootstrapError === "timeout"
+                {errorType === "timeout"
                   ? "Authentication is taking longer than expected."
                   : "Your profile could not be loaded. Please check your connection."}
               </div>

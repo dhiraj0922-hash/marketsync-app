@@ -17,9 +17,8 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
     // Persist session in localStorage (default). Explicitly declared so behaviour
     // is clear and not affected by future supabase-js defaults changes.
     persistSession: true,
-    // Do NOT attempt to detect OAuth tokens in the URL on every page load —
-    // this is only needed on the /auth/callback route and adds latency elsewhere.
-    detectSessionInUrl: false,
+    // Attempt to detect OAuth tokens or email links in the URL on page load.
+    detectSessionInUrl: true,
     // Automatically refresh the access token before it expires.
     autoRefreshToken: true,
   },
