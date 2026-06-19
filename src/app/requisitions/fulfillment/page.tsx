@@ -5,9 +5,9 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/components/AuthProvider";
-import { getFulfillmentSummary, saveFulfillmentAllocations } from "@/lib/storage";
+import { getFulfillmentSummary, saveFulfillmentAllocations, completeFulfillmentMovement, createDeliveryTicketFromRequisition } from "@/lib/storage";
 import { isHqFulfillment, isHqMaster, isHqOps } from "@/lib/roles";
-import { ChevronDown, ChevronRight, Search, Save, Check, RefreshCw, AlertTriangle, Play, Sparkles } from "lucide-react";
+import { ChevronDown, ChevronRight, Search, Save, Check, RefreshCw, AlertTriangle, Play, Sparkles, Truck, PackageCheck } from "lucide-react";
 
 export default function FulfillmentPage() {
   const { user } = useAuth();
@@ -223,6 +223,64 @@ export default function FulfillmentPage() {
     }
   };
 
+  const [completingId, setCompletingId] = useState<string | null>(null);
+  const [ticketingId, setTicketingId] = useState<string | null>(null);
+
+  const handleCompleteFulfillment = async (requisitionId: string) => {
+    const modifiedList = Object.entries(drafts)
+      .filter(([_, d]) => d.dirty)
+      .map(([id, d]) => ({
+        id,
+        allocatedQty: Number(d.allocatedQty),
+        backorderQty: Number(d.backorderQty),
+        fulfillmentNote: d.fulfillmentNote,
+        userId: user?.id || ""
+      }));
+
+    setCompletingId(requisitionId);
+    try {
+      if (modifiedList.length > 0) {
+        const saveRes = await saveFulfillmentAllocations(modifiedList);
+        if (!saveRes.success) {
+          alert(`Failed to auto-save allocations: ${saveRes.error?.message}`);
+          setCompletingId(null);
+          return;
+        }
+      }
+
+      const res = await completeFulfillmentMovement(requisitionId);
+      if (res.success) {
+        setToast("Fulfillment completed & stock transferred successfully!");
+        await loadData();
+      } else {
+        alert(`Fulfillment completion failed: ${res.error?.message ?? "Unknown error"}`);
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Error completing fulfillment.");
+    } finally {
+      setCompletingId(null);
+    }
+  };
+
+  const handleCreateDeliveryTicket = async (requisitionId: string) => {
+    setTicketingId(requisitionId);
+    try {
+      const res = await createDeliveryTicketFromRequisition(requisitionId);
+      if (res.success) {
+        setToast(`Delivery Ticket ${res.data?.ticketNumber || ""} created successfully!`);
+        await loadData();
+      } else {
+        alert(`Failed to create delivery ticket: ${res.error?.message ?? "Unknown error"}`);
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Error creating delivery ticket.");
+    } finally {
+      setTicketingId(null);
+    }
+  };
+
   // Get visual status of an item group
   const getGroupStatus = (group: any) => {
     const { totalRequested, totalAllocated, totalBackorder } = group;
@@ -273,7 +331,7 @@ export default function FulfillmentPage() {
             ) : (
               <>
                 <Save className="h-4 w-4" />
-                Save Fulfillment
+                Save Allocation
               </>
             )}
           </button>
@@ -368,7 +426,7 @@ export default function FulfillmentPage() {
                       onClick={() => handleAutoAllocateGroup(group.itemName)}
                       className="text-xs bg-white border border-brand-200 text-brand-700 hover:bg-brand-50 font-bold px-2.5 py-1.5 rounded-lg transition-colors flex items-center gap-1 shadow-sm"
                     >
-                      <Sparkles className="h-3 w-3" /> Auto Allocate
+                      <Sparkles className="h-3 w-3" /> Auto Allocate Full Qty
                     </button>
                   </div>
                 </CardHeader>
@@ -430,14 +488,45 @@ export default function FulfillmentPage() {
                                   className={`w-full border rounded-lg p-2 text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 ${draft.dirty ? "border-amber-300 bg-amber-50/30" : "border-neutral-200 bg-white"}`}
                                 />
                               </TableCell>
-                              <TableCell className="py-3.5 text-right px-5 whitespace-nowrap">
-                                <button
-                                  onClick={() => handleMarkShortRow(item.id, item.quantityRequested)}
-                                  className="text-xs font-semibold text-danger-700 bg-danger-50 hover:bg-danger-100 px-2 py-1.5 rounded-lg border border-danger-200 transition-colors"
-                                  title="Mark item as short (sets allocation to 0 and backorders the entire quantity)"
-                                >
-                                  Mark Short
-                                </button>
+                              <TableCell className="py-3.5 text-right px-5 whitespace-nowrap space-x-2">
+                                {item.requisitionStatus !== "fulfilled" ? (
+                                  <>
+                                    <button
+                                      onClick={() => handleMarkShortRow(item.id, item.quantityRequested)}
+                                      className="text-xs font-semibold text-danger-700 bg-danger-50 hover:bg-danger-100 px-2.5 py-1.5 rounded-lg border border-danger-200 transition-colors"
+                                      title="Mark item as short (sets allocation to 0 and backorders the entire quantity)"
+                                    >
+                                      Mark Short
+                                    </button>
+                                    <button
+                                      onClick={() => handleCompleteFulfillment(item.requisitionId)}
+                                      disabled={completingId !== null}
+                                      className="text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1.5 rounded-lg border border-emerald-200 transition-colors inline-flex items-center gap-1"
+                                      title="Complete this entire requisition's stock movement and update HQ inventory levels"
+                                    >
+                                      <PackageCheck className="h-3.5 w-3.5" />
+                                      {completingId === item.requisitionId ? "Processing..." : "Complete Fulfillment"}
+                                    </button>
+                                  </>
+                                ) : (
+                                  <>
+                                    {item.deliveryTicketId ? (
+                                      <Badge variant="success" className="font-semibold text-xs py-1 px-2.5">
+                                        Ticket: {item.deliveryTicketNumber}
+                                      </Badge>
+                                    ) : (
+                                      <button
+                                        onClick={() => handleCreateDeliveryTicket(item.requisitionId)}
+                                        disabled={ticketingId !== null}
+                                        className="text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 px-2.5 py-1.5 rounded-lg transition-colors inline-flex items-center gap-1 shadow-sm"
+                                        title="Generate a delivery ticket using the fulfilled allocations for this requisition"
+                                      >
+                                        <Truck className="h-3.5 w-3.5" />
+                                        {ticketingId === item.requisitionId ? "Creating..." : "Create Delivery Ticket"}
+                                      </button>
+                                    )}
+                                  </>
+                                )}
                               </TableCell>
                             </TableRow>
                           );

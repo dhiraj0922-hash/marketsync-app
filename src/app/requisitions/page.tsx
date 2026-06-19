@@ -62,6 +62,7 @@ import {
   type UserProfile,
 } from "@/lib/auth";
 import { supabase } from "@/lib/supabase";
+import { isHqFulfillment } from "@/lib/roles";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -2137,7 +2138,7 @@ function HQAdminView({
                       </button>
                     )}
                     {/* Approve / Reject — only for submitted/draft */}
-                    {["submitted", "draft"].includes((selectedReq?.status ?? "").toLowerCase()) && (
+                    {["submitted", "draft"].includes((selectedReq?.status ?? "").toLowerCase()) && !isHqFulfillment(profile) && (
                       <>
                         <button onClick={() => handleUpdateReqStatus(selectedReq.id, "rejected")}
                           className="px-4 py-2 text-sm font-medium bg-white border border-danger-200 text-danger-700 rounded-lg hover:bg-danger-50 transition-colors shadow-sm flex items-center gap-2">
@@ -2860,7 +2861,7 @@ export default function Requisitions() {
         const prof = await getCurrentUserProfile();
         setProfile(prof);
         if (prof) {
-          const isHqRequisitionRole = ["hq_master", "hq_admin", "hq_ops"].includes(prof.role);
+          const isHqRequisitionRole = ["hq_master", "hq_admin", "hq_ops", "hq_fulfillment"].includes(prof.role);
           if (isHqRequisitionRole) {
             // HQAdminView will load finishedGoods and requisitions internally on mount
           } else if (prof.role === "location_manager") {
@@ -2915,7 +2916,7 @@ export default function Requisitions() {
   }
 
   // ── Unknown / unexpected role ────────────────────────────────────────────────
-  const isHqRequisitionRole = ["hq_master", "hq_admin", "hq_ops"].includes(profile.role);
+  const isHqRequisitionRole = ["hq_master", "hq_admin", "hq_ops", "hq_fulfillment"].includes(profile.role);
   if (!isHqRequisitionRole && profile.role !== "location_manager") {
     return (
       <div className="flex flex-col items-center justify-center py-24 px-8 text-center space-y-5">

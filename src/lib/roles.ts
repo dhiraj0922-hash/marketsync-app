@@ -128,8 +128,10 @@ export function canAccessPath(user: { role?: string | null } | null | undefined,
   if (isHqFulfillment(user)) {
     return [
       "/requisitions/fulfillment",
+      "/requisitions",
       "/inventory/count",
       "/hq-sale-items/count",
+      "/deliveries/tickets",
     ].some(allowed => path === allowed || path.startsWith(`${allowed}/`));
   }
   if (isDriver(user)) return path === "/deliveries";

@@ -4515,10 +4515,14 @@ export async function createDeliveryTicketFromRequisition(requisitionId: string)
     .single();
   if (ticketError || !ticket) return { success: false, error: ticketError };
 
+  const hasAllocations = reqItems.some((i: any) => (i.allocatedQty ?? 0) > 0 || (i.quantityFulfilled ?? 0) > 0);
+
   const itemRows = reqItems.map((item: any) => {
     const requestedQty = Number(item.quantityRequested ?? 0);
-    const approvedQty = Number(item.quantityApproved ?? item.quantityFulfilled ?? requestedQty);
-    const shippedQty = approvedQty || requestedQty;
+    const approvedQty = hasAllocations
+      ? (item.quantityFulfilled != null ? Number(item.quantityFulfilled) : Number(item.allocatedQty ?? 0))
+      : Number(item.quantityApproved ?? item.quantityFulfilled ?? requestedQty);
+    const shippedQty = approvedQty;
     return {
       delivery_ticket_id: ticket.id,
       requisition_item_id: item.id,
@@ -5582,10 +5586,10 @@ export async function updateRequisitionItemFulfilled(
     const destLocationId: string = requisition.location_id;
     console.log(`[Fulfillment] Step 3 OK: destLocationId=${destLocationId}`);
 
-    // ── 4. Fetch HQ inventory row ─────────────────────────────────────────────
+    // ── 4. Fetch HQ inventory row for cost and metadata ────────────────────────
     const { data: hqRows, error: hqFetchError } = await supabase
       .from("inventory_items")
-      .select("id, instock, avg_cost, name, category, itemtype, baseunit, unit, parlevel, cost, supplierid, pricetrend, priceincrease, purchaseunits")
+      .select("id, cost, name")
       .eq("item_id", sharedItemId)
       .eq("location_id", HQ_LOCATION_ID);
 
@@ -5601,88 +5605,22 @@ export async function updateRequisitionItemFulfilled(
       return { success: false, error: { message: `HQ has no inventory row for this product (item_id=${sharedItemId}). Add the product to HQ inventory first.` } };
     }
 
-    const hqRow = hqRows[0];  // use first if somehow duplicated
-    const hqStockBefore = Number(hqRow.instock ?? 0);
-    console.log(`[Fulfillment] Step 4 OK: HQ row id=${hqRow.id} instock=${hqStockBefore} delta=${delta}`);
+    const hqRow = hqRows[0];
 
-    // ── 4b. Validate HQ stock ─────────────────────────────────────────────────
-    if (hqStockBefore < delta) {
-      console.warn(`[Fulfillment] ✗ Step 4b: Insufficient HQ stock. available=${hqStockBefore} needed=${delta}`);
-      return {
-        success: false,
-        error: { message: `Insufficient HQ stock. Available: ${hqStockBefore}, needed: ${delta}.` },
-      };
+    // ── 5. Call PostgreSQL transfer RPC (updates HQ and dest stock safely) ──
+    const { error: transferError } = await supabase.rpc("transfer_inventory_stock_definer", {
+      p_shared_item_id: sharedItemId,
+      p_from_location_id: HQ_LOCATION_ID,
+      p_to_location_id: destLocationId,
+      p_qty: delta
+    });
+
+    if (transferError) {
+      console.error("[Fulfillment] ✗ Step 5: Stock transfer RPC failed", transferError);
+      return { success: false, error: transferError };
     }
 
-    // ── 5. Check destination row exists BEFORE deducting HQ ──────────────────
-    const { data: destRows, error: destFetchError } = await supabase
-      .from("inventory_items")
-      .select("id, instock")
-      .eq("item_id", sharedItemId)
-      .eq("location_id", destLocationId);
-
-    console.log(`[Fulfillment] Step 5 dest lookup: loc=${destLocationId} → rows=${destRows?.length ?? 0} error=`, destFetchError);
-
-    const destRow     = destRows?.[0] ?? null;
-    const destExists  = !!destRow;
-    const destStockBefore = destExists ? Number(destRow.instock ?? 0) : 0;
-    const hqStockAfter    = hqStockBefore - delta;
-    const destStockAfter  = destStockBefore + delta;
-
-    // ── 6. Deduct from HQ ─────────────────────────────────────────────────────
-    const { error: hqDeductError } = await supabase
-      .from("inventory_items")
-      .update({ instock: hqStockAfter })   // no updated_at — DB trigger handles it
-      .eq("id", hqRow.id)
-      .eq("location_id", HQ_LOCATION_ID);
-
-    if (hqDeductError) {
-      console.error("[Fulfillment] ✗ Step 6: HQ deduction failed", hqDeductError);
-      return { success: false, error: hqDeductError };
-    }
-    console.log(`[Fulfillment] Step 6 OK: HQ instock ${hqStockBefore} → ${hqStockAfter}`);
-
-    // ── 7. Add stock to destination (update or insert) ────────────────────────
-    if (destExists) {
-      const { error: destUpdateError } = await supabase
-        .from("inventory_items")
-        .update({ instock: destStockAfter })   // no updated_at — DB trigger handles it
-        .eq("id", destRow.id)
-        .eq("location_id", destLocationId);
-
-      if (destUpdateError) {
-        console.error("[Fulfillment] ✗ Step 7: dest stock update failed", destUpdateError);
-        return { success: false, error: destUpdateError };
-      }
-      console.log(`[Fulfillment] Step 7 OK: dest instock ${destStockBefore} → ${destStockAfter}`);
-    } else {
-      // Destination has no row yet — insert one using HQ row as template
-      const { error: insertError } = await supabase
-        .from("inventory_items")
-        .insert({
-          id:            crypto.randomUUID(),
-          item_id:       sharedItemId,
-          location_id:   destLocationId,
-          instock:       destStockAfter,
-          name:          hqRow.name,
-          category:      hqRow.category,
-          itemtype:      hqRow.itemtype,
-          baseunit:      hqRow.baseunit,
-          unit:          hqRow.unit,
-          parlevel:      hqRow.parlevel,
-          cost:          hqRow.cost,
-          supplierid:    hqRow.supplierid,
-          pricetrend:    hqRow.pricetrend,
-          priceincrease: hqRow.priceincrease,
-          purchaseunits: hqRow.purchaseunits,
-        });
-
-      if (insertError) {
-        console.error("[Fulfillment] ✗ Step 7: dest insert failed", insertError);
-        return { success: false, error: insertError };
-      }
-      console.log(`[Fulfillment] Step 7 OK: inserted new dest row instock=${destStockAfter}`);
-    }
+    console.log(`[Fulfillment] Step 5 OK: Stock transfer completed. item_id=${sharedItemId} qty=${delta}`);
 
     // ── 7b. Write inventory_movements ledger (fire-and-forget) ────────────────
     // Uses real schema: bigint id (identity), location_id TEXT, item_id TEXT.
@@ -7572,15 +7510,21 @@ export async function getFulfillmentSummary(): Promise<any[]> {
   const { data: reqs, error: reqsError } = await supabase
     .from('requisitions')
     .select('id, location, status, date, location_id')
-    .in('status', ['submitted', 'approved', 'partial', 'backordered']);
+    .in('status', ['submitted', 'approved', 'partial', 'backordered', 'fulfilled']);
     
   if (reqsError || !reqs || reqs.length === 0) return [];
   
   const reqIds = reqs.map(r => r.id);
-  const { data: items, error: itemsError } = await supabase
-    .from('requisition_items')
-    .select('*')
-    .in('requisition_id', reqIds);
+  const [{ data: items, error: itemsError }, { data: tickets, error: ticketsError }] = await Promise.all([
+    supabase
+      .from('requisition_items')
+      .select('*')
+      .in('requisition_id', reqIds),
+    supabase
+      .from('delivery_tickets')
+      .select('id, ticket_number, requisition_id')
+      .in('requisition_id', reqIds)
+  ]);
     
   if (itemsError || !items) return [];
   
@@ -7606,6 +7550,7 @@ export async function getFulfillmentSummary(): Promise<any[]> {
     const group = summaryMap.get(key);
     
     const req = reqs.find(r => r.id === item.requisitionId);
+    const ticket = tickets?.find(t => t.requisition_id === item.requisitionId);
     
     group.totalRequested += item.quantityRequested;
     group.totalAllocated += item.allocatedQty || 0;
@@ -7623,6 +7568,8 @@ export async function getFulfillmentSummary(): Promise<any[]> {
       allocatedQty: item.allocatedQty || 0,
       backorderQty: item.backorderQty || 0,
       fulfillmentNote: item.fulfillmentNote || '',
+      deliveryTicketId: ticket?.id || null,
+      deliveryTicketNumber: ticket?.ticket_number || null,
     });
   }
   
@@ -7660,6 +7607,41 @@ export async function saveFulfillmentAllocations(allocations: {
     return { success: false, error };
   }
   return { success: true };
+}
+
+export async function completeFulfillmentMovement(requisitionId: string): Promise<{ success: boolean; error?: any }> {
+  // 1. Fetch all items in requisition_items for this requisitionId
+  const { data: items, error: fetchError } = await supabase
+    .from('requisition_items')
+    .select('id, allocated_qty, quantity_fulfilled')
+    .eq('requisition_id', requisitionId);
+
+  if (fetchError || !items) {
+    return { success: false, error: fetchError || { message: 'Requisition items not found.' } };
+  }
+
+  // 2. Loop through each item and call updateRequisitionItemFulfilled sequentially
+  for (const item of items) {
+    const allocated = Number(item.allocated_qty ?? 0);
+    const res = await updateRequisitionItemFulfilled(item.id, allocated, requisitionId);
+    if (!res.success) {
+      console.error(`[Fulfillment] completeFulfillmentMovement failed on item ${item.id}:`, res.error);
+      return { success: false, error: res.error };
+    }
+  }
+
+  // 3. Update parent requisition status to 'fulfilled'
+  const resStatus = await updateRequisitionStatus(requisitionId, 'fulfilled');
+  if (!resStatus.success) {
+    console.error(`[Fulfillment] completeFulfillmentMovement failed updating status:`, resStatus.error);
+    return { success: false, error: resStatus.error };
+  }
+
+  return { success: true };
+}
+
+export async function assignDeliveryTicketToRun(ticketId: string, runId: string): Promise<{ success: boolean; error?: any }> {
+  return addTicketsToDeliveryRun(runId, [ticketId]);
 }
 
 export async function getInventoryItemsForCount(): Promise<any[]> {

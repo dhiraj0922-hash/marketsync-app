@@ -87,9 +87,11 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
     ? [{ name: "My Routes", href: "/deliveries", icon: Truck }]
     : hqFulfillmentMode
       ? [
-          { name: "Fulfillment List", href: "/requisitions/fulfillment", icon: Inbox },
-          { name: "Inventory Count",   href: "/inventory/count",         icon: ClipboardList },
+          { name: "Fulfillment List", href: "/requisitions/fulfillment", icon: ClipboardList },
+          { name: "Requisitions",      href: "/requisitions",             icon: Inbox },
+          { name: "Inventory Count",   href: "/inventory/count",         icon: Package },
           { name: "Finished Goods Count", href: "/hq-sale-items/count",    icon: ClipboardCheck },
+          { name: "Dispatch Tickets",  href: "/deliveries/tickets",       icon: Truck },
         ]
       : navigation.filter((item) => canAccessPath(user, item.href));
 
