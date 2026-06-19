@@ -18,7 +18,7 @@ import { supabase } from "@/lib/supabase";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-export type UserRole = "hq_master" | "hq_ops" | "location_manager" | "driver" | "hq_admin";
+export type UserRole = "hq_master" | "hq_ops" | "location_manager" | "driver" | "hq_admin" | "hq_fulfillment";
 
 export interface UserProfile {
   /** user_profiles.id — UUID row identifier */
@@ -151,7 +151,7 @@ export async function isLocationManager(): Promise<boolean> {
 export async function canAccessLocation(targetLocationId: string): Promise<boolean> {
   const profile = await getCurrentUserProfile();
   if (!profile) return false;
-  if (profile.role === "hq_master" || profile.role === "hq_admin" || profile.role === "hq_ops") return true;
+  if (profile.role === "hq_master" || profile.role === "hq_admin" || profile.role === "hq_ops" || profile.role === "hq_fulfillment") return true;
   return profile.locationId === targetLocationId;
 }
 

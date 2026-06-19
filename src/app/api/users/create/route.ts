@@ -45,7 +45,7 @@ export async function POST(req: NextRequest) {
       { status: 400 }
     );
   }
-  if (!["hq_master", "hq_ops", "location_manager", "driver", "hq_admin"].includes(role)) {
+  if (!["hq_master", "hq_ops", "location_manager", "driver", "hq_admin", "hq_fulfillment"].includes(role)) {
     return NextResponse.json({ error: `Invalid role: ${role}` }, { status: 400 });
   }
   if (role === "location_manager" && !location_id) {

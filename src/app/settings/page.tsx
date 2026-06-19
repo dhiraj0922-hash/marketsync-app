@@ -31,11 +31,12 @@ import { isHqMaster } from "@/lib/roles";
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 type Tab = "system" | "users";
-const ROLE_OPTIONS = ["hq_master", "hq_ops", "location_manager", "driver"] as const;
+const ROLE_OPTIONS = ["hq_master", "hq_ops", "hq_fulfillment", "location_manager", "driver"] as const;
 
 const ROLE_LABELS: Record<string, string> = {
   hq_master:        "HQ Master",
   hq_ops:           "HQ Operations",
+  hq_fulfillment:   "List Guy / HQ Fulfillment",
   hq_admin:         "HQ Master (Legacy)",
   location_manager: "Location Manager",
   driver:           "Driver",
@@ -700,7 +701,7 @@ function SettingsPageContent() {
                 <label className="text-xs font-semibold text-neutral-700 uppercase tracking-wider">Role *</label>
                 <select
                   value={form.role}
-                  onChange={e => { setField("role", e.target.value); if (e.target.value === "hq_master" || e.target.value === "hq_ops" || e.target.value === "driver") setField("locationId", ""); }}
+                  onChange={e => { setField("role", e.target.value); if (e.target.value === "hq_master" || e.target.value === "hq_ops" || e.target.value === "hq_fulfillment" || e.target.value === "driver") setField("locationId", ""); }}
                   className="w-full text-sm border border-neutral-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white"
                 >
                   {ROLE_OPTIONS.map(r => (
