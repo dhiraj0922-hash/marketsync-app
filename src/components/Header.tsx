@@ -198,11 +198,24 @@ export function Header({ onMenuToggle }: { onMenuToggle?: () => void }) {
               </div>
               <button
                 onClick={signOut}
-                className="w-full px-4 py-2 text-left text-sm text-danger-600 font-medium hover:bg-danger-50 transition-colors flex items-center gap-2"
+                className="w-full px-4 py-2 text-left text-sm text-slate-900 font-medium hover:bg-slate-100 hover:text-slate-950 transition-colors flex items-center gap-2 stockiq-user-dropdown-btn"
               >
-                <LogOut className="h-4 w-4" />
+                <LogOut className="h-4 w-4 text-slate-700" />
                 Eject Session
               </button>
+              <style>{`
+                body header[class*="bg-white"] .stockiq-user-dropdown-btn {
+                  color: #0f172a !important; /* text-slate-900 */
+                  background-color: transparent !important;
+                }
+                body header[class*="bg-white"] .stockiq-user-dropdown-btn:hover {
+                  color: #020617 !important; /* text-slate-950 */
+                  background-color: #f1f5f9 !important; /* hover:bg-slate-100 */
+                }
+                body header[class*="bg-white"] .stockiq-user-dropdown-btn svg {
+                  color: #334155 !important; /* text-slate-700 */
+                }
+              `}</style>
             </div>
           )}
         </div>
