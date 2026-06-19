@@ -4150,6 +4150,11 @@ function mapReqItemRow(row: any) {
     hqAvailableStock:  isFGMode && row.hq_sale_items?.instock != null
                          ? Number(row.hq_sale_items.instock)
                          : null,
+    allocatedQty:      row.allocated_qty != null ? Number(row.allocated_qty) : 0,
+    backorderQty:      row.backorder_qty != null ? Number(row.backorder_qty) : 0,
+    fulfillmentNote:   row.fulfillment_note ?? '',
+    fulfilledBy:       row.fulfilled_by ?? null,
+    fulfilledAt:       row.fulfilled_at ?? null,
   };
 }
 
@@ -7559,6 +7564,120 @@ export async function saveGratuitySettings(
     return { success: false, error: error.message };
   }
   return { success: true };
+}
+
+// ─── HQ Fulfillment Role Data Helpers ──────────────────────────────────────────
+
+export async function getFulfillmentSummary(): Promise<any[]> {
+  const { data: reqs, error: reqsError } = await supabase
+    .from('requisitions')
+    .select('id, location, status, date, location_id')
+    .in('status', ['submitted', 'approved', 'partial', 'backordered']);
+    
+  if (reqsError || !reqs || reqs.length === 0) return [];
+  
+  const reqIds = reqs.map(r => r.id);
+  const { data: items, error: itemsError } = await supabase
+    .from('requisition_items')
+    .select('*')
+    .in('requisition_id', reqIds);
+    
+  if (itemsError || !items) return [];
+  
+  const mappedItems = items.map(mapReqItemRow);
+  
+  const summaryMap = new Map<string, any>();
+  
+  for (const item of mappedItems) {
+    const key = item.itemName || 'Unnamed Item';
+    if (!summaryMap.has(key)) {
+      summaryMap.set(key, {
+        itemName: key,
+        finishedGoodId: item.finishedGoodId,
+        itemId: item.itemId,
+        catalogItemId: item.finishedGoodId || item.itemId,
+        unit: item.unit,
+        totalRequested: 0,
+        totalAllocated: 0,
+        totalBackorder: 0,
+        items: []
+      });
+    }
+    const group = summaryMap.get(key);
+    
+    const req = reqs.find(r => r.id === item.requisitionId);
+    
+    group.totalRequested += item.quantityRequested;
+    group.totalAllocated += item.allocatedQty || 0;
+    group.totalBackorder += item.backorderQty || 0;
+    
+    group.items.push({
+      id: item.id,
+      requisitionId: item.requisitionId,
+      requisitionNumber: req?.id || item.requisitionId,
+      requisitionDate: req?.date,
+      requisitionStatus: req?.status,
+      locationName: req?.location || 'Unknown Location',
+      locationId: req?.location_id,
+      quantityRequested: item.quantityRequested,
+      allocatedQty: item.allocatedQty || 0,
+      backorderQty: item.backorderQty || 0,
+      fulfillmentNote: item.fulfillmentNote || '',
+    });
+  }
+  
+  return Array.from(summaryMap.values());
+}
+
+export async function getFulfillmentItemBreakdown(itemName: string): Promise<any[]> {
+  const summary = await getFulfillmentSummary();
+  const group = summary.find(g => g.itemName === itemName);
+  return group ? group.items : [];
+}
+
+export async function saveFulfillmentAllocations(allocations: {
+  id: string;
+  allocatedQty: number;
+  backorderQty: number;
+  fulfillmentNote: string;
+  userId: string;
+}[]): Promise<{ success: boolean; error?: any }> {
+  const updates = allocations.map(a => ({
+    id: a.id,
+    allocated_qty: a.allocatedQty,
+    backorder_qty: a.backorderQty,
+    fulfillment_note: a.fulfillmentNote,
+    fulfilled_by: a.userId,
+    fulfilled_at: new Date().toISOString(),
+  }));
+  
+  const { error } = await supabase
+    .from('requisition_items')
+    .upsert(updates, { onConflict: 'id' });
+    
+  if (error) {
+    console.error('saveFulfillmentAllocations:', error);
+    return { success: false, error };
+  }
+  return { success: true };
+}
+
+export async function getInventoryItemsForCount(): Promise<any[]> {
+  const items = await loadInventory();
+  return items.filter((inv: any) => inv.locationId === 'LOC-HQ');
+}
+
+export async function saveInventoryCount(data: any[]): Promise<{ success: boolean; error?: any }> {
+  return saveCounts(data);
+}
+
+export async function getFinishedGoodsForCount(): Promise<any[]> {
+  const items = await loadSaleItems();
+  return items.filter((i: any) => i.isActive);
+}
+
+export async function saveFinishedGoodsCount(session: any, lines: any[]): Promise<{ success: boolean; error?: any }> {
+  return upsertFgCountSessionWithLines({ session, lines });
 }
 
 export * from './menuCostingStorage';

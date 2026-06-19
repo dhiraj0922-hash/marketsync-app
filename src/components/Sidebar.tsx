@@ -36,7 +36,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/components/AuthProvider";
-import { canAccessPath, isDriver, isHqMaster, isHqOps, isLocationManager } from "@/lib/roles";
+import { canAccessPath, isDriver, isHqMaster, isHqOps, isLocationManager, isHqFulfillment } from "@/lib/roles";
 
 interface NavItem {
   name: string;
@@ -82,9 +82,16 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
 
   const isHQAdmin = isHqMaster(user);
   const driverMode = isDriver(user);
+  const hqFulfillmentMode = isHqFulfillment(user);
   const visibleNav = driverMode
     ? [{ name: "My Routes", href: "/deliveries", icon: Truck }]
-    : navigation.filter((item) => canAccessPath(user, item.href));
+    : hqFulfillmentMode
+      ? [
+          { name: "Fulfillment List", href: "/requisitions/fulfillment", icon: Inbox },
+          { name: "Inventory Count",   href: "/inventory/count",         icon: ClipboardList },
+          { name: "Finished Goods Count", href: "/hq-sale-items/count",    icon: ClipboardCheck },
+        ]
+      : navigation.filter((item) => canAccessPath(user, item.href));
 
   const initials = user?.name
     ? user.name.split(" ").map((w: string) => w[0]).join("").slice(0, 2).toUpperCase()
@@ -94,10 +101,12 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
     ? "HQ Master"
     : isHqOps(user)
       ? "HQ Operations"
+    : isHqFulfillment(user)
+      ? "HQ Fulfillment"
     : isLocationManager(user)
       ? "Location Manager"
-      : driverMode
-        ? "Driver"
+    : driverMode
+      ? "Driver"
       : "Staff";
 
   const NavContent = (

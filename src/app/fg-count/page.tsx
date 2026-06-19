@@ -129,7 +129,7 @@ export default function FgCountPage() {
 
 // ─── Main content ─────────────────────────────────────────────────────────────
 
-function FgCountContent() {
+export function FgCountContent() {
   const { user } = useAuth();
   const [rows,        setRows]        = useState<CountRow[]>([]);
   const [isLoading,   setIsLoading]   = useState(true);

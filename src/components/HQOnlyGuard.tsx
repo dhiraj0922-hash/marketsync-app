@@ -17,15 +17,16 @@
  */
 
 import { useAuth } from "@/components/AuthProvider";
-import { getAllowedHomePath, isHqMaster } from "@/lib/roles";
+import { getAllowedHomePath, isHqMaster, isHqFulfillment } from "@/lib/roles";
 import { ShieldOff, ArrowLeft, AlertTriangle } from "lucide-react";
 import Link from "next/link";
 
 interface HQOnlyGuardProps {
   children: React.ReactNode;
+  allowFulfillment?: boolean;
 }
 
-export function HQOnlyGuard({ children }: HQOnlyGuardProps) {
+export function HQOnlyGuard({ children, allowFulfillment = false }: HQOnlyGuardProps) {
   const { user, loading } = useAuth();
 
   // ── Still resolving session ────────────────────────────────────────────────
@@ -68,7 +69,7 @@ export function HQOnlyGuard({ children }: HQOnlyGuardProps) {
   }
 
   // ── Authorised ─────────────────────────────────────────────────────────────
-  if (isHqMaster(user)) {
+  if (isHqMaster(user) || (allowFulfillment && isHqFulfillment(user))) {
     return <>{children}</>;
   }
 

@@ -29,6 +29,8 @@ export const ROLE_HQ_OPS          = "hq_ops"          as const;
 export const ROLE_LOCATION_MANAGER = "location_manager" as const;
 /** Canonical DB value for delivery drivers stored in user_profiles.role */
 export const ROLE_DRIVER          = "driver"          as const;
+/** Canonical DB value for hq_fulfillment stored in user_profiles.role */
+export const ROLE_HQ_FULFILLMENT  = "hq_fulfillment"   as const;
 /** Virtual location id used for all HQ-level inventory rows */
 export const LOC_HQ               = "LOC-HQ"          as const;
 
@@ -46,7 +48,7 @@ export type AppUser = {
   profileError?:  boolean;
 };
 
-export type UserRole = typeof ROLE_HQ_MASTER | typeof ROLE_HQ_OPS | typeof ROLE_LOCATION_MANAGER | typeof ROLE_DRIVER | typeof ROLE_HQ_ADMIN;
+export type UserRole = typeof ROLE_HQ_MASTER | typeof ROLE_HQ_OPS | typeof ROLE_LOCATION_MANAGER | typeof ROLE_DRIVER | typeof ROLE_HQ_ADMIN | typeof ROLE_HQ_FULFILLMENT;
 
 export const normalizeRole = (role?: string | null): UserRole | null => {
   const r = String(role ?? "").toLowerCase().trim().replace(/\s+/g, "_");
@@ -55,6 +57,7 @@ export const normalizeRole = (role?: string | null): UserRole | null => {
   if (r === "hq_ops" || r === "hq_operations" || r === "hq_operations_staff") return ROLE_HQ_OPS;
   if (r === "location_manager") return ROLE_LOCATION_MANAGER;
   if (r === "driver" || r === "delivery_driver") return ROLE_DRIVER;
+  if (r === "hq_fulfillment" || r === "hq_fulfillment_staff") return ROLE_HQ_FULFILLMENT;
   return null;
 };
 
@@ -84,6 +87,10 @@ export function isDriver(user: { role?: string | null } | null | undefined): boo
   return normalizeRole(user?.role) === ROLE_DRIVER;
 }
 
+export function isHqFulfillment(user: { role?: string | null } | null | undefined): boolean {
+  return normalizeRole(user?.role) === ROLE_HQ_FULFILLMENT;
+}
+
 /**
  * Returns true for location-scoped users.
  */
@@ -107,6 +114,7 @@ export const canViewOwnerDashboard = (user: { role?: string | null } | null | un
 
 export function getAllowedHomePath(user: { role?: string | null } | null | undefined): string {
   if (isDriver(user)) return "/deliveries";
+  if (isHqFulfillment(user)) return "/requisitions/fulfillment";
   if (isHqOps(user)) return "/inventory";
   if (isHqMaster(user) || isLocationManager(user)) return "/";
   return "/login";
@@ -117,6 +125,13 @@ export function canAccessPath(user: { role?: string | null } | null | undefined,
   const path = pathname.split("?")[0];
   if (path === "/login") return true;
   if (isHqMaster(user)) return true;
+  if (isHqFulfillment(user)) {
+    return [
+      "/requisitions/fulfillment",
+      "/inventory/count",
+      "/hq-sale-items/count",
+    ].some(allowed => path === allowed || path.startsWith(`${allowed}/`));
+  }
   if (isDriver(user)) return path === "/deliveries";
   if (isHqOps(user)) {
     return [
@@ -161,7 +176,7 @@ export function canAccessPath(user: { role?: string | null } | null | undefined,
  */
 export function resolveLocationId(user: { role?: string | null; locationId?: string | null } | null | undefined): string {
   if (!user) return LOC_HQ;
-  if (isHqStaff(user)) return LOC_HQ;
+  if (isHqStaff(user) || isHqFulfillment(user)) return LOC_HQ;
   return user.locationId?.trim() || LOC_HQ; // fall through to LOC-HQ rather than empty string
 }
 

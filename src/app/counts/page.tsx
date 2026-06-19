@@ -8,7 +8,7 @@ import { Drawer } from "@/components/ui/drawer";
 import { Calendar, CheckCircle2, Clock, Smartphone, Play, Save, Send, ShieldCheck, FileEdit, Calculator, ArrowRight, X, Search, SlidersHorizontal } from "lucide-react";
 import { loadCounts, saveCounts, loadInventory, loadLocations, loadSuppliers, updateInventoryItemScoped } from "@/lib/storage";
 import { useAuth } from "@/components/AuthProvider";
-import { isHqAdmin, resolveLocationId } from "@/lib/roles";
+import { isHqAdmin, resolveLocationId, isHqFulfillment } from "@/lib/roles";
 
 import { isActiveLocation } from "@/lib/locationRegistry";
 
@@ -449,13 +449,15 @@ export default function Counts() {
                  </button>
                  
                  {activeCount?.status === "Submitted" ? (
-                    <button 
-                      className="px-4 py-2 text-sm font-medium bg-success-600 text-white rounded-lg hover:bg-success-700 transition-colors shadow-sm flex items-center gap-2"
-                      onClick={() => saveCountSession("Approved")}
-                      title="Overrides master inventory values with counted amounts."
-                    >
-                      <ShieldCheck className="h-4 w-4" /> Approve & Update Inventory
-                    </button>
+                    !isHqFulfillment(user) && (
+                      <button 
+                        className="px-4 py-2 text-sm font-medium bg-success-600 text-white rounded-lg hover:bg-success-700 transition-colors shadow-sm flex items-center gap-2"
+                        onClick={() => saveCountSession("Approved")}
+                        title="Overrides master inventory values with counted amounts."
+                      >
+                        <ShieldCheck className="h-4 w-4" /> Approve & Update Inventory
+                      </button>
+                    )
                  ) : (
                     <button 
                       className="px-4 py-2 text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors shadow-sm flex items-center gap-2"
