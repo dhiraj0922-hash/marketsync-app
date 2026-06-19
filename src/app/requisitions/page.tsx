@@ -131,6 +131,73 @@ const stockIqDarkShellCss = `
     border-color: #262626 !important;
     color: #e4e4e7 !important;
   }
+
+  @media print {
+    html, body,
+    body .flex.bg-neutral-50.text-neutral-900.min-h-screen,
+    div[class*="min-h-screen"],
+    div[class*="h-screen"],
+    div[class*="overflow-hidden"],
+    div[class*="overflow-y-auto"],
+    main,
+    main[class*="overflow-y-auto"],
+    .scroll-container,
+    .overflow-auto,
+    .overflow-y-auto {
+      height: auto !important;
+      min-height: 0 !important;
+      max-height: none !important;
+      overflow: visible !important;
+      position: relative !important;
+      background: #ffffff !important;
+      color: #000000 !important;
+    }
+
+    aside,
+    header,
+    nav,
+    .print\:hidden,
+    .print-hidden,
+    .no-print,
+    button,
+    input,
+    select,
+    [role="tablist"],
+    .bg-neutral-100.p-1.rounded-lg.border {
+      display: none !important;
+    }
+
+    .hq-production-print-area {
+      display: block !important;
+      width: 100% !important;
+      background: #ffffff !important;
+      color: #000000 !important;
+    }
+
+    .hq-production-print-area table,
+    .hq-production-print-area td,
+    .hq-production-print-area th,
+    .hq-production-print-area tr {
+      background: #ffffff !important;
+      color: #000000 !important;
+      border-color: #e5e7eb !important;
+    }
+
+    .hq-production-print-area span {
+      background: transparent !important;
+      color: #000000 !important;
+      border: none !important;
+    }
+
+    tr.hidden.print\:table-row {
+      display: table-row !important;
+    }
+
+    .print-row, tr, table {
+      break-inside: avoid !important;
+      page-break-inside: avoid !important;
+    }
+  }
 `;
 
 function DarkPageShell({ children }: { children: React.ReactNode }) {
@@ -2695,11 +2762,11 @@ function HQAdminView({
       )}
 
       {activeTab === "hq-production" && (
-        <div className="space-y-6">
-          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-neutral-100 pb-4 print:border-none print:pb-0">
+        <div className="space-y-6 hq-production-print-area">
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-neutral-100 pb-4 print:hidden">
             <div>
-              <h3 className="text-xl font-bold tracking-tight text-neutral-900 print:text-2xl">HQ Production Summary</h3>
-              <p className="text-neutral-500 text-sm print:hidden">Centralized preparation queue for selected date.</p>
+              <h3 className="text-xl font-bold tracking-tight text-neutral-900">HQ Production Summary</h3>
+              <p className="text-neutral-500 text-sm">Centralized preparation queue for selected date.</p>
             </div>
             <div className="flex flex-col sm:flex-row items-center gap-2 w-full sm:w-auto mt-4 sm:mt-0 print:hidden">
               <input type="date"
@@ -2740,7 +2807,14 @@ function HQAdminView({
           </div>
 
           <div className="print:block space-y-6">
-            <div className="hidden print:block text-sm text-neutral-500 mb-4 pb-2 border-b border-neutral-200">Date: {productionDate}</div>
+            {/* Print-only header */}
+            <div className="hidden print:block border-b-2 border-neutral-900 pb-4 mb-6">
+              <h1 className="text-3xl font-extrabold tracking-tight text-neutral-950">STOCK DHARMA</h1>
+              <h2 className="text-xl font-bold text-neutral-800 mt-1">HQ Production Summary</h2>
+              <div className="text-sm font-medium text-neutral-600 mt-2">
+                Date: {productionDate} &nbsp;|&nbsp; Supplier/Commissary: {activeCommissary}
+              </div>
+            </div>
 
             {/* ── Pending Production ─────────────────────────────────── */}
             <div>
