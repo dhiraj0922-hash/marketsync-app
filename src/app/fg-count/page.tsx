@@ -152,6 +152,10 @@ export function FgCountContent() {
   const [expandedSession, setExpandedSession] = useState<string | null>(null);
   const sessionIdRef = useRef(`FGC-${Date.now().toString(36).toUpperCase()}`);
   const suppressNextDateLoadRef = useRef(false);
+  // Monotonic counter: each load call captures its own ID and checks it after
+  // every await to detect stale responses when the date changes mid-flight.
+  const requestIdRef = useRef(0);
+  const [refreshVersion, setRefreshVersion] = useState(0);
   const countedByLabel = user?.name || user?.email || "Unknown user";
 
   const resolveHistoryRange = useCallback((preset = historyRangePreset) => {
@@ -185,75 +189,108 @@ export function FgCountContent() {
     if (nextSessionName !== undefined) setSessionName(nextSessionName ?? "");
   }, []);
 
-  const loadSessionForDate = useCallback(async (date: string) => {
-    if (!date) return;
-    setIsSessionLoading(true);
-    
-    // Fetch expected stocks dynamically as of countDate (exclude current session's adjustment if it was saved)
-    const expectedMap = await calculateExpectedStockForDate(date, activeSessionId);
-    
-    setRows(prev => prev.map(row => ({
-      ...row,
-      countInput: "",
-      saved: false,
-      saving: false,
-      error: null,
-      variance: null,
-      expectedStock: expectedMap[row.item.id] ?? 0,
-    })));
-    setSaved(0);
-    setActiveSessionId(null);
-    sessionIdRef.current = `FGC-${Date.now().toString(36).toUpperCase()}`;
-
-    try {
-      const savedSession = await loadFgCountSessionByDate(date);
-      if (savedSession) {
-        applySessionLines(savedSession.lines, savedSession.session.id, savedSession.session.session_name);
-      } else {
-        setSessionName("");
-      }
-    } finally {
-      setIsSessionLoading(false);
-    }
-  }, [applySessionLines, activeSessionId]);
-
-  // ── Load ───────────────────────────────────────────────────────────────────
+  // ── Load count sheet ───────────────────────────────────────────────────────
+  // Single stable loader — never depends on rows, isLoading, activeSessionId,
+  // or any other derived state. Triggered only by:
+  //   1. Initial mount (countDate, refreshVersion=0)
+  //   2. User changes the Count Date
+  //   3. User clicks Refresh (refreshVersion bumps)
+  // All other state changes (typing a count, editing session name, saving a row)
+  // are purely local and MUST NOT re-run this function.
   const [latestCounts, setLatestCounts] = useState<Record<string, { lastCountDate: string | null; latestVariance: number }>>({});
 
-  const load = useCallback(async () => {
+  const loadCountSheet = useCallback(async (date: string) => {
+    if (!date) return;
+
+    // Each call gets a unique monotonic ID. After every await we verify we are
+    // still the most-recent call; if not, we discard the stale result.
+    const myRequestId = ++requestIdRef.current;
+
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[FG Count] load started', { date, requestId: myRequestId });
+    }
+
     setIsLoading(true);
-    const [items, counts] = await Promise.all([
-      loadSaleItems(),
-      loadLatestFgCounts()
-    ]);
-    const active = items.filter(i => i.isActive);
-    const expectedMap = await calculateExpectedStockForDate(countDate, null);
-    setRows(blankRows(active, expectedMap));
-    setSaved(0);
-    setLatestCounts(counts || {});
-    sessionIdRef.current = `FGC-${Date.now().toString(36).toUpperCase()}`;
-    
+    setIsSessionLoading(false); // clear any previous session-only loading banner
+
     try {
-      const savedSession = await loadFgCountSessionByDate(countDate);
+      // Phase 1 — load items + latest-counts + expected stock in parallel
+      const [items, counts, expectedMap] = await Promise.all([
+        loadSaleItems(),
+        loadLatestFgCounts(),
+        calculateExpectedStockForDate(date, null),
+      ]);
+
+      // Stale check — date may have changed while the three fetches were running
+      if (myRequestId !== requestIdRef.current) {
+        if (process.env.NODE_ENV !== 'production') {
+          console.log('[FG Count] stale response ignored', { date, requestId: myRequestId });
+        }
+        return;
+      }
+
+      const active = items.filter(i => i.isActive);
+      setRows(blankRows(active, expectedMap));
+      setSaved(0);
+      setLatestCounts(counts || {});
+      setActiveSessionId(null);
+      setSessionName('');
+      sessionIdRef.current = `FGC-${Date.now().toString(36).toUpperCase()}`;
+
+      // Phase 2 — check for a saved session on this date
+      const savedSession = await loadFgCountSessionByDate(date);
+
+      // Stale check after the session fetch
+      if (myRequestId !== requestIdRef.current) {
+        if (process.env.NODE_ENV !== 'production') {
+          console.log('[FG Count] stale response ignored (session)', { date, requestId: myRequestId });
+        }
+        return;
+      }
+
       if (savedSession) {
-        applySessionLines(savedSession.lines, savedSession.session.id, savedSession.session.session_name);
+        applySessionLines(
+          savedSession.lines,
+          savedSession.session.id,
+          savedSession.session.session_name,
+        );
+      }
+
+      if (process.env.NODE_ENV !== 'production') {
+        console.log('[FG Count] load completed', { date, requestId: myRequestId, rowCount: active.length });
       }
     } catch (err) {
-      console.error(err);
+      console.error('[FG Count] load error', err);
     } finally {
-      setIsLoading(false);
+      // Only clear the loading flag if this is still the latest request.
+      // A newer request will clear it when it finishes.
+      if (myRequestId === requestIdRef.current) {
+        setIsLoading(false);
+      }
     }
-  }, [countDate, applySessionLines]);
+  // applySessionLines has [] deps and is always stable.
+  // Do NOT add rows, isLoading, activeSessionId, or any derived state here.
+  }, [applySessionLines]);
 
-  useEffect(() => { load(); }, [load]);
+  // ── Single loading effect ──────────────────────────────────────────────────
+  // Fires only when the count date changes or the user explicitly refreshes.
+  // `loadCountSheet` is stable (useCallback with stable deps), so adding it
+  // here does NOT create a loop.
   useEffect(() => {
-    if (isLoading || rows.length === 0) return;
+    // History-session restore: loadHistorySession sets this flag before changing
+    // countDate so we apply the pre-loaded lines instead of doing a full reload.
     if (suppressNextDateLoadRef.current) {
       suppressNextDateLoadRef.current = false;
+      if (process.env.NODE_ENV !== 'production') {
+        console.log('[FG Count] load suppressed (history session restore)');
+      }
       return;
     }
-    loadSessionForDate(countDate);
-  }, [countDate, isLoading, rows.length, loadSessionForDate]);
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[FG Count] date changed', { date: countDate, version: refreshVersion });
+    }
+    void loadCountSheet(countDate);
+  }, [countDate, refreshVersion, loadCountSheet]);
 
   // ── Derived ────────────────────────────────────────────────────────────────
   const categories = ["All", ...Array.from(new Set(rows.map(r => r.item.category ?? "Uncategorised"))).sort()];
@@ -350,16 +387,10 @@ export function FgCountContent() {
   };
 
   const handleCountDateChange = (date: string) => {
+    // Setting countDate is enough — the single loading useEffect will fire and
+    // call loadCountSheet which resets rows, sessionId, and loads the new date.
+    // Do NOT manually reset rows here; that would cause a double state flush.
     setCountDate(date);
-    setRows(prev => prev.map(row => ({
-      ...row,
-      countInput: "",
-      saved: false,
-      saving: false,
-      error: null,
-      variance: null,
-    })));
-    setSaved(0);
   };
 
   // ── Save single row ────────────────────────────────────────────────────────
@@ -523,7 +554,12 @@ export function FgCountContent() {
             <History className="h-4 w-4" /> FG Count History
           </button>
           <button
-            onClick={load}
+            onClick={() => {
+              if (process.env.NODE_ENV !== 'production') {
+                console.log('[FG Count] manual refresh triggered');
+              }
+              setRefreshVersion(v => v + 1);
+            }}
             className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition-colors hover:bg-slate-50"
           >
             <RefreshCw className="h-4 w-4" /> Refresh
