@@ -2458,7 +2458,7 @@ export async function saveRequisitions(data: any[]) {
 
   // For any requisition that is now fulfilled, trigger backorders
   for (const req of cleanData) {
-    if (req.status && req.status.toLowerCase() === 'fulfilled') {
+    if (req.status && (req.status.toLowerCase() === 'fulfilled' || req.status.toLowerCase() === 'partially_fulfilled')) {
       await createBackordersFromRequisition(req.id);
     }
   }
@@ -2485,7 +2485,7 @@ export async function updateRequisitionStatus(
     return { success: false, error };
   }
 
-  if (cleanStatus === 'fulfilled') {
+  if (cleanStatus === 'fulfilled' || cleanStatus === 'partially_fulfilled') {
     await createBackordersFromRequisition(id);
   }
 
@@ -4267,7 +4267,7 @@ export async function loadRequisitionItems(
   // PostgREST: include both FK joins; each returns null when the FK is null.
   const { data, error } = await supabase
     .from("requisition_items")
-    .select("*, inventory_items(name), hq_sale_items(name, base_unit, instock)")
+    .select("*, inventory_items(name, item_id), hq_sale_items(name, base_unit, instock)")
     .eq("requisition_id", requisitionId)
     .order("created_at", { ascending: true });
 
@@ -4276,23 +4276,60 @@ export async function loadRequisitionItems(
     console.warn("loadRequisitionItems: join failed, retrying without hq_sale_items join", error.message);
     const { data: fallbackData, error: fallbackError } = await supabase
       .from("requisition_items")
-      .select("*, inventory_items(name), hq_sale_items(name, base_unit, instock)")
+      .select("*, inventory_items(name, item_id), hq_sale_items(name, base_unit, instock)")
       .eq("requisition_id", requisitionId)
       .order("created_at", { ascending: true });
     if (fallbackError) { console.error("loadRequisitionItems fallback:", fallbackError); return { success: false, error: fallbackError }; }
+    
+    // Resolve HQ stock for raw items
+    const rawSharedItemIds = (fallbackData || [])
+      .filter((row: any) => !row.finished_good_id && row.inventory_items?.item_id)
+      .map((row: any) => row.inventory_items.item_id);
+    let hqStockMap: Record<string, number> = {};
+    if (rawSharedItemIds.length > 0) {
+      const { data: hqItems } = await supabase
+        .from("inventory_items")
+        .select("item_id, instock")
+        .eq("location_id", "LOC-HQ")
+        .in("item_id", rawSharedItemIds);
+      if (hqItems) {
+        hqItems.forEach((hq: any) => {
+          if (hq.item_id) hqStockMap[hq.item_id] = Number(hq.instock ?? 0);
+        });
+      }
+    }
+
     return {
       success: true,
-      data: (fallbackData || []).map((row: any) => mapReqItemRow(row)),
+      data: (fallbackData || []).map((row: any) => mapReqItemRow(row, hqStockMap)),
     };
+  }
+
+  // Resolve HQ stock for raw items
+  const rawSharedItemIds = (data || [])
+    .filter((row: any) => !row.finished_good_id && row.inventory_items?.item_id)
+    .map((row: any) => row.inventory_items.item_id);
+  let hqStockMap: Record<string, number> = {};
+  if (rawSharedItemIds.length > 0) {
+    const { data: hqItems } = await supabase
+      .from("inventory_items")
+      .select("item_id, instock")
+      .eq("location_id", "LOC-HQ")
+      .in("item_id", rawSharedItemIds);
+    if (hqItems) {
+      hqItems.forEach((hq: any) => {
+        if (hq.item_id) hqStockMap[hq.item_id] = Number(hq.instock ?? 0);
+      });
+    }
   }
 
   return {
     success: true,
-    data: (data || []).map((row: any) => mapReqItemRow(row)),
+    data: (data || []).map((row: any) => mapReqItemRow(row, hqStockMap)),
   };
 }
 
-function mapReqItemRow(row: any) {
+function mapReqItemRow(row: any, hqStockMap?: Record<string, number>) {
   const isFGMode = !!row.finished_good_id;
   // Name resolution priority:
   //   1. item_name_snapshot (captured at order time — survives future renames)
@@ -4309,6 +4346,16 @@ function mapReqItemRow(row: any) {
   const packQtySnapshot = row.pack_qty_snapshot != null ? Number(row.pack_qty_snapshot) : (isFGMode ? (row.hq_sale_items?.pack_qty != null ? Number(row.hq_sale_items.pack_qty) : 1) : 1);
   const packPriceSnapshot = isFGMode && row.unit_price != null ? Number(row.unit_price) : null;
   const quantityRequested = Number(row.quantity_requested);
+
+  let hqAvailableStock = null;
+  if (isFGMode) {
+    hqAvailableStock = row.hq_sale_items?.instock != null ? Number(row.hq_sale_items.instock) : null;
+  } else {
+    const sharedId = row.inventory_items?.item_id;
+    if (sharedId && hqStockMap && hqStockMap[sharedId] !== undefined) {
+      hqAvailableStock = hqStockMap[sharedId];
+    }
+  }
 
   return {
     id:                row.id,
@@ -4327,16 +4374,16 @@ function mapReqItemRow(row: any) {
     quantityFulfilled: row.quantity_fulfilled != null ? Number(row.quantity_fulfilled) : null,
     unitPrice:         row.unit_price  != null ? Number(row.unit_price)  : null,
     lineTotal:         row.line_total  != null ? Number(row.line_total)  : null,
-    // HQ available stock — only populated for FG-mode lines via hq_sale_items join.
-    // null for raw inventory lines (shown as '—' in UI).
-    hqAvailableStock:  isFGMode && row.hq_sale_items?.instock != null
-                         ? Number(row.hq_sale_items.instock)
-                         : null,
+    hqAvailableStock,
     allocatedQty:      row.allocated_qty != null ? Number(row.allocated_qty) : 0,
     backorderQty:      row.backorder_qty != null ? Number(row.backorder_qty) : 0,
     fulfillmentNote:   row.fulfillment_note ?? '',
     fulfilledBy:       row.fulfilled_by ?? null,
     fulfilledAt:       row.fulfilled_at ?? null,
+    availableQtyAtFinalization: row.available_qty_at_finalization != null ? Number(row.available_qty_at_finalization) : null,
+    fulfilledValue:    row.fulfilled_value != null ? Number(row.fulfilled_value) : null,
+    stockMovementReference: row.stock_movement_reference ?? null,
+    deliveryTicketReference: row.delivery_ticket_reference ?? null,
     // Helper fields
     packPriceSnapshot,
     packQtySnapshot,
@@ -4638,8 +4685,8 @@ export async function createDeliveryTicketFromRequisition(requisitionId: string)
   if (reqError || !req) return { success: false, error: reqError ?? { message: 'Requisition not found.' } };
 
   const reqStatus = String(req.status ?? '').toLowerCase();
-  if (!['approved', 'fulfilled'].includes(reqStatus)) {
-    return { success: false, error: { message: 'Delivery tickets can only be generated from approved or fulfilled requisitions.' } };
+  if (!['approved', 'fulfilled', 'partially_fulfilled'].includes(reqStatus)) {
+    return { success: false, error: { message: 'Delivery tickets can only be generated from approved, fulfilled, or partially fulfilled requisitions.' } };
   }
 
   const itemsRes = await loadRequisitionItems(requisitionId);
@@ -4706,7 +4753,7 @@ export async function createDeliveryTicketFromRequisition(requisitionId: string)
 
   const hasAllocations = reqItems.some((i: any) => (i.allocatedQty ?? 0) > 0 || (i.quantityFulfilled ?? 0) > 0);
 
-  const itemRows = reqItems.map((item: any) => {
+  const mappedLines = reqItems.map((item: any) => {
     const requestedQty = Number(item.quantityRequested ?? 0);
     const approvedQty = hasAllocations
       ? (item.quantityFulfilled != null ? Number(item.quantityFulfilled) : Number(item.allocatedQty ?? 0))
@@ -4726,6 +4773,13 @@ export async function createDeliveryTicketFromRequisition(requisitionId: string)
       issue_reason: null,
     };
   });
+
+  // Filter out any zero shipped lines (Rule 9)
+  const itemRows = mappedLines.filter(line => line.shipped_qty > 0);
+
+  if (itemRows.length === 0) {
+    return { success: false, error: { message: 'Cannot create a delivery ticket with 0 fulfilled quantities.' } };
+  }
 
   const { error: itemError } = await supabase.from('delivery_ticket_items').insert(itemRows);
   if (itemError) return { success: false, error: itemError };
@@ -5657,20 +5711,38 @@ export async function loadRequisitionItemsBatch(
       .in("requisition_id", requisitionIds)
       .order("created_at", { ascending: true });
 
-  let { data, error } = await run("*, inventory_items(name), hq_sale_items(name, base_unit, instock)");
+  let { data, error } = await run("*, inventory_items(name, item_id), hq_sale_items(name, base_unit, instock)");
 
   if (error) {
     console.warn("[loadRequisitionItemsBatch] join failed, retrying without hq_sale_items", error.message);
-    ({ data, error } = await run("*, inventory_items(name)"));
+    ({ data, error } = await run("*, inventory_items(name, item_id)"));
     if (error) {
       console.error("[loadRequisitionItemsBatch] fallback failed", error);
       return new Map();
     }
   }
 
+  // Resolve HQ stock for raw items in this batch
+  const rawSharedItemIds = (data ?? [])
+    .filter((row: any) => !row.finished_good_id && row.inventory_items?.item_id)
+    .map((row: any) => row.inventory_items.item_id);
+  let hqStockMap: Record<string, number> = {};
+  if (rawSharedItemIds.length > 0) {
+    const { data: hqItems } = await supabase
+      .from("inventory_items")
+      .select("item_id, instock")
+      .eq("location_id", "LOC-HQ")
+      .in("item_id", rawSharedItemIds);
+    if (hqItems) {
+      hqItems.forEach((hq: any) => {
+        if (hq.item_id) hqStockMap[hq.item_id] = Number(hq.instock ?? 0);
+      });
+    }
+  }
+
   const result = new Map<string, any[]>();
   (data ?? []).forEach((row: any) => {
-    const mapped = mapReqItemRow(row);
+    const mapped = mapReqItemRow(row, hqStockMap);
     const list = result.get(row.requisition_id) ?? [];
     list.push(mapped);
     result.set(row.requisition_id, list);
@@ -5718,6 +5790,49 @@ export async function updateRequisitionItemFulfilled(
         return { success: false, error: stockRes.error };
       }
       console.log(`[Fulfillment] FG stock deducted by ${baseQtyDeduct} base units. new instock=${stockRes.newStock}`);
+
+      // Log movement for finished goods requisition fulfillment delta (fire-and-forget, Safeguard 1)
+      try {
+        const { data: hqItem } = await supabase
+          .from('hq_sale_items')
+          .select('making_cost')
+          .eq('id', currentRow.finished_good_id)
+          .maybeSingle();
+        const unitCost = hqItem?.making_cost ? Number(hqItem.making_cost) : 0;
+        
+        const { data: requisition } = await supabase
+          .from("requisitions")
+          .select("location_id")
+          .eq("id", requisitionId)
+          .maybeSingle();
+        const destLocationId = requisition?.location_id || 'Unknown';
+
+        if (baseQtyDeduct > 0) {
+          logMovement({
+            locationId:    "LOC-HQ",
+            itemId:        currentRow.finished_good_id,
+            movementType:  'transfer_out',
+            quantity:      baseQtyDeduct,
+            unitCost,
+            referenceType: 'requisition',
+            referenceId:   requisitionId,
+            notes:         `Requisition fulfillment (FG) → ${destLocationId}`,
+          });
+        } else {
+          logMovement({
+            locationId:    "LOC-HQ",
+            itemId:        currentRow.finished_good_id,
+            movementType:  'transfer_in',
+            quantity:      Math.abs(baseQtyDeduct),
+            unitCost,
+            referenceType: 'requisition',
+            referenceId:   requisitionId,
+            notes:         `Requisition fulfillment reduction (FG) from ${destLocationId}`,
+          });
+        }
+      } catch (movErr) {
+        console.error('[Fulfillment] Requisition FG movement logging failed (non-fatal):', movErr);
+      }
     }
 
     // Write fulfilled qty and recalculate status (shared Steps 8 & 9)
@@ -7719,7 +7834,7 @@ export async function getFulfillmentSummary(): Promise<any[]> {
     
   if (itemsError || !items) return [];
   
-  const mappedItems = items.map(mapReqItemRow);
+  const mappedItems = items.map(row => mapReqItemRow(row));
   
   const summaryMap = new Map<string, any>();
   
@@ -7860,6 +7975,366 @@ export async function getFinishedGoodsForCount(): Promise<any[]> {
 
 export async function saveFinishedGoodsCount(session: any, lines: any[]): Promise<{ success: boolean; error?: any }> {
   return upsertFgCountSessionWithLines({ session, lines });
+}
+
+// ── Role Authorization Helper (Safeguard 7) ──────────────────────────────────
+async function verifyHqRole(): Promise<void> {
+  const { data: authData } = await supabase.auth.getUser();
+  const user = authData?.user;
+  if (!user) throw new Error("No active auth session.");
+  
+  const { data: profile } = await supabase
+    .from('user_profiles')
+    .select('role')
+    .eq('user_id', user.id)
+    .single();
+    
+  const role = (profile?.role ?? '').toLowerCase().trim();
+  const isHq = role === 'hq_master' || role === 'hq_admin' || role === 'hq admin' || role === 'admin';
+  if (!isHq) throw new Error("Unauthorized: HQ role required.");
+}
+
+// ── Set stock target directly (Safeguard 3) ──────────────────────────────────
+export async function setSaleItemStockToTarget(
+  saleItemId: string,
+  targetStock: number
+): Promise<{ success: boolean; newStock?: number; error?: any }> {
+  try {
+    await verifyHqRole();
+  } catch (err: any) {
+    return { success: false, error: { message: err.message } };
+  }
+
+  const { error } = await supabase
+    .from('hq_sale_items')
+    .update({ instock: targetStock, updated_at: new Date().toISOString() })
+    .eq('id', saleItemId);
+    
+  if (error) {
+    console.error('[setSaleItemStockToTarget]', error);
+    return { success: false, error };
+  }
+  return { success: true, newStock: targetStock };
+}
+
+// ── Calculate Expected Stock from Movements as of Date (Safeguard 4) ────────
+export async function calculateExpectedStockForDate(
+  countDate: string,
+  excludeSessionId?: string | null
+): Promise<Record<string, number>> {
+  // Query all movements at LOC-HQ created on or before the countDate EOD
+  let query = supabase
+    .from('inventory_movements')
+    .select('item_id, movement_type, quantity, reference_id')
+    .eq('location_id', 'LOC-HQ')
+    .lte('created_at', `${countDate}T23:59:59.999Z`);
+    
+  const { data, error } = await query;
+  if (error) {
+    console.error('[calculateExpectedStockForDate] DB error:', error.message);
+    return {};
+  }
+  
+  const stocks: Record<string, number> = {};
+  for (const m of (data ?? [])) {
+    if (!m.item_id) continue;
+    
+    // Exclude current count session variance
+    if (excludeSessionId && m.reference_id === excludeSessionId) {
+      continue;
+    }
+    
+    const qty = Number(m.quantity ?? 0);
+    const type = m.movement_type;
+    
+    let sign = 0;
+    if (
+      type === 'production_in' ||
+      type === 'count_variance_gain' ||
+      type === 'purchase_in' ||
+      type === 'adjustment_in' ||
+      type === 'correction_in' ||
+      type === 'transfer_in' ||
+      type === 'opening_balance'
+    ) {
+      sign = 1;
+    } else if (
+      type === 'transfer_out' ||
+      type === 'count_variance_loss' ||
+      type === 'adjustment_out' ||
+      type === 'correction_out' ||
+      type === 'production_void_remove_finished_good'
+    ) {
+      sign = -1;
+    }
+    
+    if (sign !== 0) {
+      stocks[m.item_id] = (stocks[m.item_id] || 0) + (qty * sign);
+    }
+  }
+  return stocks;
+}
+
+// ── Load Latest count details (Last Count Date & Latest Variance) ─────────────
+export interface LatestCountDetail {
+  lastCountDate: string | null;
+  latestVariance: number;
+}
+
+export async function loadLatestFgCounts(): Promise<Record<string, LatestCountDetail>> {
+  const { data: sessions, error: sessionErr } = await supabase
+    .from('fg_count_sessions')
+    .select('id, count_date')
+    .order('count_date', { ascending: false });
+    
+  if (sessionErr || !sessions) {
+    console.error('[loadLatestFgCounts] session fetch error:', sessionErr?.message);
+    return {};
+  }
+  
+  const sessionIds = sessions.map(s => s.id);
+  if (sessionIds.length === 0) return {};
+  
+  const { data: lines, error: lineErr } = await supabase
+    .from('fg_count_lines')
+    .select('item_id, session_id, variance_qty')
+    .in('session_id', sessionIds);
+    
+  if (lineErr || !lines) {
+    console.error('[loadLatestFgCounts] line fetch error:', lineErr?.message);
+    return {};
+  }
+  
+  const results: Record<string, LatestCountDetail> = {};
+  for (const session of sessions) {
+    const sessionLines = lines.filter(l => l.session_id === session.id);
+    for (const line of sessionLines) {
+      if (!results[line.item_id]) {
+        results[line.item_id] = {
+          lastCountDate: session.count_date,
+          latestVariance: Number(line.variance_qty ?? 0)
+        };
+      }
+    }
+  }
+  return results;
+}
+
+// ── Load Today Production and Supplied Metrics ────────────────────────────────
+export interface TodayMovementMetrics {
+  producedToday: number;
+  suppliedToday: number;
+}
+
+export async function loadTodayMovementMetrics(): Promise<Record<string, TodayMovementMetrics>> {
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const todayISO = todayStart.toISOString();
+  
+  const { data, error } = await supabase
+    .from('inventory_movements')
+    .select('item_id, movement_type, quantity')
+    .eq('location_id', 'LOC-HQ')
+    .gte('created_at', todayISO);
+    
+  if (error) {
+    console.error('[loadTodayMovementMetrics] DB error:', error.message);
+    return {};
+  }
+  
+  const results: Record<string, TodayMovementMetrics> = {};
+  for (const m of (data ?? [])) {
+    if (!m.item_id) continue;
+    const qty = Number(m.quantity ?? 0);
+    const type = m.movement_type;
+    
+    if (!results[m.item_id]) {
+      results[m.item_id] = { producedToday: 0, suppliedToday: 0 };
+    }
+    
+    if (type === 'production_in') {
+      results[m.item_id].producedToday += qty;
+    } else if (type === 'transfer_out') {
+      results[m.item_id].suppliedToday += qty;
+    }
+  }
+  return results;
+}
+
+// ── Save count line atomically (with fallback, Safeguard 3 & 5) ─────────────
+export async function saveFgCountLineAtomic(params: {
+  sessionId: string;
+  countDate: string;
+  sessionName: string | null;
+  countedBy: string | null;
+  countedByName: string | null;
+  itemId: string;
+  itemName: string;
+  unit: string;
+  physicalQty: number;
+  unitCost: number;
+}): Promise<{ success: boolean; expectedStock?: number; variance?: number; error?: any }> {
+  try {
+    await verifyHqRole();
+  } catch (err: any) {
+    return { success: false, error: { message: err.message } };
+  }
+
+  // 1. Try PostgreSQL RPC
+  const { data, error: rpcErr } = await supabase.rpc('save_fg_count_line_atomic', {
+    p_session_id: params.sessionId,
+    p_count_date: params.countDate,
+    p_session_name: params.sessionName,
+    p_counted_by: params.countedBy,
+    p_counted_by_name: params.countedByName,
+    p_item_id: params.itemId,
+    p_item_name: params.itemName,
+    p_unit: params.unit,
+    p_physical_qty: params.physicalQty,
+    p_unit_cost: params.unitCost,
+  });
+
+  if (!rpcErr && data?.success) {
+    console.log('[saveFgCountLineAtomic] RPC success:', data);
+    return {
+      success: true,
+      expectedStock: Number(data.expected_stock),
+      variance: Number(data.variance),
+    };
+  }
+
+  if (rpcErr && rpcErr.code !== '42883') {
+    console.error('[saveFgCountLineAtomic] RPC error:', rpcErr);
+    return { success: false, error: rpcErr };
+  }
+
+  console.warn('[saveFgCountLineAtomic] RPC save_fg_count_line_atomic not found. Running client-side fallback transaction...');
+
+  // 2. Client-side sequential fallback transaction
+  try {
+    const now = new Date().toISOString();
+    const expectedStocks = await calculateExpectedStockForDate(params.countDate, params.sessionId);
+    const expectedStock = expectedStocks[params.itemId] ?? 0;
+    const variance = params.physicalQty - expectedStock;
+
+    // Upsert Session
+    const { error: sessionError } = await supabase
+      .from('fg_count_sessions')
+      .upsert({
+        id: params.sessionId,
+        count_date: params.countDate,
+        session_name: params.sessionName,
+        counted_by: params.countedBy,
+        counted_by_name: params.countedByName,
+        updated_at: now,
+      }, { onConflict: 'id' });
+
+    if (sessionError) throw sessionError;
+
+    // Upsert Line
+    const { error: lineError } = await supabase
+      .from('fg_count_lines')
+      .upsert({
+        id: `${params.sessionId}:${params.itemId}`,
+        session_id: params.sessionId,
+        item_id: params.itemId,
+        item_name: params.itemName,
+        unit: params.unit,
+        system_qty: expectedStock,
+        physical_qty: params.physicalQty,
+        variance_qty: variance,
+        unit_cost: params.unitCost,
+        variance_value: variance * params.unitCost,
+        updated_at: now,
+      }, { onConflict: 'session_id,item_id' });
+
+    if (lineError) throw lineError;
+
+    // Update stock target (overwrite)
+    const { error: stockError } = await supabase
+      .from('hq_sale_items')
+      .update({ instock: params.physicalQty, updated_at: now })
+      .eq('id', params.itemId);
+
+    if (stockError) throw stockError;
+
+    // Reconcile variance movement
+    const { error: deleteErr } = await supabase
+      .from('inventory_movements')
+      .delete()
+      .eq('location_id', 'LOC-HQ')
+      .eq('item_id', params.itemId)
+      .eq('reference_type', 'fg_count')
+      .eq('reference_id', params.sessionId);
+
+    if (deleteErr) throw deleteErr;
+
+    if (variance !== 0) {
+      const { error: insertErr } = await supabase
+        .from('inventory_movements')
+        .insert({
+          location_id: 'LOC-HQ',
+          item_id: params.itemId,
+          movement_type: variance > 0 ? 'count_variance_gain' : 'count_variance_loss',
+          quantity: Math.abs(variance),
+          unit_cost: params.unitCost > 0 ? params.unitCost : null,
+          total_cost: Math.abs(variance) * params.unitCost,
+          reference_type: 'fg_count',
+          reference_id: params.sessionId,
+          notes: JSON.stringify({
+            kind: "fg_count_session",
+            count_date: params.countDate,
+            session_name: params.sessionName,
+            item_name: params.itemName,
+            system_qty: expectedStock,
+            physical_qty: params.physicalQty,
+            variance_qty: variance,
+          }),
+        });
+
+      if (insertErr) throw insertErr;
+    }
+
+    return {
+      success: true,
+      expectedStock,
+      variance,
+    };
+  } catch (fallbackErr: any) {
+    console.error('[saveFgCountLineAtomic] Fallback transaction failed:', fallbackErr);
+    return { success: false, error: fallbackErr };
+  }
+}
+
+export async function finalizeRequisitionFulfillment(
+  requisitionId: string,
+  lines: Array<{ lineId: string; fulfilledQty: number; availableQty: number }>,
+  userId: string,
+  userName: string,
+  idempotencyKey: string
+): Promise<{ success: boolean; newStatus?: string; totalAmount?: number; error?: any }> {
+  const { data, error } = await supabase.rpc('finalize_requisition_fulfillment_v3', {
+    p_requisition_id: requisitionId,
+    p_fulfilled_lines: lines.map(l => ({
+      line_id: l.lineId,
+      fulfilled_qty: l.fulfilledQty,
+      available_qty: l.availableQty
+    })),
+    p_user_id: userId,
+    p_user_name: userName,
+    p_idempotency_key: idempotencyKey
+  });
+
+  if (error) {
+    console.error('[finalizeRequisitionFulfillment] RPC error:', error);
+    return { success: false, error };
+  }
+
+  return {
+    success: true,
+    newStatus: data?.new_status,
+    totalAmount: data?.total_amount != null ? Number(data.total_amount) : undefined,
+  };
 }
 
 export * from './menuCostingStorage';

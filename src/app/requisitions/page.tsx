@@ -52,6 +52,7 @@ import {
   loadBackorderFulfillments,
   fulfillBackorder,
   createDeliveryTicketFromRequisition,
+  finalizeRequisitionFulfillment,
   getDeliveryTicketForRequisition,
   saveRequisitionEdits,
   type SaleItem,
@@ -215,24 +216,27 @@ function DarkPageShell({ children }: { children: React.ReactNode }) {
 
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, string> = {
-    Draft:       "bg-zinc-500/15 text-zinc-300 border border-zinc-500/20",
-    draft:       "bg-zinc-500/15 text-zinc-300 border border-zinc-500/20",
-    Submitted:   "bg-amber-500/15 text-amber-300 border border-amber-500/20",
-    submitted:   "bg-amber-500/15 text-amber-300 border border-amber-500/20",
-    Approved:    "bg-blue-500/15 text-blue-300 border border-blue-500/20",
-    approved:    "bg-blue-500/15 text-blue-300 border border-blue-500/20",
-    Rejected:    "bg-red-500/15 text-red-300 border border-red-500/20",
-    rejected:    "bg-red-500/15 text-red-300 border border-red-500/20",
-    Fulfilled:   "bg-emerald-500/15 text-emerald-300 border border-emerald-500/20",
-    fulfilled:   "bg-emerald-500/15 text-emerald-300 border border-emerald-500/20",
-    Partial:     "bg-orange-500/15 text-orange-300 border border-orange-500/20",
-    partial:     "bg-orange-500/15 text-orange-300 border border-orange-500/20",
-    Backordered: "bg-red-500/15 text-red-300 border border-red-500/20",
-    backordered: "bg-red-500/15 text-red-300 border border-red-500/20",
+    Draft:                 "bg-zinc-500/15 text-zinc-300 border border-zinc-500/20",
+    draft:                 "bg-zinc-500/15 text-zinc-300 border border-zinc-500/20",
+    Submitted:             "bg-amber-500/15 text-amber-300 border border-amber-500/20",
+    submitted:             "bg-amber-500/15 text-amber-300 border border-amber-500/20",
+    Approved:              "bg-blue-500/15 text-blue-300 border border-blue-500/20",
+    approved:              "bg-blue-500/15 text-blue-300 border border-blue-500/20",
+    Rejected:              "bg-red-500/15 text-red-300 border border-red-500/20",
+    rejected:              "bg-red-500/15 text-red-300 border border-red-500/20",
+    Fulfilled:             "bg-emerald-500/15 text-emerald-300 border border-emerald-500/20",
+    fulfilled:             "bg-emerald-500/15 text-emerald-300 border border-emerald-500/20",
+    "Partially Fulfilled": "bg-orange-500/15 text-orange-300 border border-orange-500/20",
+    partially_fulfilled:   "bg-orange-500/15 text-orange-300 border border-orange-500/20",
+    Partial:               "bg-orange-500/15 text-orange-300 border border-orange-500/20",
+    partial:               "bg-orange-500/15 text-orange-300 border border-orange-500/20",
+    Backordered:           "bg-red-500/15 text-red-300 border border-red-500/20",
+    backordered:           "bg-red-500/15 text-red-300 border border-red-500/20",
   };
+  const label = status === "partially_fulfilled" ? "Partially Fulfilled" : status;
   return (
     <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${map[status] ?? "bg-zinc-500/15 text-zinc-300 border border-zinc-500/20"}`}>
-      {status}
+      {label}
     </span>
   );
 }
@@ -1630,18 +1634,32 @@ function HQAdminView({
   // Reset when the drawer changes, initialise from DB data when items load.
   const [fulfillDraftMap, setFulfillDraftMap] = useState<Map<string, number>>(new Map());
 
-  // Reset draft when the selected requisition changes (drawer opens/closes)
-  useEffect(() => { setFulfillDraftMap(new Map()); }, [selectedReq?.id]);
+  // Reset draft and idempotency key when selected requisition changes
+  const [fulfillmentAttemptKey, setFulfillmentAttemptKey] = useState<string | null>(null);
+  const [isFulfillmentLoading, setIsFulfillmentLoading] = useState(false);
+
+  useEffect(() => {
+    setFulfillDraftMap(new Map());
+    setFulfillmentAttemptKey(null);
+  }, [selectedReq?.id]);
 
   const getSafeFulfillQty = useCallback((li: any) => {
     const requested = Number(li.quantityRequested ?? 0);
     const hqStock = li.hqAvailableStock;
     if (requested <= 0) return 0;
-    if (hqStock != null) return Math.max(0, Math.min(requested, Number(hqStock) || 0));
+    if (hqStock != null) {
+      if (li.isFGMode) {
+        const packQty = Number(li.packQty ?? li.packQtySnapshot ?? 1);
+        const availablePacks = Math.max(0, Math.floor(Number(hqStock) / packQty));
+        return Math.min(requested, availablePacks);
+      } else {
+        return Math.max(0, Math.min(requested, Number(hqStock) || 0));
+      }
+    }
     return requested;
   }, []);
 
-  const setAllFulfillQuantitiesToRequested = useCallback(() => {
+  const fulfillAllAvailable = useCallback(() => {
     setFulfillDraftMap(() => {
       const next = new Map<string, number>();
       hqReqItems.forEach((li: any) => {
@@ -1651,50 +1669,41 @@ function HQAdminView({
     });
   }, [getSafeFulfillQty, hqReqItems]);
 
+  const markAllShortagesAsBackorder = useCallback(() => {
+    setFulfillDraftMap(() => {
+      const next = new Map<string, number>();
+      hqReqItems.forEach((li: any) => {
+        const requested = Number(li.quantityRequested ?? 0);
+        const hqStock = li.hqAvailableStock;
+        if (hqStock != null) {
+          const packQty = li.isFGMode ? (li.packQtySnapshot ?? 1) : 1;
+          const hqStockPacks = li.isFGMode ? Math.floor(hqStock / packQty) : hqStock;
+          if (hqStockPacks < requested) {
+            next.set(li.id, 0); // shortage -> backorder
+          } else {
+            next.set(li.id, requested); // full supply
+          }
+        } else {
+          next.set(li.id, requested);
+        }
+      });
+      return next;
+    });
+  }, [hqReqItems]);
+
+  const clearFulfillmentDraft = useCallback(() => {
+    setFulfillDraftMap(() => {
+      const next = new Map<string, number>();
+      hqReqItems.forEach((li: any) => {
+        next.set(li.id, 0);
+      });
+      return next;
+    });
+  }, [hqReqItems]);
+
   const setLineFulfillQuantity = useCallback((lineId: string, qty: number) => {
     setFulfillDraftMap(prev => new Map(prev).set(lineId, qty));
   }, []);
-
-  const persistFulfillmentDrafts = useCallback(async () => {
-    const changed: Array<{ item: any; newVal: number; current: number }> = [];
-
-    for (const li of hqReqItems) {
-      const requested = Number(li.quantityRequested ?? 0);
-      const hqStock = li.hqAvailableStock;
-      const maxFulfill = Math.min(requested, hqStock ?? requested);
-      const current = Number(li.quantityFulfilled ?? 0);
-      const draft = fulfillDraftMap.get(li.id);
-      const newVal = Math.max(0, Math.min(maxFulfill, Number(draft ?? current) || 0));
-
-      if (newVal !== current) {
-        changed.push({ item: li, newVal, current });
-      }
-    }
-
-    for (const change of changed) {
-      const res = await updateRequisitionItemFulfilled(change.item.id, change.newVal, change.item.requisitionId);
-      if (!res.success) {
-        throw new Error(res.error?.message ?? `Failed to save ${change.item.itemName ?? "line item"}`);
-      }
-      setHqReqItems(prev => prev.map(li =>
-        li.id === change.item.id ? { ...li, quantityFulfilled: change.newVal } : li
-      ));
-      if (res.newStatus) {
-        setSelectedReq((prev: any) => prev ? { ...prev, status: res.newStatus } : prev);
-        setRequisitions((prev: any[]) => prev.map(r =>
-          r.id === change.item.requisitionId ? { ...r, status: res.newStatus } : r
-        ));
-      }
-    }
-
-    if (changed.length > 0 && selectedReq?.id) {
-      setReqItemsCache(prev => {
-        const next = new Map(prev);
-        next.delete(selectedReq.id);
-        return next;
-      });
-    }
-  }, [fulfillDraftMap, hqReqItems, selectedReq?.id]);
 
   // Initialise missing entries from loaded line items
   useEffect(() => {
@@ -1720,7 +1729,7 @@ function HQAdminView({
   // partial/backordered are UI-display-only and are not persisted to the DB.
   useEffect(() => {
     const status = (selectedReq?.status ?? "").toLowerCase();
-    setIsFulfillmentLocked(status === "fulfilled");
+    setIsFulfillmentLocked(status === "fulfilled" || status === "partially_fulfilled" || status === "backordered");
   }, [selectedReq?.id, selectedReq?.status]);
 
   // ─── Value helpers ────────────────────────────────────────────────────────────
@@ -1762,7 +1771,7 @@ function HQAdminView({
     const status = (req.status ?? "").toLowerCase();
     const headerAmount = Math.max(0, Number(req.totalAmount ?? req.total_amount ?? 0));
 
-    if (status === "fulfilled" || status === "partial") {
+    if (status === "fulfilled" || status === "partially_fulfilled" || status === "backordered" || status === "partial") {
       const fulfilledVal = getReqFulfilledValue(req);
       // If items are cached and fulfilled > 0, show exact fulfilled value
       const items = reqItemsCache.get(req.id) ?? (req.id === selectedReq?.id ? hqReqItems : null);
@@ -1791,8 +1800,8 @@ function HQAdminView({
   const getReqValue = (req: any): number => getReqFulfilledValue(req);
 
   // ─── Canonical status sets ────────────────────────────────────────────────────
-  const FULFILLABLE_STATUSES  = new Set(["approved", "partial", "backordered"]);
-  const FULFILLED_STATUSES    = new Set(["fulfilled", "partial"]);
+  const FULFILLABLE_STATUSES  = new Set(["approved"]);
+  const FULFILLED_STATUSES    = new Set(["fulfilled", "partially_fulfilled", "backordered", "partial"]);
   const PENDING_STATUSES      = new Set(["draft", "submitted"]);
 
   const pendingCount   = requisitions.filter((r) => PENDING_STATUSES.has((r.status ?? "").toLowerCase())).length;
@@ -2417,84 +2426,121 @@ function HQAdminView({
                         </button>
                       </>
                     )}
-                    {/* Complete Fulfillment — shown for approved/partial/backordered when NOT locked */}
-                    {FULFILLABLE_STATUSES.has((selectedReq?.status ?? "").toLowerCase()) && !isFulfillmentLocked && (
+                    {/* Complete Fulfillment — shown for approved when NOT locked */}
+                    {selectedReq && FULFILLABLE_STATUSES.has((selectedReq.status ?? "").toLowerCase()) && !isFulfillmentLocked && (
                       <button
+                        disabled={isFulfillmentLoading}
                         onClick={async () => {
+                          setIsFulfillmentLoading(true);
                           try {
-                            await persistFulfillmentDrafts();
-                          } catch (error: any) {
-                            alert(`Failed to save fulfillment quantities: ${error?.message ?? "Unknown error"}`);
-                            return;
+                            let activeKey = fulfillmentAttemptKey;
+                            if (!activeKey) {
+                              activeKey = crypto.randomUUID();
+                              setFulfillmentAttemptKey(activeKey);
+                            }
+
+                            const linesToSubmit = hqReqItems.map((li: any) => {
+                              const val = fulfillDraftMap.has(li.id) ? Number(fulfillDraftMap.get(li.id)) : Number(li.quantityFulfilled ?? 0);
+                              return {
+                                lineId: li.id,
+                                fulfilledQty: val,
+                                availableQty: li.hqAvailableStock ?? 0
+                              };
+                            });
+
+                            const res = await finalizeRequisitionFulfillment(
+                              selectedReq.id,
+                              linesToSubmit,
+                              profile?.id || "",
+                              profile?.fullName || "HQ User",
+                              activeKey
+                            );
+
+                            if (!res.success) {
+                              console.error("[Complete Fulfillment] RPC call failed:", res.error);
+                              alert("Fulfillment could not be finalized safely. Please retry or contact HQ admin.");
+                              return;
+                            }
+
+                            // On success:
+                            try {
+                              const updatedBo = await loadBackorders();
+                              setBackorders(updatedBo);
+                            } catch (boErr) {
+                              console.error("Failed to load backorders after fulfillment completion", boErr);
+                            }
+
+                            const newStatus = res.newStatus || "fulfilled";
+                            const newTotal = res.totalAmount ?? linesToSubmit.reduce((sum, l) => {
+                              const item = hqReqItems.find((li: any) => li.id === l.lineId);
+                              return sum + (l.fulfilledQty * Number(item?.unitPrice ?? 0));
+                            }, 0);
+
+                            setSelectedReq((prev: any) =>
+                              prev ? { ...prev, status: newStatus, totalAmount: newTotal } : prev
+                            );
+                            setRequisitions((prev: any[]) =>
+                              prev.map(r =>
+                                r.id === selectedReq.id
+                                  ? { ...r, status: newStatus, totalAmount: newTotal }
+                                  : r
+                              )
+                            );
+
+                            // Update hqReqItems locally to reflect the finalized quantityFulfilled
+                            setHqReqItems((prev: any[]) =>
+                              prev.map(li => {
+                                const submitted = linesToSubmit.find(l => l.lineId === li.id);
+                                if (submitted) {
+                                  return {
+                                    ...li,
+                                    quantityFulfilled: submitted.fulfilledQty,
+                                    backorderQty: li.quantityRequested - submitted.fulfilledQty
+                                  };
+                                }
+                                return li;
+                              })
+                            );
+
+                            // Update cache
+                            setReqItemsCache(prev => {
+                              const next = new Map(prev);
+                              const updatedItems = hqReqItems.map(li => {
+                                const submitted = linesToSubmit.find(l => l.lineId === li.id);
+                                if (submitted) {
+                                  return { ...li, quantityFulfilled: submitted.fulfilledQty };
+                                }
+                                return li;
+                              });
+                              next.set(selectedReq.id, updatedItems);
+                              return next;
+                            });
+
+                            setIsFulfillmentLocked(true);
+                          } catch (err: any) {
+                            console.error("[Complete Fulfillment] Unexpected error:", err);
+                            alert("Fulfillment could not be finalized safely. Please retry or contact HQ admin.");
+                          } finally {
+                            setIsFulfillmentLoading(false);
                           }
-
-                          // ── 1. Always write "fulfilled" to DB ─────────────────────
-                          // DB CHECK constraint only allows: draft/submitted/approved/rejected/fulfilled.
-                          // partial and backordered are computed UI-display statuses only.
-                          const finalStatus = "fulfilled";
-
-                          // ── 2. Persist to DB — minimal UPDATE, no location_id ────
-                          const res = await updateRequisitionStatus(selectedReq.id, finalStatus);
-                          if (!res.success) {
-                            alert(`Failed to save status: ${res.error?.message}`);
-                            return;
-                          }
-
-                          // Refresh backorders state
-                          try {
-                            const updatedBo = await loadBackorders();
-                            setBackorders(updatedBo);
-                          } catch (boErr) {
-                            console.error("Failed to load backorders after fulfillment completion", boErr);
-                          }
-
-                          // ── 3. Compute fulfilled total for local state ─────────────
-                          // Used to update the main table value column immediately without
-                          // waiting for a page reload or cache re-fetch.
-                          const fulfilledTotal = hqReqItems.reduce((sum: number, li: any) => {
-                            const qty = fulfillDraftMap.get(li.id) ?? Number(li.quantityFulfilled ?? 0);
-                            return sum + qty * Number(li.unitPrice ?? 0);
-                          }, 0);
-
-                          // ── 4. Sync local state ───────────────────────────────────────
-                          // Update both status AND totalAmount so the main table "Value"
-                          // column shows the supplied amount ($260.31) not the requested
-                          // total ($380.88) even for rows whose cache was previously busted.
-                          setSelectedReq((prev: any) =>
-                            prev ? { ...prev, status: finalStatus, totalAmount: fulfilledTotal } : prev
-                          );
-                          setRequisitions((prev: any[]) =>
-                            prev.map(r =>
-                              r.id === selectedReq.id
-                                ? { ...r, status: finalStatus, totalAmount: fulfilledTotal }
-                                : r
-                            )
-                          );
-                          // Repopulate cache with current items so getReqFulfilledValue
-                          // can compute the visual badge and amount without another DB round-trip.
-                          setReqItemsCache(prev => new Map(prev).set(selectedReq.id, hqReqItems));
-
-                          // ── 5. Lock UI ────────────────────────────────────────────────
-                          setIsFulfillmentLocked(true);
                         }}
-                        className="px-4 py-2 text-sm font-semibold bg-success-600 text-white rounded-lg hover:bg-success-700 transition-colors shadow-sm flex items-center gap-2"
+                        className="px-4 py-2 text-sm font-semibold bg-success-600 text-white rounded-lg hover:bg-success-700 disabled:opacity-50 transition-colors shadow-sm flex items-center gap-2"
                       >
-                        <PackageCheck className="h-4 w-4" /> Complete Fulfillment
+                        {isFulfillmentLoading ? (
+                          <>
+                            <Loader2 className="h-4 w-4 animate-spin" /> Finalizing...
+                          </>
+                        ) : (
+                          <>
+                            <PackageCheck className="h-4 w-4" /> Complete Fulfillment
+                          </>
+                        )}
                       </button>
                     )}
-                    {/* Edit Fulfillment — unlock after completing */}
-                    {FULFILLABLE_STATUSES.has((selectedReq?.status ?? "").toLowerCase()) && isFulfillmentLocked && (
-                      <button
-                        onClick={() => setIsFulfillmentLocked(false)}
-                        className="px-4 py-2 text-sm font-medium bg-white border border-neutral-300 text-neutral-700 rounded-lg hover:bg-neutral-50 transition-colors shadow-sm flex items-center gap-2"
-                      >
-                        <CheckCircle2 className="h-4 w-4" /> Edit Fulfillment
-                      </button>
-                    )}
-                    {/* Completed badge — fully fulfilled requisitions */}
-                    {(selectedReq?.status ?? "").toLowerCase() === "fulfilled" && !isFulfillmentLocked && (
-                      <span className="px-4 py-2 text-sm font-medium text-success-700 flex items-center gap-2">
-                        <CheckCircle2 className="h-4 w-4" /> Completed
+                    {/* Completed badge — finalized requisitions */}
+                    {selectedReq && ["fulfilled", "partially_fulfilled", "backordered"].includes((selectedReq.status ?? "").toLowerCase()) && (
+                      <span className="px-4 py-2 text-sm font-semibold text-success-700 flex items-center gap-2">
+                        <CheckCircle2 className="h-4 w-4" /> Finalized ({(selectedReq.status ?? "").replace(/_/g, " ")})
                       </span>
                     )}
                   </div>
@@ -2507,19 +2553,35 @@ function HQAdminView({
                 <span className="shrink-0 font-semibold text-neutral-500 text-xs uppercase tracking-wider pt-0.5">Notes:</span>
                 <span className="text-neutral-700">{selectedReq?.notes || <span className="text-neutral-400 italic">No notes provided.</span>}</span>
               </div>
-              {FULFILLABLE_STATUSES.has((selectedReq?.status ?? "").toLowerCase()) && !isFulfillmentLocked && hqReqItems.length > 0 && (
-                <div className="flex flex-col gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+              {selectedReq && FULFILLABLE_STATUSES.has((selectedReq.status ?? "").toLowerCase()) && !isFulfillmentLocked && hqReqItems.length > 0 && (
+                <div className="bg-neutral-50 border border-neutral-200 rounded-lg p-3 space-y-2.5 shadow-sm">
                   <div>
-                    <p className="text-sm font-semibold text-emerald-900">Fulfillment shortcut</p>
-                    <p className="text-xs text-emerald-700">Defaults each line to requested quantity, capped by available HQ stock.</p>
+                    <h4 className="text-xs font-bold text-neutral-500 uppercase tracking-wider">Fulfillment Control Panel</h4>
+                    <p className="text-[11px] text-neutral-400">Quickly apply defaults to all line items in this requisition.</p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={setAllFulfillQuantitiesToRequested}
-                    className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700"
-                  >
-                    <PackageCheck className="h-4 w-4" /> Fulfill All as Requested
-                  </button>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={fulfillAllAvailable}
+                      className="px-3 py-1.5 text-xs font-semibold rounded bg-success-600 text-white hover:bg-success-700 transition-colors shadow-sm"
+                    >
+                      Fulfill All Available
+                    </button>
+                    <button
+                      type="button"
+                      onClick={markAllShortagesAsBackorder}
+                      className="px-3 py-1.5 text-xs font-semibold rounded bg-amber-600 text-white hover:bg-amber-700 transition-colors shadow-sm"
+                    >
+                      Mark All Shortages as Backorder
+                    </button>
+                    <button
+                      type="button"
+                      onClick={clearFulfillmentDraft}
+                      className="px-3 py-1.5 text-xs font-semibold rounded bg-neutral-200 text-neutral-700 hover:bg-neutral-300 transition-colors shadow-sm"
+                    >
+                      Clear Fulfillment Draft
+                    </button>
+                  </div>
                 </div>
               )}
               <div className="bg-white border border-neutral-200 rounded-lg overflow-hidden overflow-x-auto">
@@ -2578,30 +2640,45 @@ function HQAdminView({
                             const backorder  = Math.max(0, requested - draftQty);
                             const unitPrice  = Number(item.unitPrice ?? 0);
                             const lineTotal  = draftQty * unitPrice;
-                            const lineStatus = item.isFGMode && hqStock != null && hqStock < packQty
-                              ? "out_of_stock"
-                              : hqStock != null && hqStock <= 0
-                              ? "out_of_stock"
-                              : draftQty >= requested
-                              ? "fulfilled"
-                              : draftQty > 0
-                              ? "partial"
-                              : "backordered";
+                            const isFinalized = ["fulfilled", "partially_fulfilled", "backordered"].includes((selectedReq?.status ?? "").toLowerCase());
+                            let badgeLabel = "Pending";
+                            let badgeStyle = "border-neutral-200 bg-neutral-50 text-neutral-600"; // grey
+
+                            if ((selectedReq?.status ?? "").toLowerCase() === "rejected") {
+                              badgeLabel = "Cancelled";
+                              badgeStyle = "border-red-200 bg-red-50 text-red-700";
+                            } else if (item.isFGMode && hqStock != null && hqStock < packQty) {
+                              badgeLabel = "Out of Stock";
+                              badgeStyle = "border-rose-200 bg-rose-50 text-rose-700";
+                            } else if (hqStock != null && hqStock <= 0) {
+                              badgeLabel = "Out of Stock";
+                              badgeStyle = "border-rose-200 bg-rose-50 text-rose-700";
+                            } else if (draftQty >= requested) {
+                              badgeLabel = "Fully Supplied";
+                              badgeStyle = "border-emerald-200 bg-emerald-50 text-emerald-700";
+                            } else if (draftQty > 0) {
+                              badgeLabel = "Partial / Backordered";
+                              badgeStyle = "border-amber-200 bg-amber-50 text-amber-700";
+                            } else {
+                              // draftQty === 0
+                              if (isFinalized) {
+                                badgeLabel = "Partial / Backordered";
+                                badgeStyle = "border-amber-200 bg-amber-50 text-amber-700";
+                              } else {
+                                badgeLabel = "Pending";
+                                badgeStyle = "border-neutral-200 bg-neutral-50 text-neutral-600";
+                              }
+                            }
+
                             return (
                               <TableRow key={item.id} className="hover:bg-neutral-50/50">
                                 {/* Item + line status */}
                                 <TableCell className="py-2 px-3">
                                   <div className="font-medium text-sm text-neutral-900">{item.itemName}</div>
                                   <div className="mt-0.5">
-                                    {lineStatus === "out_of_stock" ? (
-                                      <span className="inline-flex rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-xs font-semibold text-red-700">Out of Stock</span>
-                                    ) : lineStatus === "partial" ? (
-                                      <span className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-700">Partial</span>
-                                    ) : lineStatus === "backordered" ? (
-                                      <span className="inline-flex rounded-full border border-rose-200 bg-rose-50 px-2 py-0.5 text-xs font-semibold text-rose-700">Backorder</span>
-                                    ) : (
-                                      <span className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">Fulfilled</span>
-                                    )}
+                                    <span className={`inline-flex rounded-full border px-2 py-0.5 text-xs font-semibold ${badgeStyle}`}>
+                                      {badgeLabel}
+                                    </span>
                                   </div>
                                 </TableCell>
                                 {/* Requested qty */}
@@ -2635,48 +2712,14 @@ function HQAdminView({
                                       disabled={!isEditable}
                                       value={draftQty}
                                       onChange={(e) => {
-                                        const clamped = Math.max(0, Math.min(maxFulfill, Number(e.target.value)));
+                                        const val = Number(e.target.value);
+                                        const clamped = Math.max(0, Math.min(maxFulfill, isNaN(val) ? 0 : val));
                                         setLineFulfillQuantity(item.id, clamped);
-                                      }}
-                                      onBlur={async () => {
-                                        const newVal  = fulfillDraftMap.get(item.id) ?? Number(item.quantityFulfilled ?? 0);
-                                        const current = Number(item.quantityFulfilled ?? 0);
-                                        if (newVal === current) return;
-                                        // UI guard: never exceed HQ stock
-                                        const maxAllowedVal = item.isFGMode && hqStock != null ? Math.floor(hqStock / packQty) : hqStock;
-                                        if (maxAllowedVal != null && newVal > maxAllowedVal) {
-                                          alert(item.isFGMode 
-                                            ? `Cannot fulfill ${newVal} pack(s) — only ${maxAllowedVal} pack(s) (${hqStock} ${item.unit}) available in HQ stock.`
-                                            : `Cannot fulfill ${newVal} — only ${hqStock} in HQ stock.`
-                                          );
-                                          setLineFulfillQuantity(item.id, current);
-                                          return;
-                                        }
-                                        // Optimistic update
-                                        setHqReqItems(prev => prev.map(li =>
-                                          li.id === item.id ? { ...li, quantityFulfilled: newVal } : li
-                                        ));
-                                        const res = await updateRequisitionItemFulfilled(item.id, newVal, item.requisitionId);
-                                        if (!res.success) {
-                                          alert(`Failed to save: ${res.error?.message}`);
-                                          // Rollback
-                                          setLineFulfillQuantity(item.id, current);
-                                          setHqReqItems(prev => prev.map(li =>
-                                            li.id === item.id ? { ...li, quantityFulfilled: current } : li
-                                          ));
-                                        } else if (res.newStatus) {
-                                          setSelectedReq((prev: any) => prev ? { ...prev, status: res.newStatus } : prev);
-                                          setRequisitions((prev: any[]) => prev.map(r =>
-                                            r.id === item.requisitionId ? { ...r, status: res.newStatus } : r
-                                          ));
-                                          // Bust cache so re-open reflects latest fulfilled qtys
-                                          setReqItemsCache(prev => { const m = new Map(prev); m.delete(item.requisitionId); return m; });
-                                        }
                                       }}
                                       className={`w-20 px-2 py-1 text-sm font-bold rounded-md border text-center ${
                                         !isEditable
                                           ? "bg-neutral-50 text-neutral-400 border-neutral-200 cursor-not-allowed"
-                                          : lineStatus === "fulfilled"
+                                          : badgeLabel === "Fully Supplied"
                                             ? "border-success-300 bg-success-50 text-success-800"
                                             : "border-neutral-300 bg-white text-neutral-800"
                                       } focus:outline-none focus:ring-2 focus:ring-brand-400`}
@@ -2704,15 +2747,32 @@ function HQAdminView({
                                 <TableCell className="py-2 text-right">
                                   <span className="text-sm font-semibold text-success-700">${lineTotal.toFixed(2)}</span>
                                 </TableCell>
+                                {/* Action: Quick buttons */}
                                 <TableCell className="py-2 text-right">
                                   {isEditable ? (
-                                    <button
-                                      type="button"
-                                      onClick={() => setLineFulfillQuantity(item.id, 0)}
-                                      className="rounded-md border border-rose-200 bg-white px-2 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
-                                    >
-                                      Mark Backorder
-                                    </button>
+                                    <div className="inline-flex gap-1 justify-end">
+                                      <button
+                                        type="button"
+                                        onClick={() => setLineFulfillQuantity(item.id, requested)}
+                                        className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-brand-50 text-brand-700 border border-brand-200 hover:bg-brand-100 transition-colors"
+                                      >
+                                        All
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setLineFulfillQuantity(item.id, maxFulfill)}
+                                        className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-success-50 text-success-700 border border-success-200 hover:bg-success-100 transition-colors"
+                                      >
+                                        Avail
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setLineFulfillQuantity(item.id, 0)}
+                                        className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100 transition-colors"
+                                      >
+                                        BO
+                                      </button>
+                                    </div>
                                   ) : (
                                     <span className="text-xs text-neutral-300">—</span>
                                   )}
@@ -2725,31 +2785,84 @@ function HQAdminView({
                     })()}
                   </TableBody>
                 </Table>
-                {/* Footer — fulfilled total + backorder value + hint */}
+                {/* Footer — Reconciliation Summary */}
                 {hqReqItems.length > 0 && (() => {
                   const isEditable = FULFILLABLE_STATUSES.has((selectedReq?.status ?? "").toLowerCase()) && !isFulfillmentLocked;
-                  const fulfilledVal = hqReqItems.reduce((sum: number, li: any) => {
-                    const qty = fulfillDraftMap.get(li.id) ?? Number(li.quantityFulfilled ?? 0);
-                    return sum + qty * Number(li.unitPrice ?? 0);
-                  }, 0);
+                  
+                  // Compute values
                   const requestedVal = hqReqItems.reduce((sum: number, li: any) =>
                     sum + Number(li.quantityRequested) * Number(li.unitPrice ?? 0), 0);
-                  const backorderVal = Math.max(0, requestedVal - fulfilledVal);
+                  const suppliedVal = hqReqItems.reduce((sum: number, li: any) => {
+                    const qty = fulfillDraftMap.has(li.id) ? Number(fulfillDraftMap.get(li.id)) : Number(li.quantityFulfilled ?? 0);
+                    return sum + qty * Number(li.unitPrice ?? 0);
+                  }, 0);
+                  const backorderedVal = requestedVal - suppliedVal;
+
+                  // Compute counts
+                  const totalItems = hqReqItems.length;
+                  let fullySuppliedCount = 0;
+                  let partiallySuppliedCount = 0;
+                  let backorderedCount = 0;
+
+                  hqReqItems.forEach((li: any) => {
+                    const qty = fulfillDraftMap.has(li.id) ? Number(fulfillDraftMap.get(li.id)) : Number(li.quantityFulfilled ?? 0);
+                    const req = Number(li.quantityRequested ?? 0);
+                    if (qty >= req) {
+                      fullySuppliedCount++;
+                    } else if (qty > 0) {
+                      partiallySuppliedCount++;
+                    } else {
+                      backorderedCount++;
+                    }
+                  });
+
                   return (
-                    <div className="px-4 py-3 bg-neutral-50 border-t border-neutral-200 space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-semibold text-success-700 uppercase tracking-wider">Fulfilled Total</span>
-                        <span className="text-base font-bold text-success-700">${fulfilledVal.toFixed(2)}</span>
-                      </div>
-                      {backorderVal > 0.005 && (
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs text-neutral-500">Backorder Value</span>
-                          <span className="text-sm font-semibold text-danger-600">${backorderVal.toFixed(2)}</span>
+                    <div className="px-4 py-4 bg-neutral-50 border-t border-neutral-200 space-y-4">
+                      {/* Reconciliation Title */}
+                      <p className="text-xs font-bold text-neutral-500 uppercase tracking-wider">Reconciliation Summary</p>
+                      
+                      {/* Values Grid */}
+                      <div className="grid grid-cols-3 gap-2">
+                        <div className="bg-white border border-neutral-200 rounded-lg p-2.5 shadow-sm text-center">
+                          <p className="text-[10px] font-semibold text-neutral-400 uppercase">Requested Value</p>
+                          <p className="text-sm font-bold text-neutral-800 mt-0.5">${requestedVal.toFixed(2)}</p>
                         </div>
-                      )}
-                      {!isEditable && (
-                        <p className="text-xs text-neutral-400 pt-1 text-center">
-                          Approve this requisition to enter fulfillment quantities.
+                        <div className="bg-white border border-success-200 rounded-lg p-2.5 shadow-sm text-center">
+                          <p className="text-[10px] font-semibold text-success-600 uppercase">Supplied Value</p>
+                          <p className="text-sm font-bold text-success-700 mt-0.5">${suppliedVal.toFixed(2)}</p>
+                        </div>
+                        <div className="bg-white border border-rose-200 rounded-lg p-2.5 shadow-sm text-center">
+                          <p className="text-[10px] font-semibold text-danger-600 uppercase">Backordered Value</p>
+                          <p className="text-sm font-bold text-danger-700 mt-0.5">${backorderedVal.toFixed(2)}</p>
+                        </div>
+                      </div>
+
+                      {/* Quantities & Status Counts */}
+                      <div className="bg-white border border-neutral-200 rounded-lg p-3 space-y-2 text-xs text-neutral-600 shadow-sm">
+                        <div className="flex justify-between items-center">
+                          <span className="font-medium">Requested Items:</span>
+                          <span className="font-bold text-neutral-900">{totalItems}</span>
+                        </div>
+                        <div className="h-px bg-neutral-100 my-1" />
+                        <div className="grid grid-cols-3 gap-2 text-center text-[11px] font-semibold">
+                          <div className="text-success-700">
+                            <span>Fully Supplied</span>
+                            <span className="block text-sm font-bold mt-0.5">{fullySuppliedCount}</span>
+                          </div>
+                          <div className="text-amber-700">
+                            <span>Partially Supplied</span>
+                            <span className="block text-sm font-bold mt-0.5">{partiallySuppliedCount}</span>
+                          </div>
+                          <div className="text-rose-700">
+                            <span>Backordered</span>
+                            <span className="block text-sm font-bold mt-0.5">{backorderedCount}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {!isEditable && !isFulfillmentLocked && (
+                        <p className="text-xs text-neutral-400 pt-1 text-center italic">
+                          Approve this requisition to edit fulfillment quantities.
                         </p>
                       )}
                     </div>
