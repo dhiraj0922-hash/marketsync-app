@@ -36,7 +36,10 @@ CREATE OR REPLACE FUNCTION public.finalize_requisition_fulfillment_v3(
   p_user_id UUID,
   p_user_name TEXT,
   p_idempotency_key TEXT
-) RETURNS JSONB AS $$
+) RETURNS JSONB
+SECURITY DEFINER
+SET search_path = public
+AS $$
 DECLARE
   v_line RECORD;
   v_line_id UUID;
@@ -68,9 +71,15 @@ DECLARE
   v_result JSONB;
 BEGIN
   -- A. Role Enforcement: Only allow HQ fulfillment/admin roles to execute
-  SELECT role INTO v_user_role FROM public.user_profiles WHERE id = p_user_id;
-  IF v_user_role IS NULL OR v_user_role NOT IN ('hq_master', 'hq_admin', 'hq_ops', 'hq_fulfillment') THEN
-    RAISE EXCEPTION 'Permission denied: User % does not have an authorized HQ role.', p_user_name;
+  -- p_user_id is the Supabase auth.users.id UUID.
+  -- user_profiles.user_id maps to auth.users.id; user_profiles.id is the profile row PK.
+  SELECT role INTO v_user_role
+  FROM public.user_profiles
+  WHERE user_id = p_user_id
+    AND is_active = true
+  LIMIT 1;
+  IF v_user_role NOT IN ('hq_admin', 'hq_master', 'hq_ops') THEN
+    RAISE EXCEPTION 'Permission denied: User % does not have an authorized HQ role.', p_user_id;
   END IF;
 
   -- B. Concurrency & Idempotency Locking
@@ -293,3 +302,18 @@ BEGIN
   RETURN v_result;
 END;
 $$ LANGUAGE plpgsql;
+
+-- 5. Permissions
+-- Revoke from public/anon so unauthenticated callers cannot invoke the function.
+REVOKE ALL ON FUNCTION public.finalize_requisition_fulfillment_v3(
+  TEXT, JSONB, UUID, TEXT, TEXT
+) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.finalize_requisition_fulfillment_v3(
+  TEXT, JSONB, UUID, TEXT, TEXT
+) FROM anon;
+
+-- Grant execute to authenticated Supabase users only.
+-- The function itself enforces HQ-role restriction via the role check above.
+GRANT EXECUTE ON FUNCTION public.finalize_requisition_fulfillment_v3(
+  TEXT, JSONB, UUID, TEXT, TEXT
+) TO authenticated;

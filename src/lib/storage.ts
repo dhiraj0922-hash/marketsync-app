@@ -8312,29 +8312,52 @@ export async function finalizeRequisitionFulfillment(
   userId: string,
   userName: string,
   idempotencyKey: string
-): Promise<{ success: boolean; newStatus?: string; totalAmount?: number; error?: any }> {
-  const { data, error } = await supabase.rpc('finalize_requisition_fulfillment_v3', {
-    p_requisition_id: requisitionId,
+): Promise<{ success: boolean; newStatus?: string; totalAmount?: number; error?: any; dbErrorMessage?: string }> {
+  const rpcPayload = {
+    p_requisition_id:  requisitionId,
     p_fulfilled_lines: lines.map(l => ({
-      line_id: l.lineId,
+      line_id:       l.lineId,
       fulfilled_qty: l.fulfilledQty,
-      available_qty: l.availableQty
+      available_qty: l.availableQty,
     })),
-    p_user_id: userId,
-    p_user_name: userName,
-    p_idempotency_key: idempotencyKey
-  });
+    p_user_id:         userId,
+    p_user_name:       userName,
+    p_idempotency_key: idempotencyKey,
+  };
+
+  const { data, error } = await supabase.rpc('finalize_requisition_fulfillment_v3', rpcPayload);
 
   if (error) {
-    console.error('[finalizeRequisitionFulfillment] RPC error:', error);
-    return { success: false, error };
+    // ── Structured diagnostic log (safe: no tokens, no anon key, no session) ──
+    console.error('[finalizeRequisitionFulfillment] ✗ RPC FAILED', {
+      // Full Supabase error fields — these are the DB error details
+      'error.message': error.message,
+      'error.code':    (error as any).code    ?? null,
+      'error.details': (error as any).details ?? null,
+      'error.hint':    (error as any).hint    ?? null,
+      // Safe request summary — no secret values
+      payload_summary: {
+        requisitionId,
+        lineCount:       lines.length,
+        idempotencyKey,
+        userId_prefix:   userId ? userId.slice(0, 8) + '...' : '(empty — check profile.id vs profile.userId)',
+        userName,
+        lines: lines.map(l => ({
+          lineId:       l.lineId,
+          fulfilledQty: l.fulfilledQty,
+          availableQty: l.availableQty,
+        })),
+      },
+    });
+    return { success: false, error, dbErrorMessage: error.message };
   }
 
   return {
-    success: true,
-    newStatus: data?.new_status,
+    success:     true,
+    newStatus:   data?.new_status,
     totalAmount: data?.total_amount != null ? Number(data.total_amount) : undefined,
   };
 }
+
 
 export * from './menuCostingStorage';

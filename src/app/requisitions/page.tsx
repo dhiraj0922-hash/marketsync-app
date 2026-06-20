@@ -2508,7 +2508,10 @@ function HQAdminView({
 
                             if (!res.success) {
                               console.error("[Complete Fulfillment] RPC call failed:", res.error);
-                              alert("Fulfillment could not be finalized safely. Please retry or contact HQ admin.");
+                              const dbMsg = res.dbErrorMessage
+                                ? `\n\nDatabase error: ${res.dbErrorMessage}`
+                                : "";
+                              alert(`Fulfillment could not be finalized safely. Please retry or contact HQ admin.${dbMsg}`);
                               return;
                             }
 
