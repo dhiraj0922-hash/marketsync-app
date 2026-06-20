@@ -637,8 +637,15 @@ function HQSaleItemsContent() {
           items={items}
           recipes={recipes}
           onCostApplied={fetchData}
+          onCreateRecipe={(itemName: string) => {
+            // Navigate to Recipes page; pass item name as query param so the
+            // create-recipe drawer can pre-fill the name field.
+            const url = `/recipes?prefill=${encodeURIComponent(itemName)}`;
+            window.location.href = url;
+          }}
         />
       )}
+
 
       {/* ── Stock value banner ───────────────────────────────────────────── */}
       <div className="flex items-center gap-3 rounded-2xl border border-emerald-200 bg-emerald-700 px-5 py-4 text-white shadow-sm">
