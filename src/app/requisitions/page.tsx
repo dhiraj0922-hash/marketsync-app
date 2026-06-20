@@ -1706,19 +1706,31 @@ function HQAdminView({
   }, []);
 
   // Initialise missing entries from loaded line items
+  // CRITICAL: For finalized requisitions (fulfilled / partially_fulfilled / backordered)
+  // we MUST use the committed quantityFulfilled from the database — even when it is 0.
+  // Falling back to getSafeFulfillQty() for 0-qty committed rows was the root cause of
+  // the HQ drawer showing stale stock availability instead of the committed fulfillment.
   useEffect(() => {
     if (!hqReqItems.length) return;
+    const reqStatus = (selectedReq?.status ?? "").toLowerCase();
+    const isFinalized = reqStatus === "fulfilled" || reqStatus === "partially_fulfilled" || reqStatus === "backordered";
     setFulfillDraftMap(prev => {
       const next = new Map(prev);
       hqReqItems.forEach((li: any) => {
         if (next.has(li.id)) return; // preserve in-session edits
-        const current = Number(li.quantityFulfilled ?? 0);
-        const defaultVal = current > 0 ? current : getSafeFulfillQty(li);
-        next.set(li.id, defaultVal);
+        if (isFinalized) {
+          // Always use the committed DB value for finalized requisitions (including 0)
+          next.set(li.id, Number(li.quantityFulfilled ?? 0));
+        } else {
+          // For approved (unfulfilled) requisitions, default to max available
+          const current = Number(li.quantityFulfilled ?? 0);
+          const defaultVal = current > 0 ? current : getSafeFulfillQty(li);
+          next.set(li.id, defaultVal);
+        }
       });
       return next;
     });
-  }, [getSafeFulfillQty, hqReqItems]);
+  }, [getSafeFulfillQty, hqReqItems, selectedReq?.status]);
 
   // ── Fulfillment lock ──────────────────────────────────────────────────────────
   // Pure UI lock set by "Complete Fulfillment". Disables per-line inputs and
@@ -2632,21 +2644,41 @@ function HQAdminView({
                           </TableRow>
                           {groupItems.map((item: any) => {
                             const requested  = Number(item.quantityRequested ?? 0);
-                            const draftQty   = fulfillDraftMap.get(item.id) ?? Number(item.quantityFulfilled ?? 0);
+                            const isFinalized = ["fulfilled", "partially_fulfilled", "backordered"].includes((selectedReq?.status ?? "").toLowerCase());
+                            // For finalized requisitions always read the committed DB value.
+                            // For active/approved requisitions use the live draft map.
+                            const committedQty = Number(item.quantityFulfilled ?? 0);
+                            const draftQty = isFinalized
+                              ? committedQty
+                              : (fulfillDraftMap.get(item.id) ?? committedQty);
+                            // Backorder: use committed backorder_qty from DB when finalized,
+                            // otherwise derive from draft (requested - draftQty).
+                            const committedBackorder = Number(item.backorderQty ?? item.backorder_qty ?? Math.max(0, requested - committedQty));
+                            const backorder = isFinalized ? committedBackorder : Math.max(0, requested - draftQty);
                             const hqStock    = item.hqAvailableStock;
                             const packQty    = item.isFGMode ? (item.packQtySnapshot ?? 1) : 1;
                             const hqStockPacks = item.isFGMode && hqStock != null ? Math.floor(hqStock / packQty) : hqStock;
                             const maxFulfill = Math.min(requested, hqStockPacks ?? requested);
-                            const backorder  = Math.max(0, requested - draftQty);
                             const unitPrice  = Number(item.unitPrice ?? 0);
                             const lineTotal  = draftQty * unitPrice;
-                            const isFinalized = ["fulfilled", "partially_fulfilled", "backordered"].includes((selectedReq?.status ?? "").toLowerCase());
                             let badgeLabel = "Pending";
                             let badgeStyle = "border-neutral-200 bg-neutral-50 text-neutral-600"; // grey
 
                             if ((selectedReq?.status ?? "").toLowerCase() === "rejected") {
                               badgeLabel = "Cancelled";
                               badgeStyle = "border-red-200 bg-red-50 text-red-700";
+                            } else if (isFinalized) {
+                              // Derive badge purely from committed DB values for finalized rows
+                              if (draftQty >= requested) {
+                                badgeLabel = "Fully Supplied";
+                                badgeStyle = "border-emerald-200 bg-emerald-50 text-emerald-700";
+                              } else if (draftQty > 0) {
+                                badgeLabel = "Partial / Backordered";
+                                badgeStyle = "border-amber-200 bg-amber-50 text-amber-700";
+                              } else {
+                                badgeLabel = "Backordered";
+                                badgeStyle = "border-rose-200 bg-rose-50 text-rose-700";
+                              }
                             } else if (item.isFGMode && hqStock != null && hqStock < packQty) {
                               badgeLabel = "Out of Stock";
                               badgeStyle = "border-rose-200 bg-rose-50 text-rose-700";
@@ -2660,14 +2692,8 @@ function HQAdminView({
                               badgeLabel = "Partial / Backordered";
                               badgeStyle = "border-amber-200 bg-amber-50 text-amber-700";
                             } else {
-                              // draftQty === 0
-                              if (isFinalized) {
-                                badgeLabel = "Partial / Backordered";
-                                badgeStyle = "border-amber-200 bg-amber-50 text-amber-700";
-                              } else {
-                                badgeLabel = "Pending";
-                                badgeStyle = "border-neutral-200 bg-neutral-50 text-neutral-600";
-                              }
+                              badgeLabel = "Pending";
+                              badgeStyle = "border-neutral-200 bg-neutral-50 text-neutral-600";
                             }
 
                             return (
@@ -2789,11 +2815,16 @@ function HQAdminView({
                 {hqReqItems.length > 0 && (() => {
                   const isEditable = FULFILLABLE_STATUSES.has((selectedReq?.status ?? "").toLowerCase()) && !isFulfillmentLocked;
                   
-                  // Compute values
+                  // Compute values — for finalized reqs use committed DB values exclusively.
+                  const isFooterFinalized = ["fulfilled", "partially_fulfilled", "backordered"].includes((selectedReq?.status ?? "").toLowerCase());
                   const requestedVal = hqReqItems.reduce((sum: number, li: any) =>
                     sum + Number(li.quantityRequested) * Number(li.unitPrice ?? 0), 0);
                   const suppliedVal = hqReqItems.reduce((sum: number, li: any) => {
-                    const qty = fulfillDraftMap.has(li.id) ? Number(fulfillDraftMap.get(li.id)) : Number(li.quantityFulfilled ?? 0);
+                    // For finalized: always use committed quantityFulfilled (even if 0).
+                    // For active: prefer live draft map so HQ sees their current selections.
+                    const qty = isFooterFinalized
+                      ? Number(li.quantityFulfilled ?? 0)
+                      : (fulfillDraftMap.has(li.id) ? Number(fulfillDraftMap.get(li.id)) : Number(li.quantityFulfilled ?? 0));
                     return sum + qty * Number(li.unitPrice ?? 0);
                   }, 0);
                   const backorderedVal = requestedVal - suppliedVal;
@@ -2805,7 +2836,9 @@ function HQAdminView({
                   let backorderedCount = 0;
 
                   hqReqItems.forEach((li: any) => {
-                    const qty = fulfillDraftMap.has(li.id) ? Number(fulfillDraftMap.get(li.id)) : Number(li.quantityFulfilled ?? 0);
+                    const qty = isFooterFinalized
+                      ? Number(li.quantityFulfilled ?? 0)
+                      : (fulfillDraftMap.has(li.id) ? Number(fulfillDraftMap.get(li.id)) : Number(li.quantityFulfilled ?? 0));
                     const req = Number(li.quantityRequested ?? 0);
                     if (qty >= req) {
                       fullySuppliedCount++;
