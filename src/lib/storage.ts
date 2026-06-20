@@ -4364,6 +4364,8 @@ function mapReqItemRow(row: any, hqStockMap?: Record<string, number>) {
     isFGMode,
     itemId:            row.item_id ?? null,
     finishedGoodId:    row.finished_good_id ?? null,
+    catalogItemId:     row.catalog_item_id ?? null,
+    sourceType:        row.source_type ?? null,   // 'hq_supplied' | 'local_vendor' | null (legacy)
     // Commissary that should fulfill this line (snapshot at order time).
     // NULL on legacy rows — treat as 'Commissary HQ'.
     sourceCommissary:  row.source_commissary_snapshot ?? 'Commissary HQ',

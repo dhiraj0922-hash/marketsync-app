@@ -2477,9 +2477,64 @@ function HQAdminView({
                       </>
                     )}
                     {/* Complete Fulfillment — shown for approved when NOT locked */}
-                    {selectedReq && FULFILLABLE_STATUSES.has((selectedReq.status ?? "").toLowerCase()) && !isFulfillmentLocked && (
+                    {selectedReq && FULFILLABLE_STATUSES.has((selectedReq.status ?? "").toLowerCase()) && !isFulfillmentLocked && (() => {
+                      // ── Pre-flight: classify every line before allowing submission ──────────
+                      // Local vendor items must NEVER go through the HQ atomic RPC.
+                      const localVendorLines = hqReqItems.filter((li: any) =>
+                        li.sourceType === 'local_vendor'
+                      );
+                      // Unmapped HQ lines: source_type is hq_supplied (or legacy null) but
+                      // both item_id AND finished_good_id are null → RPC will crash with
+                      // "Shared item_id not resolved for inventory item NULL"
+                      const unmappedHqLines = hqReqItems.filter((li: any) =>
+                        li.sourceType !== 'local_vendor' &&
+                        !li.itemId &&
+                        !li.finishedGoodId
+                      );
+                      const hasPreflightErrors = localVendorLines.length > 0 || unmappedHqLines.length > 0;
+
+                      return (
+                        <>
+                          {/* Pre-flight warning banner — shown only when there are blocking items */}
+                          {hasPreflightErrors && (
+                            <div className="w-full rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                              <p className="font-semibold mb-1">⚠ Cannot finalize: mapping issues detected</p>
+                              {localVendorLines.length > 0 && (
+                                <div className="mt-1">
+                                  <p className="font-medium text-amber-700">
+                                    {localVendorLines.length} local vendor item{localVendorLines.length > 1 ? 's' : ''} cannot go through HQ fulfillment:
+                                  </p>
+                                  <ul className="mt-0.5 space-y-0.5 pl-3">
+                                    {localVendorLines.map((li: any) => (
+                                      <li key={li.id} className="list-disc text-amber-700">
+                                        {li.itemName ?? li.catalogItemId ?? li.id}
+                                        <span className="ml-1 font-mono text-[10px] text-amber-500">[local_vendor]</span>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+                              {unmappedHqLines.length > 0 && (
+                                <div className="mt-1">
+                                  <p className="font-medium text-amber-700">
+                                    {unmappedHqLines.length} HQ item{unmappedHqLines.length > 1 ? 's' : ''} missing inventory mapping:
+                                  </p>
+                                  <ul className="mt-0.5 space-y-0.5 pl-3">
+                                    {unmappedHqLines.map((li: any) => (
+                                      <li key={li.id} className="list-disc text-amber-700">
+                                        {li.itemName ?? li.id}
+                                        <span className="ml-1 font-mono text-[10px] text-amber-500">
+                                          [{li.sourceType ?? 'legacy'} · no item_id or finished_good_id]
+                                        </span>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+                            </div>
+                          )}
                       <button
-                        disabled={isFulfillmentLoading}
+                        disabled={isFulfillmentLoading || hasPreflightErrors}
                         onClick={async () => {
                           setIsFulfillmentLoading(true);
                           try {
@@ -2589,7 +2644,9 @@ function HQAdminView({
                           </>
                         )}
                       </button>
-                    )}
+                        </>
+                      );
+                    })()}
                     {/* Completed badge — finalized requisitions */}
                     {selectedReq && ["fulfilled", "partially_fulfilled", "backordered"].includes((selectedReq.status ?? "").toLowerCase()) && (
                       <span className="px-4 py-2 text-sm font-semibold text-success-700 flex items-center gap-2">
