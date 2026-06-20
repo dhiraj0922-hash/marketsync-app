@@ -6,7 +6,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Drawer } from "@/components/ui/drawer";
 import {
   PackageCheck, Search, Plus, Edit2, ToggleLeft, ToggleRight,
-  TrendingUp, AlertCircle, Loader2, ChevronRight, DollarSign, Factory,
+  TrendingUp, TrendingDown, Minus, AlertCircle, Loader2, ChevronRight, DollarSign, Factory,
   CheckCircle2, XCircle, Layers, MapPin, Trash2, PlusCircle, Tag, Upload,
   Users
 } from "lucide-react";
@@ -15,6 +15,7 @@ import {
   loadFgLocationPricing, upsertFgLocationPricing, deleteFgLocationPricing,
   loadCategories, addCategory, convertYieldToBaseUnit,
   loadFinishedGoodLocationAvailability, saveFinishedGoodLocationAvailability,
+  loadLatestFgCounts, loadTodayMovementMetrics,
   type SaleItem, type FgLocationPricing
 } from "@/lib/storage";
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
@@ -66,6 +67,9 @@ function foodCostPct(makingCost: number, salesPrice: number): string {
   const pct = (makingCost / salesPrice) * 100;
   return `${pct.toFixed(1)}%`;
 }
+
+const fmt = (n: number) =>
+  n.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
 
 function FoodCostBadge({ pct }: { pct: string }) {
   if (pct === "—") return <span className="text-neutral-400 text-xs">—</span>;
@@ -229,6 +233,12 @@ function HQSaleItemsContent() {
 
   // DB-driven category list (loaded from categories table)
   const [dbCategories, setDbCategories] = useState<string[]>([]);
+  
+  // Latest FG counts state (Last Count Date & Latest Variance)
+  const [latestCounts, setLatestCounts] = useState<Record<string, { lastCountDate: string | null; latestVariance: number }>>({});
+  // Today's movement metrics (Produced Today & Supplied Today)
+  const [todayMetrics, setTodayMetrics] = useState<Record<string, { producedToday: number; suppliedToday: number }>>({});
+
   // Inline "+ Add Category" form in drawer
   const [addCatInput, setAddCatInput]   = useState("");
   const [isAddingCat, setIsAddingCat]   = useState(false);
@@ -273,9 +283,11 @@ function HQSaleItemsContent() {
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [si, rec, locs, cats] = await Promise.all([
+      const [si, rec, locs, cats, counts, metrics] = await Promise.all([
         loadSaleItems(), loadRecipes(), loadLocations(),
         loadCategories('finished_goods'),
+        loadLatestFgCounts(),
+        loadTodayMovementMetrics(),
       ]);
       setItems(Array.isArray(si) ? si : []);
       setRecipes(Array.isArray(rec) ? rec : []);
@@ -292,6 +304,8 @@ function HQSaleItemsContent() {
       );
       // DB categories — if empty (pre-migration), UI falls back to CATEGORY_OPTIONS
       setDbCategories(Array.isArray(cats) ? cats : []);
+      setLatestCounts(counts || {});
+      setTodayMetrics(metrics || {});
     } finally {
       setIsLoading(false);
     }
@@ -685,7 +699,10 @@ function HQSaleItemsContent() {
                 <TableHead className="py-3">Unit Sale Price</TableHead>
                 <TableHead className="py-3">Pack Qty</TableHead>
                 <TableHead className="py-3">Effective Pack Price</TableHead>
-                <TableHead className="py-3">Stock</TableHead>
+                <TableHead className="py-3">Current On Hand</TableHead>
+                <TableHead className="py-3">Produced Today</TableHead>
+                <TableHead className="py-3">Supplied Today</TableHead>
+                <TableHead className="py-3">Latest Variance</TableHead>
                 <TableHead className="py-3">Status</TableHead>
                 <TableHead className="py-3">Visibility</TableHead>
                 <TableHead className="py-3 text-right px-6">Actions</TableHead>
@@ -786,11 +803,63 @@ function HQSaleItemsContent() {
                         );
                       })()}
                     </TableCell>
+                    {/* Current On Hand */}
                     <TableCell className="py-4">
                       <div className="flex flex-col gap-1">
+                        <span className="font-semibold text-slate-900 text-sm">
+                          {item.instock} {item.baseUnit}
+                        </span>
                         <StockChip status={item.stockStatus} />
-                        <span className="text-xs text-neutral-500">{item.instock} {item.baseUnit}</span>
                       </div>
+                    </TableCell>
+                    {/* Produced Today */}
+                    <TableCell className="py-4 text-sm text-neutral-700">
+                      {(todayMetrics[item.id]?.producedToday ?? 0) > 0 ? (
+                        <span className="font-medium text-slate-900">
+                          {fmt(todayMetrics[item.id].producedToday)} {item.baseUnit}
+                        </span>
+                      ) : (
+                        <span className="text-neutral-400 text-xs">—</span>
+                      )}
+                    </TableCell>
+                    {/* Supplied Today */}
+                    <TableCell className="py-4 text-sm text-neutral-700">
+                      {(todayMetrics[item.id]?.suppliedToday ?? 0) > 0 ? (
+                        <span className="font-medium text-slate-900">
+                          {fmt(todayMetrics[item.id].suppliedToday)} {item.baseUnit}
+                        </span>
+                      ) : (
+                        <span className="text-neutral-400 text-xs">—</span>
+                      )}
+                    </TableCell>
+                    {/* Latest Variance */}
+                    <TableCell className="py-4 text-sm">
+                      {(() => {
+                        const detail = latestCounts[item.id];
+                        if (!detail || detail.lastCountDate === null) {
+                          return <span className="text-neutral-400 text-xs">No counts</span>;
+                        }
+                        const v = detail.latestVariance;
+                        if (v === 0) {
+                          return (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-500 border border-slate-200">
+                              <Minus className="h-3 w-3" /> No change
+                            </span>
+                          );
+                        }
+                        if (v > 0) {
+                          return (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                              <TrendingUp className="h-3 w-3" /> +{fmt(v)} {item.baseUnit}
+                            </span>
+                          );
+                        }
+                        return (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-rose-50 text-rose-700 border border-rose-200">
+                            <TrendingDown className="h-3 w-3" /> {fmt(v)} {item.baseUnit}
+                          </span>
+                        );
+                      })()}
                     </TableCell>
                     <TableCell className="py-4">
                       <div className="flex flex-col gap-1">
@@ -845,7 +914,7 @@ function HQSaleItemsContent() {
                 );
               }) : (
                 <TableRow>
-                  <TableCell colSpan={12} className="text-center py-12 text-neutral-400 text-sm">
+                  <TableCell colSpan={15} className="text-center py-12 text-neutral-400 text-sm">
                     {search || filterCategory !== "All" || filterCommissary !== "All"
                       ? "No finished goods match your filters."
                       : "No finished goods yet. Create your first one to make it available for franchise locations to requisition."}

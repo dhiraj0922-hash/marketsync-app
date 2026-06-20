@@ -26,12 +26,12 @@ import { HQOnlyGuard } from "@/components/HQOnlyGuard";
 import { useAuth } from "@/components/AuthProvider";
 import {
   loadSaleItems,
-  updateSaleItemStock,
-  logMovement,
   loadFgCountSessions,
   loadFgCountSessionByDate,
   loadFgCountSessionById,
-  upsertFgCountSessionWithLines,
+  calculateExpectedStockForDate,
+  loadLatestFgCounts,
+  saveFgCountLineAtomic,
   type SaleItem,
   type FgCountLineRow,
 } from "@/lib/storage";
@@ -61,7 +61,8 @@ interface CountRow {
   saved:      boolean;
   saving:     boolean;
   error:      string | null;
-  variance:   number | null; // computed: countNum - item.instock
+  variance:   number | null; // computed: countNum - expectedStock
+  expectedStock: number;     // system master count before count today
 }
 
 interface HistorySession {
@@ -106,7 +107,7 @@ function varianceLabel(v: number | null) {
   return          { label: fmt(v),           color: "text-red-600",    icon: <TrendingDown className="h-3.5 w-3.5" /> };
 }
 
-function blankRows(items: SaleItem[]): CountRow[] {
+function blankRows(items: SaleItem[], expectedMap: Record<string, number>): CountRow[] {
   return items.map(item => ({
     item,
     countInput: "",
@@ -114,6 +115,7 @@ function blankRows(items: SaleItem[]): CountRow[] {
     saving:     false,
     error:      null,
     variance:   null,
+    expectedStock: expectedMap[item.id] ?? 0,
   }));
 }
 
@@ -167,14 +169,14 @@ export function FgCountContent() {
       if (!line) {
         return { ...row, countInput: "", saved: false, saving: false, error: null, variance: null };
       }
-      const variance = line.physical_qty - row.item.instock;
       return {
         ...row,
         countInput: String(line.physical_qty),
         saved:      true,
         saving:     false,
         error:      null,
-        variance,
+        variance:   line.variance_qty,
+        expectedStock: line.system_qty,
       };
     }));
     setSaved(lines.length);
@@ -186,6 +188,10 @@ export function FgCountContent() {
   const loadSessionForDate = useCallback(async (date: string) => {
     if (!date) return;
     setIsSessionLoading(true);
+    
+    // Fetch expected stocks dynamically as of countDate (exclude current session's adjustment if it was saved)
+    const expectedMap = await calculateExpectedStockForDate(date, activeSessionId);
+    
     setRows(prev => prev.map(row => ({
       ...row,
       countInput: "",
@@ -193,6 +199,7 @@ export function FgCountContent() {
       saving: false,
       error: null,
       variance: null,
+      expectedStock: expectedMap[row.item.id] ?? 0,
     })));
     setSaved(0);
     setActiveSessionId(null);
@@ -208,18 +215,35 @@ export function FgCountContent() {
     } finally {
       setIsSessionLoading(false);
     }
-  }, [applySessionLines]);
+  }, [applySessionLines, activeSessionId]);
 
   // ── Load ───────────────────────────────────────────────────────────────────
+  const [latestCounts, setLatestCounts] = useState<Record<string, { lastCountDate: string | null; latestVariance: number }>>({});
+
   const load = useCallback(async () => {
     setIsLoading(true);
-    const items = await loadSaleItems();
+    const [items, counts] = await Promise.all([
+      loadSaleItems(),
+      loadLatestFgCounts()
+    ]);
     const active = items.filter(i => i.isActive);
-    setRows(blankRows(active));
+    const expectedMap = await calculateExpectedStockForDate(countDate, null);
+    setRows(blankRows(active, expectedMap));
     setSaved(0);
+    setLatestCounts(counts || {});
     sessionIdRef.current = `FGC-${Date.now().toString(36).toUpperCase()}`;
-    setIsLoading(false);
-  }, []);
+    
+    try {
+      const savedSession = await loadFgCountSessionByDate(countDate);
+      if (savedSession) {
+        applySessionLines(savedSession.lines, savedSession.session.id, savedSession.session.session_name);
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [countDate, applySessionLines]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
@@ -249,7 +273,7 @@ export function FgCountContent() {
 
   // ── Value totals (making_cost based) ──────────────────────────────────────
   const systemFgValue = visible.reduce(
-    (s, r) => s + r.item.instock * r.item.makingCost, 0
+    (s, r) => s + r.expectedStock * r.item.makingCost, 0
   );
   const physicalFgValue = visible.reduce((s, r) => {
     const num = parseFloat(r.countInput);
@@ -319,7 +343,7 @@ export function FgCountContent() {
       if (r.item.id !== itemId) return r;
       const num    = parseFloat(val);
       const variance = val !== "" && !isNaN(num)
-        ? num - r.item.instock
+        ? num - r.expectedStock
         : null;
       return { ...r, countInput: val, variance, saved: false, error: null };
     }));
@@ -336,37 +360,6 @@ export function FgCountContent() {
       variance: null,
     })));
     setSaved(0);
-  };
-
-  const persistCountLines = async (countRows: CountRow[]) => {
-    const sessionId = activeSessionId ?? sessionIdRef.current;
-    sessionIdRef.current = sessionId;
-    setActiveSessionId(sessionId);
-
-    return upsertFgCountSessionWithLines({
-      session: {
-        id: sessionId,
-        countDate,
-        sessionName: sessionName.trim() || null,
-        countedBy: user?.id ?? null,
-        countedByName: countedByLabel,
-      },
-      lines: countRows.map(row => {
-        const physicalQty = parseFloat(row.countInput);
-        const varianceQty = physicalQty - row.item.instock;
-        const unitCost = row.item.makingCost || 0;
-        return {
-          itemId: row.item.id,
-          itemName: row.item.name,
-          unit: row.item.baseUnit,
-          systemQty: row.item.instock,
-          physicalQty,
-          varianceQty,
-          unitCost,
-          varianceValue: varianceQty * unitCost,
-        };
-      }),
-    });
   };
 
   // ── Save single row ────────────────────────────────────────────────────────
@@ -386,30 +379,30 @@ export function FgCountContent() {
       return false;
     }
 
-    const delta = num - row.item.instock;
     setRows(prev => prev.map(r =>
       r.item.id === row.item.id ? { ...r, saving: true, error: null } : r
     ));
 
-    const persistResult = await persistCountLines([row]);
-    if (!persistResult.success) {
-      setRows(prev => prev.map(r =>
-        r.item.id === row.item.id
-          ? { ...r, saving: false, error: persistResult.error?.message ?? "Session save failed" }
-          : r
-      ));
-      return false;
-    }
+    const sessionId = activeSessionId ?? sessionIdRef.current;
+    sessionIdRef.current = sessionId;
+    setActiveSessionId(sessionId);
 
-    if (delta === 0) {
-      setRows(prev => prev.map(r =>
-        r.item.id === row.item.id ? { ...r, saving: false, saved: true, error: null } : r
-      ));
-      return true;
-    }
+    // Dynamic Expected Stock check immediately before saving (Safeguard 4)
+    const freshExpectedMap = await calculateExpectedStockForDate(countDate, sessionId);
+    const freshExpected = freshExpectedMap[row.item.id] ?? 0;
 
-    // Write stock
-    const res = await updateSaleItemStock(row.item.id, delta);
+    const res = await saveFgCountLineAtomic({
+      sessionId,
+      countDate,
+      sessionName: sessionName.trim() || null,
+      countedBy: user?.id ?? null,
+      countedByName: countedByLabel,
+      itemId: row.item.id,
+      itemName: row.item.name,
+      unit: row.item.baseUnit,
+      physicalQty: num,
+      unitCost: row.item.makingCost || 0,
+    });
 
     if (!res.success) {
       setRows(prev => prev.map(r =>
@@ -420,35 +413,7 @@ export function FgCountContent() {
       return false;
     }
 
-    // Log variance movement (fire-and-forget)
-    // item_id for hq_sale_items is the sale item id itself — used as movement reference.
-    // location_id = LOC-HQ (commissary stock).
-    const varianceValue = delta * row.item.makingCost;
-    logMovement({
-      locationId:    "LOC-HQ",
-      itemId:        row.item.id,
-      movementType:  delta > 0 ? "count_variance_gain" : "count_variance_loss",
-      quantity:      Math.abs(delta),
-      unitCost:      row.item.makingCost > 0 ? row.item.makingCost : null,
-      referenceType: "fg_count",
-      referenceId:   sessionIdRef.current,
-      notes:         JSON.stringify({
-        kind: "fg_count_session",
-        count_date: countDate,
-        session_name: sessionName.trim() || null,
-        counted_by: user?.id ?? null,
-        counted_by_name: countedByLabel,
-        item_name: row.item.name,
-        unit: row.item.baseUnit,
-        system_qty: row.item.instock,
-        physical_qty: num,
-        variance_qty: delta,
-        variance_value: varianceValue,
-        display_note: `FG count: system ${fmt(row.item.instock)} -> counted ${fmt(num)} (${delta > 0 ? "+" : ""}${fmt(delta)}) - ${row.item.name}`,
-      }),
-    });
-
-    // Update local row with new stock value
+    // Update local row with saved atomic values
     setRows(prev => prev.map(r =>
       r.item.id === row.item.id
         ? {
@@ -456,8 +421,9 @@ export function FgCountContent() {
             saving:   false,
             saved:    true,
             error:    null,
-            variance: delta,
-            item:     { ...r.item, instock: res.newStock ?? num },
+            variance: res.variance ?? (num - freshExpected),
+            expectedStock: res.expectedStock ?? freshExpected,
+            item:     { ...r.item, instock: num },
           }
         : r
     ));
@@ -719,7 +685,7 @@ export function FgCountContent() {
           <table className="w-full text-sm">
             <thead className="border-b border-slate-200 bg-slate-50">
               <tr>
-                {["Item", "Category", "Making Cost", "System Stock", "System Value", "Physical Count", "Physical Value", "Variance", "Variance Value", "Status"].map(h => (
+                {["Finished Good", "Expected Stock", "Physical Count", "Variance", "Last Count Date"].map(h => (
                   <th key={h} className="whitespace-nowrap px-4 py-3 text-left text-[11px] font-bold uppercase tracking-[0.14em] text-slate-500">
                     {h}
                   </th>
@@ -729,7 +695,7 @@ export function FgCountContent() {
             <tbody className="divide-y divide-slate-100">
               {visible.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="px-4 py-10 text-center text-sm text-slate-500">
+                  <td colSpan={5} className="px-4 py-10 text-center text-sm text-slate-500">
                     No items match your filters.
                   </td>
                 </tr>
@@ -746,47 +712,33 @@ export function FgCountContent() {
                         : "hover:bg-slate-50"
                     }`}
                   >
-                    {/* Item name */}
+                    {/* Finished Good */}
                     <td className="px-4 py-2.5">
                       <p className="font-semibold leading-tight text-slate-950">{row.item.name}</p>
-                      <p className="mt-0.5 font-mono text-[10px] text-slate-400">{row.item.id}</p>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        <span className="font-mono text-[10px] text-slate-400">{row.item.id}</span>
+                        {row.item.category && (
+                          <span className="inline-flex items-center rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-600">
+                            {row.item.category}
+                          </span>
+                        )}
+                        {row.item.makingCost > 0 && (
+                          <span className="font-mono text-[9px] text-slate-400">
+                            ({$fmt(row.item.makingCost)}/{row.item.baseUnit})
+                          </span>
+                        )}
+                      </div>
                     </td>
 
-                    {/* Category */}
-                    <td className="px-4 py-2.5">
-                      <span className="text-xs text-slate-500">{row.item.category ?? "—"}</span>
-                    </td>
-
-                    {/* Making Cost */}
-                    <td className="px-4 py-2.5">
-                      {row.item.makingCost > 0 ? (
-                        <span className="font-mono text-xs tabular-nums text-slate-700">
-                          {$fmt(row.item.makingCost)}
-                          <span className="text-slate-400">/{row.item.baseUnit}</span>
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
-                          No cost
-                        </span>
-                      )}
-                    </td>
-
-                    {/* System stock */}
+                    {/* Expected Stock */}
                     <td className="px-4 py-2.5">
                       <span className="font-mono font-semibold tabular-nums text-slate-800">
-                        {fmt(row.item.instock)}
+                        {fmt(row.expectedStock)}
                       </span>
                       <span className="ml-1 text-xs text-slate-400">{row.item.baseUnit}</span>
                     </td>
 
-                    {/* System Value */}
-                    <td className="px-4 py-2.5">
-                      <span className="font-mono text-xs tabular-nums text-slate-500">
-                        {$fmt(row.item.instock * row.item.makingCost)}
-                      </span>
-                    </td>
-
-                    {/* Count input */}
+                    {/* Physical Count */}
                     <td className="px-4 py-2.5">
                       <div className="flex items-center gap-2">
                         <input
@@ -794,7 +746,7 @@ export function FgCountContent() {
                           type="number"
                           min="0"
                           step="any"
-                          placeholder={fmt(row.item.instock)}
+                          placeholder={fmt(row.expectedStock)}
                           value={row.countInput}
                           onChange={e => handleInput(row.item.id, e.target.value)}
                           onKeyDown={e => handleKeyDown(e, row.item.id)}
@@ -819,68 +771,49 @@ export function FgCountContent() {
                               : <Save className="h-3.5 w-3.5" />}
                           </button>
                         )}
+                        {row.saved && (
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
+                            <CheckCircle2 className="h-3 w-3" /> Saved
+                          </span>
+                        )}
+                        {row.error && (
+                          <span className="inline-flex items-center gap-1 rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[11px] font-semibold text-red-700">
+                            <AlertTriangle className="h-3 w-3" /> Error
+                          </span>
+                        )}
                       </div>
                       {row.error && (
                         <p className="mt-0.5 text-[10px] text-red-600">{row.error}</p>
                       )}
                     </td>
 
-                    {/* Physical Value */}
-                    <td className="px-4 py-2.5">
-                      {row.countInput !== "" && !isNaN(parseFloat(row.countInput)) ? (
-                        <span className="font-mono text-xs font-semibold tabular-nums text-blue-700">
-                          {$fmt(parseFloat(row.countInput) * row.item.makingCost)}
-                        </span>
-                      ) : (
-                        <span className="text-xs text-slate-300">—</span>
-                      )}
-                    </td>
-
-                    {/* Variance qty */}
+                    {/* Variance */}
                     <td className="px-4 py-2.5">
                       {vLabel ? (
-                        <span className={`inline-flex items-center gap-1 text-xs font-semibold tabular-nums ${vLabel.color}`}>
-                          {vLabel.icon} {vLabel.label}
-                        </span>
+                        <div className="flex flex-col gap-0.5">
+                          <span className={`inline-flex items-center gap-1 text-xs font-semibold tabular-nums ${vLabel.color}`}>
+                            {vLabel.icon} {vLabel.label}
+                          </span>
+                          {row.variance !== null && row.item.makingCost > 0 && (
+                            <span className="font-mono text-[10px] text-slate-400">
+                              {row.variance > 0 ? "+" : ""}{$fmt(row.variance * row.item.makingCost)}
+                            </span>
+                          )}
+                        </div>
                       ) : (
                         <span className="text-xs text-slate-300">—</span>
                       )}
                     </td>
 
-                    {/* Variance Value */}
-                    <td className="px-4 py-2.5">
-                      {row.variance !== null ? (
-                        <span className={`font-mono tabular-nums text-xs font-semibold ${
-                          row.variance === 0
-                            ? "text-slate-500"
-                            : row.variance > 0
-                            ? "text-emerald-700"
-                            : "text-red-600"
-                        }`}>
-                          {row.variance > 0 ? "+" : ""}{$fmt(row.variance * row.item.makingCost)}
-                        </span>
-                      ) : (
-                        <span className="text-xs text-slate-300">—</span>
-                      )}
-                    </td>
-
-                    {/* Status */}
-                    <td className="px-4 py-2.5">
-                      {row.saved ? (
-                        <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
-                          <CheckCircle2 className="h-3 w-3" /> Saved
-                        </span>
-                      ) : row.error ? (
-                        <span className="inline-flex items-center gap-1 rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[11px] font-semibold text-red-700">
-                          <AlertTriangle className="h-3 w-3" /> Error
-                        </span>
-                      ) : row.countInput !== "" ? (
-                        <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-700">
-                          Pending
-                        </span>
-                      ) : (
-                        <span className="text-[11px] text-slate-300">—</span>
-                      )}
+                    {/* Last Count Date */}
+                    <td className="px-4 py-2.5 text-xs text-slate-600">
+                      {latestCounts[row.item.id]?.lastCountDate
+                        ? new Date(latestCounts[row.item.id].lastCountDate + 'T00:00:00').toLocaleDateString("en-US", {
+                            month: "short",
+                            day: "numeric",
+                            year: "numeric"
+                          })
+                        : "Never"}
                     </td>
                   </tr>
                 );
