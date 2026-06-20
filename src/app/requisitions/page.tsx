@@ -432,17 +432,83 @@ function LocationManagerView({
   const lowStockCount = catalogItems.filter(i => i.status === "low_stock" || i.status === "out_of_stock" || i.status === "not_available").length;
   const lastSubmittedOrder = requisitions[0]?.id ?? "None";
 
+  // ── Single source-of-truth quantity helper ───────────────────────────────────────────────────
+  //
+  // All quantity changes — catalog input, cart input, Add button, mobile card,
+  // and Edit Request mode — must go through this one function.
+  //
+  // rawCatalogQty  : the value that appears in the catalog input (units or packs,
+  //                  exactly what the user typed).
+  // fromCart       : when true, rawCatalogQty is already in "cart units"
+  //                  (i.e. the cart input changed, not the catalog input).
+  //
+  // The function:
+  //   1. Clamps to ≥0
+  //   2. Updates catalogQtyById
+  //   3. Computes quantityRequested for the matching line item
+  //      (for FG items the cart stores packs, not raw units)
+  //   4. If item is already in cart:
+  //        qty > 0 → updates quantityRequested
+  //        qty = 0 → removes line item from cart
+  //   5. If called fromCart also back-syncs catalogQtyById
+  const updateItemQuantity = (itemId: string, rawCatalogQty: number | string, { fromCart = false } = {}) => {
+    const qty = Math.max(0, Number(rawCatalogQty) || 0);
+
+    setLineItems(prev => {
+      const inCart = prev.some(
+        li => (li.catalogItemId ?? li.finishedGoodId ?? li.itemId) === itemId
+      );
+      if (!inCart) return prev; // not yet added — only catalogQtyById needs updating
+
+      if (qty <= 0) {
+        // Remove from cart when zeroed
+        return prev.filter(
+          li => (li.catalogItemId ?? li.finishedGoodId ?? li.itemId) !== itemId
+        );
+      }
+
+      return prev.map(li => {
+        if ((li.catalogItemId ?? li.finishedGoodId ?? li.itemId) !== itemId) return li;
+        // FG items: cart quantityRequested is in packs.
+        // When the catalog input changes (fromCart=false) we interpret the
+        // user’s value as a pack count directly — the catalog input for FG
+        // items already shows packs (same as the cart).
+        // When the cart input changes (fromCart=true) the value is already packs.
+        const cartQty = qty; // for both FG and non-FG, catalog input = pack count
+        return { ...li, quantityRequested: cartQty };
+      });
+    });
+
+    // Always keep catalogQtyById in sync
+    setCatalogQtyById(prev => ({ ...prev, [itemId]: qty }));
+  };
+
+  // Cart-side quantity change: update lineItems AND back-sync catalogQtyById.
+  // When qty becomes 0 the line is removed and catalog resets to 0.
+  const updateQty = (id: string, qty: number) => {
+    updateItemQuantity(id, qty, { fromCart: true });
+  };
+
+  const removeLineItem = (id: string) => {
+    setLineItems(prev => prev.filter(li => (li.catalogItemId ?? li.finishedGoodId ?? li.itemId) !== id));
+    // Reset catalog input to 0 when item is manually removed via the ✕ button
+    setCatalogQtyById(prev => ({ ...prev, [id]: 0 }));
+  };
+
+  // ── Add item to cart (called by "Add" button) ──────────────────────────────
+  // Reads the current catalogQtyById value and creates a new cart line.
+  // Never defaults to qty=1 — user must have entered a positive number.
+  // After adding, catalogQtyById retains its value so the input stays in sync.
   const addItemById = (itemId: string) => {
     if (!itemId) return;
-    // Only add if user has explicitly typed a qty > 0. Never default to 1.
     const rawQty = catalogQtyById[itemId];
     const quantity = Math.max(0, Number(rawQty ?? 0));
-    if (quantity <= 0) return; // user must enter a positive number first
+    if (quantity <= 0) return;
 
     // ── Local vendor path ──────────────────────────────────────────────────
     const localItem = localCatalogItems.find(c => c.itemId === itemId);
     if (localItem) {
-      if (lineItems.some(li => li.catalogItemId === localItem.itemId)) return; // already added
+      if (lineItems.some(li => li.catalogItemId === localItem.itemId)) return;
       const packQty = localItem.packQty > 0 ? localItem.packQty : 1;
       setLineItems(prev => [
         ...prev,
@@ -463,14 +529,14 @@ function LocationManagerView({
       return;
     }
 
-    // ── HQ FG path ───────────────────────────────────────────────────
+    // ── HQ FG path ────────────────────────────────────────────────────────
+    // The catalog input shows pack count for FG items — use quantity directly.
     if (fgMode) {
       const saleItem = saleItems.find(s => s.id === itemId);
       if (!saleItem) return;
       if (lineItems.some(li => li.finishedGoodId === saleItem.id)) return;
       const packQty = (saleItem.packQty != null && saleItem.packQty > 0) ? saleItem.packQty : 1;
       const packPrice = saleItem.effectivePrice * packQty;
-      const packCount = Math.ceil(quantity / packQty);
       setLineItems(prev => [
         ...prev,
         {
@@ -483,12 +549,12 @@ function LocationManagerView({
           unit:              saleItem.baseUnit,
           packQty,
           unitPrice:         packPrice,
-          quantityRequested: packCount,
+          quantityRequested: quantity, // catalog input = pack count directly
           sourceCommissary:  saleItem.sourceCommissary,
         },
       ]);
     } else {
-      // ── HQ raw inventory path ───────────────────────────────────────
+      // ── HQ raw inventory path ──────────────────────────────────────────
       if (lineItems.some(li => li.itemId === itemId)) return;
       const inv = inventoryItems.find(i => i.id === itemId);
       if (!inv) return;
@@ -510,14 +576,6 @@ function LocationManagerView({
       ]);
     }
   };
-
-  const removeLineItem = (id: string) =>
-    setLineItems(prev => prev.filter(li => (li.catalogItemId ?? li.finishedGoodId ?? li.itemId) !== id));
-
-  const updateQty = (id: string, qty: number) =>
-    setLineItems(prev =>
-      prev.map(li => (li.catalogItemId ?? li.finishedGoodId ?? li.itemId) === id ? { ...li, quantityRequested: Math.max(0, qty) } : li)
-    );
 
   const showSubmitNotice = (type: "success" | "warning", message: string) => {
     setSubmitNotice({ type, message });
@@ -616,6 +674,17 @@ function LocationManagerView({
     setLineItems(draftItems);
     setDraftNotes(selectedReq.notes || "");
     setEditingRequisitionId(selectedReq.id);
+
+    // Populate catalogQtyById so the catalog inputs reflect the loaded quantities.
+    // This ensures catalog input and cart quantity are in sync from the moment
+    // Edit Request mode is entered.
+    const initialCatalogQty: Record<string, number> = {};
+    draftItems.forEach(li => {
+      const id = li.catalogItemId ?? li.finishedGoodId ?? li.itemId;
+      if (id) initialCatalogQty[id] = li.quantityRequested;
+    });
+    setCatalogQtyById(prev => ({ ...prev, ...initialCatalogQty }));
+
     setSelectedReq(null);
     setReqLineItems([]);
   };
@@ -885,25 +954,7 @@ function LocationManagerView({
                               type="number"
                               min={0}
                               value={catalogQtyById[item.id] ?? 0}
-                              onChange={(e) => {
-                                const newQty = Math.max(0, Number(e.target.value) || 0);
-                                setCatalogQtyById(prev => ({ ...prev, [item.id]: newQty }));
-                                // If item is already in cart and user zeroes out, remove it
-                                if (newQty <= 0 && item.added) {
-                                  setLineItems(prev => prev.filter(li => (li.catalogItemId ?? li.finishedGoodId ?? li.itemId) !== item.id));
-                                }
-                                // If item is already in cart and user changes qty, sync cart qty too
-                                if (newQty > 0 && item.added) {
-                                  setLineItems(prev => prev.map(li => {
-                                    if ((li.catalogItemId ?? li.finishedGoodId ?? li.itemId) === item.id) {
-                                      const isFG = !!li.finishedGoodId;
-                                      const resolvedQty = isFG ? Math.ceil(newQty / (li.packQty || 1)) : newQty;
-                                      return { ...li, quantityRequested: resolvedQty };
-                                    }
-                                    return li;
-                                  }));
-                                }
-                              }}
+                              onChange={(e) => updateItemQuantity(item.id, e.target.value)}
                               className="h-10 w-20 rounded-lg border border-slate-200 px-3 text-sm outline-none ring-emerald-600 focus:ring-2"
                             />
                           </TableCell>
@@ -952,20 +1003,7 @@ function LocationManagerView({
                           type="number"
                           min={0}
                           value={catalogQtyById[item.id] ?? 0}
-                          onChange={(e) => {
-                            const newQty = Math.max(0, Number(e.target.value) || 0);
-                            setCatalogQtyById(prev => ({ ...prev, [item.id]: newQty }));
-                            if (newQty <= 0 && item.added) {
-                              setLineItems(prev => prev.filter(li => (li.catalogItemId ?? li.finishedGoodId ?? li.itemId) !== item.id));
-                            }
-                            if (newQty > 0 && item.added) {
-                              setLineItems(prev => prev.map(li =>
-                                (li.catalogItemId ?? li.finishedGoodId ?? li.itemId) === item.id
-                                  ? { ...li, quantityRequested: newQty }
-                                  : li
-                              ));
-                            }
-                          }}
+                              onChange={(e) => updateItemQuantity(item.id, e.target.value)}
                           className="h-11 w-24 rounded-lg border border-slate-200 px-3 text-sm"
                         />
                         <button
