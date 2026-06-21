@@ -2495,25 +2495,55 @@ function HQAdminView({
 
                       return (
                         <>
-                          {/* Pre-flight warning banner — shown only when there are blocking items */}
+                                {/* Pre-flight warning banner — shown only when there are blocking items */}
                           {hasPreflightErrors && (
                             <div className="w-full rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                               <p className="font-semibold mb-1">⚠ Cannot finalize: mapping issues detected</p>
-                              {localVendorLines.length > 0 && (
-                                <div className="mt-1">
-                                  <p className="font-medium text-amber-700">
-                                    {localVendorLines.length} local vendor item{localVendorLines.length > 1 ? 's' : ''} cannot go through HQ fulfillment:
-                                  </p>
-                                  <ul className="mt-0.5 space-y-0.5 pl-3">
-                                    {localVendorLines.map((li: any) => (
-                                      <li key={li.id} className="list-disc text-amber-700">
-                                        {li.itemName ?? li.catalogItemId ?? li.id}
-                                        <span className="ml-1 font-mono text-[10px] text-amber-500">[local_vendor]</span>
-                                      </li>
-                                    ))}
-                                  </ul>
-                                </div>
-                              )}
+                              {localVendorLines.length > 0 && (() => {
+                                // Inline HQ FC supplier detection — uses the same alias list as
+                                // isHqFulfillmentCentreSupplier() but without an extra fetch.
+                                // supplierSnapshot is a text field snapshotted at order time.
+                                const HQ_FC_ALIASES = [
+                                  'veggie paradise', 'veggieparadise', 'vp',
+                                  'momo loco', 'momoloco', 'momo-loco',
+                                ];
+                                const normSnap = (s: string | null | undefined) =>
+                                  (s ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+                                const isHqFcSnap = (snap: string | null | undefined) =>
+                                  HQ_FC_ALIASES.includes(normSnap(snap));
+
+                                return (
+                                  <div className="mt-1">
+                                    <p className="font-medium text-amber-700">
+                                      {localVendorLines.length} item{localVendorLines.length > 1 ? 's' : ''} blocked from HQ fulfillment — individual setup required:
+                                    </p>
+                                    <ul className="mt-0.5 space-y-0.5 pl-3">
+                                      {localVendorLines.map((li: any) => {
+                                        const isHqFc = isHqFcSnap(li.supplierSnapshot ?? li.supplier_snapshot);
+                                        return (
+                                          <li key={li.id} className="list-disc text-amber-700">
+                                            {li.itemName ?? li.catalogItemId ?? li.id}
+                                            {isHqFc ? (
+                                              <span className="ml-1 font-semibold text-slate-600 text-[10px]">
+                                                [HQ Supplier Item — Setup Required]
+                                              </span>
+                                            ) : (
+                                              <span className="ml-1 font-mono text-[10px] text-amber-500">[local_vendor]</span>
+                                            )}
+                                          </li>
+                                        );
+                                      })}
+                                    </ul>
+                                    {localVendorLines.some((li: any) => isHqFcSnap(li.supplierSnapshot ?? li.supplier_snapshot)) && (
+                                      <p className="mt-1 text-[10px] text-slate-500 italic">
+                                        Items marked "HQ Supplier Item — Setup Required" are from approved HQ suppliers
+                                        (Veggie Paradise, Momo Loco) but have not yet been individually linked to an HQ Sale Item.
+                                        Contact HQ admin to complete setup before fulfillment.
+                                      </p>
+                                    )}
+                                  </div>
+                                );
+                              })()}
                               {unmappedHqLines.length > 0 && (
                                 <div className="mt-1">
                                   <p className="font-medium text-amber-700">

@@ -41,15 +41,17 @@ import {
   ShoppingBag,
   BookOpen,
   Filter,
+  Warehouse,
 } from "lucide-react";
-import { updateSaleItemCost, convertYieldToBaseUnit, type SaleItem } from "@/lib/storage";
+import { updateSaleItemCost, convertYieldToBaseUnit, isHqFulfillmentCentreSupplier, type SaleItem } from "@/lib/storage";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type CostMethod =
-  | "recipe_derived"    // has sourceRecipeId + matching recipe found
-  | "manual_purchased"  // externally sourced — no recipe needed
-  | "manual_no_recipe"; // HQ-produced but recipe is missing → warning
+  | "recipe_derived"      // has sourceRecipeId + matching recipe found
+  | "manual_purchased"    // externally sourced — no recipe needed
+  | "manual_no_recipe"    // HQ-produced but recipe is missing → warning
+  | "hq_supplier_setup";  // from an HQ Fulfillment Centre supplier but not yet classified/mapped → neutral notice
 
 export type AuditSource =
   | "recipe:id"         // linked via source_recipe_id
@@ -68,7 +70,7 @@ export interface AuditRow {
   error:       string | null;
 }
 
-export type AuditFilter = "all" | "recipe_derived" | "manual_purchased" | "manual_no_recipe";
+export type AuditFilter = "all" | "recipe_derived" | "manual_purchased" | "manual_no_recipe" | "hq_supplier_setup";
 
 const STORAGE_KEY = "fg_cost_method_overrides_v1";
 
@@ -100,7 +102,8 @@ const $fmt = (n: number) =>
 export function buildAuditRows(
   items: SaleItem[],
   recipes: any[],
-  overrides: Record<string, CostMethod>
+  overrides: Record<string, CostMethod>,
+  suppliers: any[] = []
 ): AuditRow[] {
   // Only show items with missing / zero making_cost
   const missing = items.filter(i => i.isActive && (!i.makingCost || i.makingCost <= 0));
@@ -139,13 +142,14 @@ export function buildAuditRows(
     if (overrides[item.id]) {
       costMethod = overrides[item.id];
     } else if (source !== "none") {
-      // Has a recipe → recipe_derived (even if cost can't be computed due to unit mismatch)
       costMethod = "recipe_derived";
     } else if (item.manualPrice != null && item.manualPrice > 0) {
-      // Has explicit manual price set → treat as purchased item
       costMethod = "manual_purchased";
+    } else if (isHqFulfillmentCentreSupplier(item.sourceCommissary, suppliers)) {
+      // From a known HQ Fulfillment Centre supplier but not yet individually classified.
+      // Show a neutral notice — not an error, not a recipe warning.
+      costMethod = "hq_supplier_setup";
     } else {
-      // No recipe, no manual price → missing recipe warning
       costMethod = "manual_no_recipe";
     }
 
@@ -172,6 +176,13 @@ function costMethodBadge(method: CostMethod): {
   tip: string;
 } {
   switch (method) {
+    case "hq_supplier_setup":
+      return {
+        label:   "HQ Supplier — Setup Required",
+        classes: "text-slate-600 bg-slate-50 border-slate-200",
+        icon:    <Warehouse className="h-2.5 w-2.5 shrink-0" />,
+        tip:     "This item is supplied by an HQ Fulfillment Centre supplier but has not yet been classified as HQ Purchased or HQ Produced. No cost change will be made automatically.",
+      };
     case "recipe_derived":
       return {
         label:   "Recipe Derived",
@@ -199,10 +210,11 @@ function costMethodBadge(method: CostMethod): {
 // ─── Filter tab config ────────────────────────────────────────────────────────
 
 const FILTER_TABS: { key: AuditFilter; label: string }[] = [
-  { key: "all",              label: "All" },
-  { key: "recipe_derived",   label: "Recipe Derived" },
-  { key: "manual_purchased", label: "Purchased / Manual Cost" },
-  { key: "manual_no_recipe", label: "Missing Recipe" },
+  { key: "all",               label: "All" },
+  { key: "recipe_derived",    label: "Recipe Derived" },
+  { key: "manual_purchased",  label: "Purchased / Manual Cost" },
+  { key: "hq_supplier_setup", label: "HQ Supplier Setup Required" },
+  { key: "manual_no_recipe",  label: "Missing Recipe" },
 ];
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -210,11 +222,12 @@ const FILTER_TABS: { key: AuditFilter; label: string }[] = [
 interface Props {
   items:         SaleItem[];
   recipes:       any[];
+  suppliers:     any[];           // loaded supplier master — used for HQ FC detection
   onCostApplied: () => void;
-  onCreateRecipe?: (itemName: string) => void; // optional: navigate to recipe creation
+  onCreateRecipe?: (itemName: string) => void;
 }
 
-export function FgCostAuditPanel({ items, recipes, onCostApplied, onCreateRecipe }: Props) {
+export function FgCostAuditPanel({ items, recipes, suppliers, onCostApplied, onCreateRecipe }: Props) {
   const [overrides, setOverrides]   = useState<Record<string, CostMethod>>({});
   const [rows, setRows]             = useState<AuditRow[]>([]);
   const [expanded, setExpanded]     = useState(true);
@@ -229,12 +242,12 @@ export function FgCostAuditPanel({ items, recipes, onCostApplied, onCreateRecipe
 
   // Rebuild rows when data or overrides change
   useEffect(() => {
-    setRows(buildAuditRows(items, recipes, overrides));
-  }, [items, recipes, overrides]);
+    setRows(buildAuditRows(items, recipes, overrides, suppliers));
+  }, [items, recipes, overrides, suppliers]);
 
   const rebuild = useCallback(() => {
-    setRows(buildAuditRows(items, recipes, overrides));
-  }, [items, recipes, overrides]);
+    setRows(buildAuditRows(items, recipes, overrides, suppliers));
+  }, [items, recipes, overrides, suppliers]);
 
   // ── Method override toggle ──────────────────────────────────────────────────
   const setMethod = (itemId: string, method: CostMethod) => {
@@ -250,6 +263,7 @@ export function FgCostAuditPanel({ items, recipes, onCostApplied, onCreateRecipe
   // ── Counts ──────────────────────────────────────────────────────────────────
   const derivable    = rows.filter(r => r.costMethod === "recipe_derived" && r.derivedCost !== null && !r.applied);
   const purchased    = rows.filter(r => r.costMethod === "manual_purchased");
+  const hqSetup      = rows.filter(r => r.costMethod === "hq_supplier_setup");
   const noRecipe     = rows.filter(r => r.costMethod === "manual_no_recipe");
 
   // ── Apply single ──────────────────────────────────────────────────────────
@@ -306,6 +320,8 @@ export function FgCostAuditPanel({ items, recipes, onCostApplied, onCreateRecipe
               {" · "}
               <span className="text-blue-700 font-medium">{purchased.length} purchased/manual</span>
               {" · "}
+              <span className="text-slate-600 font-medium">{hqSetup.length} HQ supplier setup required</span>
+              {" · "}
               <span className="text-amber-700 font-medium">{noRecipe.length} missing recipe</span>
             </p>
           </div>
@@ -342,9 +358,10 @@ export function FgCostAuditPanel({ items, recipes, onCostApplied, onCreateRecipe
             <Filter className="h-3.5 w-3.5 text-slate-400 mr-1 shrink-0" />
             {FILTER_TABS.map(tab => {
               const count =
-                tab.key === "all"              ? rows.length :
-                tab.key === "recipe_derived"   ? rows.filter(r => r.costMethod === "recipe_derived").length :
-                tab.key === "manual_purchased" ? purchased.length :
+                tab.key === "all"               ? rows.length :
+                tab.key === "recipe_derived"    ? rows.filter(r => r.costMethod === "recipe_derived").length :
+                tab.key === "manual_purchased"  ? purchased.length :
+                tab.key === "hq_supplier_setup" ? hqSetup.length :
                 noRecipe.length;
               const isActive = activeFilter === tab.key;
               return (
@@ -385,8 +402,9 @@ export function FgCostAuditPanel({ items, recipes, onCostApplied, onCreateRecipe
                 )}
                 {visibleRows.map(row => {
                   const badge = costMethodBadge(row.costMethod);
-                  const isPurchased = row.costMethod === "manual_purchased";
-                  const isNoRecipe  = row.costMethod === "manual_no_recipe";
+                  const isPurchased  = row.costMethod === "manual_purchased";
+                  const isNoRecipe   = row.costMethod === "manual_no_recipe";
+                  const isHqSetup    = row.costMethod === "hq_supplier_setup";
 
                   return (
                     <tr
@@ -394,6 +412,7 @@ export function FgCostAuditPanel({ items, recipes, onCostApplied, onCreateRecipe
                       className={`transition-colors ${
                         row.applied    ? "bg-green-50/60" :
                         isPurchased    ? "bg-blue-50/20 hover:bg-blue-50/40" :
+                        isHqSetup      ? "bg-slate-50/40 hover:bg-slate-50/70" :
                         isNoRecipe     ? "hover:bg-amber-50/40" :
                         "hover:bg-slate-50"
                       }`}
@@ -508,6 +527,33 @@ export function FgCostAuditPanel({ items, recipes, onCostApplied, onCreateRecipe
                           <span className="inline-flex items-center gap-1 text-[11px] text-blue-700 font-medium">
                             <ShoppingBag className="h-3 w-3" /> Edit cost in drawer
                           </span>
+                        ) : isHqSetup ? (
+                          // HQ Fulfillment Centre supplier item not yet individually set up.
+                          // These buttons write to local state only — zero DB changes.
+                          <div className="flex flex-col gap-1.5">
+                            <span className="text-[11px] text-slate-600 font-medium">Classify for review (local only):</span>
+                            <div className="flex gap-1 flex-wrap">
+                              <button
+                                onClick={() => setMethod(row.item.id, "manual_purchased")}
+                                className="inline-flex items-center gap-1 px-2 py-1 text-[10px] font-semibold bg-blue-50 border border-blue-200 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors"
+                              >
+                                <ShoppingBag className="h-2.5 w-2.5" /> Review as HQ Purchased
+                              </button>
+                              {onCreateRecipe && (
+                                <button
+                                  onClick={() => onCreateRecipe(row.item.name)}
+                                  className="inline-flex items-center gap-1 px-2 py-1 text-[10px] font-semibold bg-amber-50 border border-amber-200 text-amber-700 rounded-lg hover:bg-amber-100 transition-colors"
+                                >
+                                  <BookOpen className="h-2.5 w-2.5" /> Start Recipe Setup
+                                </button>
+                              )}
+                            </div>
+                            {/* Safety disclaimer — always visible under the action buttons */}
+                            <p className="text-[10px] text-slate-400 leading-tight mt-0.5">
+                              🔒 Review only — does not create an HQ item, change catalog routing,
+                              add stock, or enable fulfillment.
+                            </p>
+                          </div>
                         ) : isNoRecipe ? (
                           <div className="flex flex-col gap-1">
                             <span className="text-[11px] text-amber-700 font-semibold">Recipe Missing</span>

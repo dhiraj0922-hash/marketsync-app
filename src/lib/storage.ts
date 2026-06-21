@@ -1906,10 +1906,20 @@ const mapSupplierToFrontend = (db: any) => ({
     onTimePct: db.ontimepct,
     priceVariance: db.pricevariance,
     status: db.status,
-    rating: db.rating
+    rating: db.rating,
+    // ── Fulfillment model foundation ──────────────────────────────────────────
+    fulfillmentModel: (db.fulfillment_model ?? 'unclassified') as
+      'hq_fulfillment_centre' | 'local_vendor' | 'unclassified',
+    normalizedName:   db.normalized_name   ?? '',
+    nameAliases:      Array.isArray(db.name_aliases) ? (db.name_aliases as string[]) : [],
 });
 
 const mapSupplierToDB = (s: any) => {
+   // Auto-derive normalized_name from name at write time
+   const derivedNormalized = typeof s.name === 'string'
+     ? s.name.trim().replace(/\s+/g, ' ').toLowerCase()
+     : '';
+
    const mapped = {
       name: s.name || '',
       category: s.category || '',
@@ -1925,7 +1935,13 @@ const mapSupplierToDB = (s: any) => {
       ontimepct: isNaN(parseFloat(s.onTimePct)) ? 100 : parseFloat(s.onTimePct),
       pricevariance: isNaN(parseFloat(s.priceVariance)) ? 0 : parseFloat(s.priceVariance),
       status: s.status || '',
-      rating: s.rating || ''
+      rating: s.rating || '',
+      // ── Fulfillment model foundation ────────────────────────────────────────
+      fulfillment_model: (['hq_fulfillment_centre','local_vendor','unclassified'].includes(s.fulfillmentModel)
+        ? s.fulfillmentModel
+        : 'unclassified') as string,
+      normalized_name:   s.normalizedName || derivedNormalized,
+      name_aliases:      Array.isArray(s.nameAliases) ? s.nameAliases : [],
    };
    if (s.id && typeof s.id === 'number') (mapped as any).id = s.id;
    return mapped;
@@ -1960,9 +1976,27 @@ export async function resolveSupplier(supplierName: string): Promise<number | nu
   if (!normalised) return null;
 
   const suppliers = await loadSuppliers();
-  const match = suppliers.find(
-    (s: any) => s.name.trim().replace(/\s+/g, ' ').toLowerCase() === normalised
+
+  // 1. Match by normalized_name (fastest — single field comparison)
+  let match = suppliers.find(
+    (s: any) => (s.normalizedName ?? '').toLowerCase() === normalised
   );
+
+  // 2. Match by name_aliases (handles 'MOMOLOCO' → 'momo loco', 'VP' → 'veggie paradise')
+  if (!match) {
+    match = suppliers.find(
+      (s: any) =>
+        Array.isArray(s.nameAliases) &&
+        s.nameAliases.some((alias: string) => alias.toLowerCase() === normalised)
+    );
+  }
+
+  // 3. Legacy fallback: original exact-name match (preserves backward compatibility)
+  if (!match) {
+    match = suppliers.find(
+      (s: any) => s.name.trim().replace(/\s+/g, ' ').toLowerCase() === normalised
+    );
+  }
 
   if (match) return match.id;
 
@@ -1970,6 +2004,40 @@ export async function resolveSupplier(supplierName: string): Promise<number | nu
   throw new Error(
     `Supplier "${supplierName.trim()}" not found in HQ master. Ask HQ to create it first.`
   );
+}
+
+/**
+ * Returns true if the given free-text supplier name (as stored in catalog rows,
+ * hq_sale_items.source_commissary, or outlet_catalog_items.supplier) resolves
+ * to a supplier marked as fulfillment_model = 'hq_fulfillment_centre'.
+ *
+ * Pass the already-loaded suppliers list to avoid a redundant fetch.
+ * Never mutates any data — read-only lookup.
+ *
+ * @example
+ *   const isHQ = isHqFulfillmentCentreSupplier('MOMOLOCO', suppliers); // true
+ *   const isHQ = isHqFulfillmentCentreSupplier('Veggie Paradise', suppliers); // true
+ *   const isHQ = isHqFulfillmentCentreSupplier('Some Random Shop', suppliers); // false
+ */
+export function isHqFulfillmentCentreSupplier(
+  supplierName: string,
+  suppliers: any[]
+): boolean {
+  if (!supplierName || !Array.isArray(suppliers)) return false;
+  const norm = supplierName.trim().replace(/\s+/g, ' ').toLowerCase();
+  if (!norm) return false;
+
+  return suppliers.some((s: any) => {
+    if (s.fulfillmentModel !== 'hq_fulfillment_centre') return false;
+    // Check normalized_name
+    if ((s.normalizedName ?? '').toLowerCase() === norm) return true;
+    // Check aliases
+    if (Array.isArray(s.nameAliases) &&
+        s.nameAliases.some((a: string) => a.toLowerCase() === norm)) return true;
+    // Legacy name fallback
+    if (s.name.trim().replace(/\s+/g, ' ').toLowerCase() === norm) return true;
+    return false;
+  });
 }
 
 

@@ -22,7 +22,9 @@ import {
   ShoppingCart,
   Edit2,
   Save,
-  X
+  X,
+  Warehouse,
+  AlertTriangle
 } from "lucide-react";
 import { 
   LineChart, 
@@ -61,6 +63,7 @@ export default function Suppliers() {
   const [filterStatus, setFilterStatus] = useState("All");
   const [filterLinkedSKUs, setFilterLinkedSKUs] = useState("All");
   const [filterHasPOs, setFilterHasPOs] = useState("All");
+  const [filterFulfillment, setFilterFulfillment] = useState("All");
 
   const uniqueCategories = Array.from(new Set(
     suppliersData
@@ -81,7 +84,8 @@ export default function Suppliers() {
     leadTime: "",
     minOrder: "",
     paymentTerms: "",
-    notes: ""
+    notes: "",
+    fulfillmentModel: "unclassified" as 'hq_fulfillment_centre' | 'local_vendor' | 'unclassified',
   });
 
   const [isLoading, setIsLoading] = useState(true);
@@ -148,18 +152,21 @@ export default function Suppliers() {
       const newId = Date.now(); // millisecond timestamp — unique per session
 
       const finalItem = {
-        id:           newId,
-        name:         testName,
-        category:     newSupplier.category  || "General",
-        contact:      newSupplier.contact   || "-",
-        phone:        newSupplier.phone     || "-",
-        email:        newSupplier.email     || "-",
-        location:     "Manual Entry",
-        minOrder:     newSupplier.minOrder     || "-",
-        paymentTerms: newSupplier.paymentTerms || "-",
-        leadTime:     newSupplier.leadTime     || "-",
-        status:       "Active",
-        notes:        newSupplier.notes || "",
+        id:               newId,
+        name:             testName,
+        category:         newSupplier.category  || "General",
+        contact:          newSupplier.contact   || "-",
+        phone:            newSupplier.phone     || "-",
+        email:            newSupplier.email     || "-",
+        location:         "Manual Entry",
+        minOrder:         newSupplier.minOrder     || "-",
+        paymentTerms:     newSupplier.paymentTerms || "-",
+        leadTime:         newSupplier.leadTime     || "-",
+        status:           "Active",
+        notes:            newSupplier.notes || "",
+        fulfillmentModel: newSupplier.fulfillmentModel || 'unclassified',
+        normalizedName:   testName.toLowerCase(),
+        nameAliases:      [],
       };
 
       console.log("[Suppliers] request start", finalItem);
@@ -177,7 +184,7 @@ export default function Suppliers() {
       console.log("[Suppliers] request success  id=", newId);
       setSuppliersData(prev => [...prev, finalItem]);
       setSaveSuccess(true);
-      setNewSupplier({ name: "", category: "General", contact: "", email: "", phone: "", leadTime: "", minOrder: "", paymentTerms: "", notes: "" });
+      setNewSupplier({ name: "", category: "General", contact: "", email: "", phone: "", leadTime: "", minOrder: "", paymentTerms: "", notes: "", fulfillmentModel: "unclassified" });
       setIsAddDrawerOpen(false);
     } catch (err: any) {
       const msg = err?.message ?? "Unexpected error saving supplier.";
@@ -260,6 +267,9 @@ export default function Suppliers() {
     
     if (filterStatus === "Auto-created" && s.status !== "Auto-created") return false;
     if (filterStatus === "Active" && s.status !== "Active") return false;
+
+    // Fulfillment model filter
+    if (filterFulfillment !== "All" && s.fulfillmentModel !== filterFulfillment) return false;
 
     const linkedSKUCount = inventoryData.filter(i => i.supplierId === s.id).length;
     if (filterLinkedSKUs === "Yes" && linkedSKUCount === 0) return false;
@@ -397,8 +407,10 @@ export default function Suppliers() {
       {/* KPI Row */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         {[
-          { label: "Active Suppliers", value: suppliersData.filter(s => s.status !== "Auto-created").length.toString(), sub: "Managed Accounts" },
+        { label: "Active Suppliers", value: suppliersData.filter(s => s.status !== "Auto-created").length.toString(), sub: "Managed Accounts" },
           { label: "Auto-Created Flags", value: suppliersData.filter(s => s.status === "Auto-created").length.toString(), sub: "Require verification", alert: true },
+          { label: "HQ Fulfillment Centre", value: suppliersData.filter(s => s.fulfillmentModel === "hq_fulfillment_centre").length.toString(), sub: "Approved HQ suppliers" },
+          { label: "Unclassified Suppliers", value: suppliersData.filter(s => s.fulfillmentModel === "unclassified").length.toString(), sub: "Pending review", alert: suppliersData.filter(s => s.fulfillmentModel === "unclassified").length > 0 },
           { label: "Total MTD Spend", value: `$${enrichedSuppliers.reduce((sum, s) => sum + s.monthlySpend, 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`, sub: "Across all vendors" },
           { label: "At Risk Vendors", value: enrichedSuppliers.filter(s => s.dynamicStatus === "At Risk").length.toString(), sub: "Require review", alert: true }
         ].map((stat, i) => (
@@ -465,6 +477,17 @@ export default function Suppliers() {
                 <option value="Yes">Has Past POs</option>
                 <option value="No">No Past POs</option>
              </select>
+             {/* Fulfillment model filter */}
+             <select
+               className="px-3 py-1.5 text-sm font-medium bg-white border border-blue-200 text-blue-700 rounded-lg outline-none focus:ring-1 focus:ring-blue-400 shadow-sm transition-colors"
+               value={filterFulfillment}
+               onChange={(e) => setFilterFulfillment(e.target.value)}
+             >
+               <option value="All">Fulfillment: All</option>
+               <option value="hq_fulfillment_centre">HQ Fulfillment Centre</option>
+               <option value="local_vendor">Local Vendor</option>
+               <option value="unclassified">Unclassified</option>
+             </select>
           </div>
         </CardHeader>
         <CardContent className="p-0">
@@ -472,6 +495,7 @@ export default function Suppliers() {
             <TableHeader className="bg-neutral-50/50 text-xs uppercase tracking-wider">
               <TableRow>
                 <TableHead className="font-semibold px-6 py-3">Vendor</TableHead>
+                <TableHead className="font-semibold py-3">Fulfillment Model</TableHead>
                 <TableHead className="font-semibold py-3">Intelligence</TableHead>
                 <TableHead className="font-semibold py-3">Procurement Terms</TableHead>
                 <TableHead className="font-semibold py-3">Contact</TableHead>
@@ -504,6 +528,22 @@ export default function Suppliers() {
                        </div>
                        <span className="text-xs text-neutral-500 mt-0.5">{supplier.category} • {dynamicItemCount} items linked</span>
                      </div>
+                   </TableCell>
+                   {/* Fulfillment Model badge */}
+                   <TableCell className="py-4">
+                     {supplier.fulfillmentModel === 'hq_fulfillment_centre' ? (
+                       <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold px-2 py-1 rounded-full bg-blue-50 border border-blue-200 text-blue-700">
+                         <Warehouse className="h-3 w-3" /> HQ Fulfilment Centre
+                       </span>
+                     ) : supplier.fulfillmentModel === 'local_vendor' ? (
+                       <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold px-2 py-1 rounded-full bg-neutral-100 border border-neutral-200 text-neutral-600">
+                         Local Vendor
+                       </span>
+                     ) : (
+                       <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold px-2 py-1 rounded-full bg-amber-50 border border-amber-200 text-amber-700">
+                         <AlertTriangle className="h-3 w-3" /> Unclassified
+                       </span>
+                     )}
                    </TableCell>
                    <TableCell className="py-4">
                      <div className="flex flex-col gap-2">
@@ -573,7 +613,7 @@ export default function Suppliers() {
               })}
               {enrichedSuppliers.length === 0 && (
                  <TableRow>
-                   <TableCell colSpan={5} className="text-center py-10 text-neutral-500 text-sm">
+                   <TableCell colSpan={6} className="text-center py-10 text-neutral-500 text-sm">
                       No matching vendors found.
                    </TableCell>
                  </TableRow>
@@ -665,6 +705,27 @@ export default function Suppliers() {
                 </CardContent>
               </Card>
             </div>
+
+            {/* Fulfillment Status Card */}
+            <Card className="shadow-none border-neutral-200">
+               <CardContent className="p-4 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                     <div className={`p-2 rounded-lg ${selectedSupplier.fulfillmentModel === 'hq_fulfillment_centre' ? 'bg-blue-50 text-blue-600' : 'bg-neutral-50 text-neutral-500'}`}>
+                        <Warehouse className="h-5 w-5" />
+                     </div>
+                     <div>
+                        <p className="text-sm font-semibold text-neutral-900">Fulfillment Model</p>
+                        <p className="text-xs text-neutral-500">
+                           {selectedSupplier.fulfillmentModel === 'hq_fulfillment_centre' ? 'HQ Fulfillment Centre' : 
+                            selectedSupplier.fulfillmentModel === 'local_vendor' ? 'Local Vendor' : 'Unclassified'}
+                        </p>
+                     </div>
+                  </div>
+                  <Badge variant={selectedSupplier.fulfillmentModel === 'hq_fulfillment_centre' ? 'default' : 'neutral'}>
+                     {selectedSupplier.fulfillmentModel?.toUpperCase().replace('_', ' ')}
+                  </Badge>
+               </CardContent>
+            </Card>
 
             <Card className="shadow-none border-neutral-200">
                <CardContent className="p-4 space-y-3">
@@ -787,6 +848,22 @@ export default function Suppliers() {
                  <input type="text" value={editForm.category} onChange={e => setEditForm({...editForm, category: e.target.value})} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="Produce, Meat, etc." />
                </div>
              </div>
+             {/* Fulfillment Model */}
+             <div className="space-y-1.5 pt-1">
+               <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Fulfillment Model</label>
+               <select
+                 value={editForm.fulfillmentModel ?? 'unclassified'}
+                 onChange={e => setEditForm({...editForm, fulfillmentModel: e.target.value})}
+                 className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
+               >
+                 <option value="hq_fulfillment_centre">HQ Fulfillment Centre — HQ receives, holds, and ships their products to locations</option>
+                 <option value="local_vendor">Local Vendor — Locations purchase directly; HQ is not involved</option>
+                 <option value="unclassified">Unclassified — Not yet reviewed; treated as blocked from HQ fulfillment</option>
+               </select>
+               <p className="text-[11px] text-neutral-400">
+                 This setting does not automatically convert any catalog items. Each item must be individually reviewed and mapped.
+               </p>
+             </div>
              <div className="grid grid-cols-2 gap-4">
                <div className="space-y-1.5">
                  <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Lead Time</label>
@@ -884,9 +961,25 @@ export default function Suppliers() {
                <input type="text" value={newSupplier.phone} onChange={e => setNewSupplier({...newSupplier, phone: e.target.value})} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500" placeholder="Phone Number" />
              </div>
              <div className="space-y-1.5 pt-2">
-               <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Internal Notes</label>
-               <textarea value={newSupplier.notes} onChange={e => setNewSupplier({...newSupplier, notes: e.target.value})} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 min-h-[80px]" placeholder="Account numbers, special delivery instructions, etc." />
-             </div>
+                <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Internal Notes</label>
+                <textarea value={newSupplier.notes} onChange={e => setNewSupplier({...newSupplier, notes: e.target.value})} className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 min-h-[80px]" placeholder="Account numbers, special delivery instructions, etc." />
+              </div>
+              {/* Fulfillment Model for new supplier */}
+              <div className="space-y-1.5 pt-3 border-t border-neutral-100">
+                <label className="text-xs font-semibold text-neutral-900 uppercase tracking-wider">Fulfillment Model</label>
+                <select
+                  value={newSupplier.fulfillmentModel}
+                  onChange={e => setNewSupplier({...newSupplier, fulfillmentModel: e.target.value as any})}
+                  className="w-full p-2 border border-neutral-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
+                >
+                  <option value="unclassified">Unclassified — Not yet reviewed (default; safe)</option>
+                  <option value="hq_fulfillment_centre">HQ Fulfillment Centre — HQ receives and distributes</option>
+                  <option value="local_vendor">Local Vendor — Locations purchase directly</option>
+                </select>
+                <p className="text-[11px] text-neutral-400">
+                  You can update this later. Unclassified suppliers are blocked from HQ fulfillment until reviewed.
+                </p>
+              </div>
            </div>
          </div>
       </Drawer>

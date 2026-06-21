@@ -16,6 +16,7 @@ import {
   loadCategories, addCategory, convertYieldToBaseUnit,
   loadFinishedGoodLocationAvailability, saveFinishedGoodLocationAvailability,
   loadLatestFgCounts, loadTodayMovementMetrics,
+  loadSuppliers,
   type SaleItem, type FgLocationPricing
 } from "@/lib/storage";
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
@@ -225,6 +226,7 @@ function computeLiveCost(item: SaleItem, recipes: any[]): LiveCost {
 function HQSaleItemsContent() {
   const [items, setItems]       = useState<SaleItem[]>([]);
   const [recipes, setRecipes]   = useState<any[]>([]);
+  const [suppliers, setSuppliers] = useState<any[]>([]);
   const [locations, setLocations] = useState<{ id: string; name: string; type?: string; subtype?: string; status?: string }[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [search, setSearch]     = useState("");
@@ -283,14 +285,16 @@ function HQSaleItemsContent() {
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [si, rec, locs, cats, counts, metrics] = await Promise.all([
+      const [si, rec, locs, cats, counts, metrics, supplierList] = await Promise.all([
         loadSaleItems(), loadRecipes(), loadLocations(),
         loadCategories('finished_goods'),
         loadLatestFgCounts(),
         loadTodayMovementMetrics(),
+        loadSuppliers(),
       ]);
       setItems(Array.isArray(si) ? si : []);
       setRecipes(Array.isArray(rec) ? rec : []);
+      setSuppliers(Array.isArray(supplierList) ? supplierList : []);
       setLocations(
         Array.isArray(locs)
           ? locs.map((l: any) => ({
@@ -636,6 +640,7 @@ function HQSaleItemsContent() {
         <FgCostAuditPanel
           items={items}
           recipes={recipes}
+          suppliers={suppliers}
           onCostApplied={fetchData}
           onCreateRecipe={(itemName: string) => {
             // Navigate to Recipes page; pass item name as query param so the
@@ -1234,11 +1239,25 @@ function HQSaleItemsContent() {
             </select>
           </div>
 
-          {/* Manual price override */}
+          {/* Manual price / supplier price — label changes based on whether a recipe is linked */}
           <div>
-            <label className="block text-xs font-semibold text-neutral-600 uppercase tracking-wider mb-1.5">
-              Manual Price Override <span className="text-neutral-400 font-normal">(leave blank to use suggested)</span>
-            </label>
+            {formRecipeId ? (
+              /* Recipe-linked item: manual_price overrides the auto-suggested price */
+              <label className="block text-xs font-semibold text-neutral-600 uppercase tracking-wider mb-1.5">
+                Manual Price Override
+                <span className="ml-1 text-neutral-400 font-normal normal-case">
+                  per {formUnit} (overrides recipe-suggested price; leave blank to use suggested)
+                </span>
+              </label>
+            ) : (
+              /* Purchased / no-recipe item: manual_price IS the supplier cost & location charge */
+              <label className="block text-xs font-semibold text-neutral-600 uppercase tracking-wider mb-1.5">
+                <span className="text-blue-700">HQ Purchased Item — Supplier Price</span>
+                <span className="ml-1 text-neutral-400 font-normal normal-case">
+                  per {formUnit} charged to locations
+                </span>
+              </label>
+            )}
             <div className="relative">
               <span className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400 text-sm">$</span>
               <input
@@ -1247,10 +1266,17 @@ function HQSaleItemsContent() {
                 step={0.01}
                 value={formManualPrice}
                 onChange={e => setFormManualPrice(e.target.value)}
-                placeholder="Auto (suggested × 1.20)"
+                placeholder={formRecipeId ? "Auto (suggested × 1.20)" : "Enter supplier price per " + formUnit}
                 className="w-full pl-7 pr-3 py-2 text-sm border border-neutral-200 rounded-lg bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
               />
             </div>
+            {!formRecipeId && formManualPrice !== "" && !isNaN(parseFloat(formManualPrice)) && (
+              <p className="mt-1 text-[11px] text-blue-600">
+                This is the price HQ charges locations per {formUnit}.
+                {formPackQty > 1 ? ` Pack price = $${(parseFloat(formManualPrice) * formPackQty).toFixed(2)} (${formPackQty} ${formUnit}s × $${parseFloat(formManualPrice).toFixed(4)}).` : ""}
+                {" "}No recipe markup is applied.
+              </p>
+            )}
           </div>
 
           {/* Toggles */}
