@@ -22,6 +22,7 @@ import {
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
 import { FgImportModal } from "@/components/FgImportModal";
 import { FgCostAuditPanel } from "@/components/FgCostAuditPanel";
+import { HqPurchasedSetupDrawer } from "@/components/HqPurchasedSetupDrawer";
 
 
 // ─── FG category presets ───────────────────────────────────────────────────────
@@ -248,6 +249,10 @@ function HQSaleItemsContent() {
 
   // Import modal state
   const [isImportOpen, setIsImportOpen] = useState(false);
+
+  // HQ Purchased Setup drawer state
+  const [isSetupDrawerOpen, setIsSetupDrawerOpen]   = useState(false);
+  const [setupDrawerItem, setSetupDrawerItem]       = useState<SaleItem | null>(null);
 
   // Drawer state
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
@@ -641,15 +646,32 @@ function HQSaleItemsContent() {
           items={items}
           recipes={recipes}
           suppliers={suppliers}
+          allHqItems={items}
           onCostApplied={fetchData}
+          onSetupHqPurchased={(item) => {
+            setSetupDrawerItem(item);
+            setIsSetupDrawerOpen(true);
+          }}
           onCreateRecipe={(itemName: string) => {
-            // Navigate to Recipes page; pass item name as query param so the
-            // create-recipe drawer can pre-fill the name field.
             const url = `/recipes?prefill=${encodeURIComponent(itemName)}`;
             window.location.href = url;
           }}
         />
       )}
+
+      {/* ── HQ Purchased Setup Drawer ─────────────────────────────────────── */}
+      <HqPurchasedSetupDrawer
+        isOpen={isSetupDrawerOpen}
+        onClose={() => { setIsSetupDrawerOpen(false); setSetupDrawerItem(null); }}
+        hqItem={setupDrawerItem}
+        allHqItems={items}
+        suppliers={suppliers}
+        onSuccess={() => {
+          setIsSetupDrawerOpen(false);
+          setSetupDrawerItem(null);
+          fetchData();
+        }}
+      />
 
 
       {/* ── Stock value banner ───────────────────────────────────────────── */}

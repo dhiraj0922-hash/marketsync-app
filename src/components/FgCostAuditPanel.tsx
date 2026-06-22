@@ -220,14 +220,16 @@ const FILTER_TABS: { key: AuditFilter; label: string }[] = [
 // ─── Component ────────────────────────────────────────────────────────────────
 
 interface Props {
-  items:         SaleItem[];
-  recipes:       any[];
-  suppliers:     any[];           // loaded supplier master — used for HQ FC detection
-  onCostApplied: () => void;
-  onCreateRecipe?: (itemName: string) => void;
+  items:                SaleItem[];
+  recipes:              any[];
+  suppliers:            any[];           // loaded supplier master — used for HQ FC detection
+  allHqItems:           SaleItem[];      // full HQ sale item list — passed to setup drawer
+  onCostApplied:        () => void;
+  onCreateRecipe?:      (itemName: string) => void;
+  onSetupHqPurchased?:  (item: SaleItem) => void; // opens HqPurchasedSetupDrawer
 }
 
-export function FgCostAuditPanel({ items, recipes, suppliers, onCostApplied, onCreateRecipe }: Props) {
+export function FgCostAuditPanel({ items, recipes, suppliers, allHqItems, onCostApplied, onCreateRecipe, onSetupHqPurchased }: Props) {
   const [overrides, setOverrides]   = useState<Record<string, CostMethod>>({});
   const [rows, setRows]             = useState<AuditRow[]>([]);
   const [expanded, setExpanded]     = useState(true);
@@ -528,11 +530,20 @@ export function FgCostAuditPanel({ items, recipes, suppliers, onCostApplied, onC
                             <ShoppingBag className="h-3 w-3" /> Edit cost in drawer
                           </span>
                         ) : isHqSetup ? (
-                          // HQ Fulfillment Centre supplier item not yet individually set up.
-                          // These buttons write to local state only — zero DB changes.
-                          <div className="flex flex-col gap-1.5">
-                            <span className="text-[11px] text-slate-600 font-medium">Classify for review (local only):</span>
+                          // HQ Fulfillment Centre supplier item — not yet individually set up.
+                          <div className="flex flex-col gap-2">
+                            {/* PRIMARY: opens the real DB setup drawer */}
+                            {onSetupHqPurchased && (
+                              <button
+                                onClick={() => onSetupHqPurchased(row.item)}
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-bold bg-blue-600 border border-blue-700 text-white rounded-lg hover:bg-blue-700 transition-colors shadow-sm"
+                              >
+                                <Warehouse className="h-3 w-3" /> Set Up as HQ Purchased
+                              </button>
+                            )}
+                            {/* SECONDARY: local-only review overrides */}
                             <div className="flex gap-1 flex-wrap">
+                              <span className="text-[10px] text-slate-500 font-medium self-center">Local review only:</span>
                               <button
                                 onClick={() => setMethod(row.item.id, "manual_purchased")}
                                 className="inline-flex items-center gap-1 px-2 py-1 text-[10px] font-semibold bg-blue-50 border border-blue-200 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors"
@@ -548,8 +559,8 @@ export function FgCostAuditPanel({ items, recipes, suppliers, onCostApplied, onC
                                 </button>
                               )}
                             </div>
-                            {/* Safety disclaimer — always visible under the action buttons */}
-                            <p className="text-[10px] text-slate-400 leading-tight mt-0.5">
+                            {/* Safety disclaimer */}
+                            <p className="text-[10px] text-slate-400 leading-tight">
                               🔒 Review only — does not create an HQ item, change catalog routing,
                               add stock, or enable fulfillment.
                             </p>

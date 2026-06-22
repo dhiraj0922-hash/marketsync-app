@@ -2040,6 +2040,98 @@ export function isHqFulfillmentCentreSupplier(
   });
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// HQ PURCHASED ITEM SETUP
+// Atomic promotion via DB RPC: local_vendor → hq_supplied + link hq_sale_item_id
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Fetch a single outlet_catalog_items row by item_id.
+ * Returns null if not found or on error.
+ * Used by HqPurchasedSetupDrawer to read current catalog state before setup
+ * (pre-flight UI validation) and to verify post-setup.
+ */
+export async function loadOutletCatalogItemById(
+  itemId: string
+): Promise<OutletCatalogItem | null> {
+  const { data, error } = await supabase
+    .from('outlet_catalog_items')
+    .select('*')
+    .eq('item_id', itemId)
+    .single();
+
+  if (error || !data) {
+    if (error?.code !== 'PGRST116') {
+      // PGRST116 = "no rows returned" — not a true error
+      console.error('[loadOutletCatalogItemById]', error);
+    }
+    return null;
+  }
+  return mapCatalogItem(data);
+}
+
+/**
+ * Atomically promote a catalog item from local_vendor → hq_supplied and
+ * activate the linked HQ Sale Item — all inside a single PostgreSQL transaction.
+ *
+ * Delegates to the `setup_hq_purchased_item` RPC (defined in
+ * migration_setup_hq_purchased_item_rpc.sql). The RPC:
+ *   1. Locks both rows (FOR UPDATE) to prevent races.
+ *   2. Validates source_type = 'local_vendor' and no existing link.
+ *   3. Validates no other catalog item is already linked to this HQ item.
+ *   4. Validates all required fields (name, unit, price, etc.).
+ *   5. Updates hq_sale_items (name, commissary, unit, price, active flags).
+ *   6. Updates outlet_catalog_items (source_type + hq_sale_item_id only).
+ *   7. Returns the final result — or RAISEs an exception to roll everything back.
+ *
+ * SAFETY GUARANTEES:
+ *   - Atomic: either both writes commit or neither does. No partial state.
+ *   - Never touches: instock, source_recipe_id, making_cost, requisition_items,
+ *     inventory_movements, or any other catalog items.
+ *   - Drawer pre-flight checks are user-friendly early warnings; the RPC is
+ *     the authoritative guard and final source of truth.
+ */
+export async function setupHqPurchasedItem(params: {
+  hqSaleItem: {
+    id:               string;
+    name:             string;
+    baseUnit:         string;
+    packQty:          number;
+    manualPrice:      number;
+    sourceCommissary: string;
+    isActive:         boolean;
+    isRequisitionable: boolean;
+    category?:        string | null;
+  };
+  catalogItemId: string;
+}): Promise<{ success: boolean; error?: any }> {
+  const { hqSaleItem, catalogItemId } = params;
+
+  const { data, error } = await supabase.rpc('setup_hq_purchased_item', {
+    p_hq_sale_item_id:    hqSaleItem.id,
+    p_catalog_item_id:    catalogItemId,
+    p_name:               hqSaleItem.name,
+    p_source_commissary:  hqSaleItem.sourceCommissary,
+    p_base_unit:          hqSaleItem.baseUnit,
+    p_pack_qty:           hqSaleItem.packQty,
+    p_location_charge:    hqSaleItem.manualPrice,
+    p_is_active:          hqSaleItem.isActive,
+    p_is_requisitionable: hqSaleItem.isRequisitionable,
+    p_category:           hqSaleItem.category ?? null,
+  });
+
+  if (error) {
+    console.error('[setupHqPurchasedItem] RPC failed:', error);
+    return { success: false, error };
+  }
+
+  console.log(
+    `[setupHqPurchasedItem] ✓ RPC succeeded: ${catalogItemId} → hq_supplied linked to ${hqSaleItem.id}`,
+    data
+  );
+  return { success: true };
+}
+
 
 // ----------------------------------------------------------------------------
 // 3. RECIPES 
