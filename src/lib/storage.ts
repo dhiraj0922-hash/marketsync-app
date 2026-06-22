@@ -2070,6 +2070,155 @@ export async function loadOutletCatalogItemById(
   return mapCatalogItem(data);
 }
 
+// ─── HQ Setup Queue ───────────────────────────────────────────────────────────
+
+/**
+ * Describes one row in the "HQ Purchased Setup Required" queue.
+ * Each row is an outlet_catalog_items entry that:
+ *   - has source_type = 'local_vendor'
+ *   - has hq_sale_item_id IS NULL
+ *   - is active
+ *   - has a supplier that resolves to an hq_fulfillment_centre supplier
+ */
+export interface HqSetupQueueRow {
+  catalogItemId:        string;
+  catalogName:          string;
+  catalogSupplier:      string;
+  catalogPrice:         number;
+  catalogUnit:          string;
+  catalogPackQty:       number;
+  /**
+   * The single confident HQ Sale Item suggestion.
+   * Null when: (a) no same-supplier HQ Sale Item exists, or
+   * (b) multiple same-supplier HQ Sale Items exist with no exact name match.
+   * In case (b), multipleHqCandidates is true.
+   */
+  suggestedHqItem:      SaleItem | null;
+  /**
+   * True when multiple same-supplier HQ Sale Items exist but none is an
+   * exact name match. The UI must show "Select HQ Item" instead of a suggestion
+   * and must not auto-pick any one of them.
+   */
+  multipleHqCandidates: boolean;
+}
+
+/**
+ * Load catalog items that are pending HQ Purchased setup.
+ *
+ * Criteria (all must be true):
+ *   - outlet_catalog_items.source_type = 'local_vendor'
+ *   - outlet_catalog_items.hq_sale_item_id IS NULL
+ *   - outlet_catalog_items.is_active = true
+ *   - outlet_catalog_items.supplier resolves (via normalized_name or name_aliases)
+ *     to a suppliers row with fulfillment_model = 'hq_fulfillment_centre'
+ *
+ * For each qualifying catalog item, also looks up the best matching
+ * hq_sale_items row (from saleItems) by supplier name to suggest a link.
+ *
+ * No DB writes. Read-only. Safe to call on every page load.
+ */
+export async function loadHqSetupQueue(
+  suppliers: any[],
+  saleItems:  SaleItem[]
+): Promise<HqSetupQueueRow[]> {
+  // 1. Load candidate catalog rows from DB
+  // Filters: local_vendor source, no hq_sale_item_id, active AND ordering_enabled.
+  // ordering_enabled excludes items that are inactive for ordering even if is_active=true.
+  const { data, error } = await supabase
+    .from('outlet_catalog_items')
+    .select('*')
+    .eq('source_type', 'local_vendor')
+    .is('hq_sale_item_id', null)
+    .eq('is_active', true)
+    .eq('ordering_enabled', true)
+    .order('name', { ascending: true });
+
+  if (error || !Array.isArray(data)) {
+    console.error('[loadHqSetupQueue]', error);
+    return [];
+  }
+
+  // 2. Filter to those whose supplier is an approved HQ Fulfillment Centre supplier
+  const hqFcSuppliers = suppliers.filter(s => s.fulfillmentModel === 'hq_fulfillment_centre');
+
+  function resolveToHqFcSupplier(supplierName: string | null): any | null {
+    if (!supplierName || !supplierName.trim()) return null;
+    const norm = supplierName.trim().toLowerCase().replace(/\s+/g, ' ');
+    return hqFcSuppliers.find(s => {
+      if (s.normalizedName && s.normalizedName.toLowerCase() === norm) return true;
+      if (Array.isArray(s.nameAliases) && s.nameAliases.some((a: string) => a.toLowerCase() === norm)) return true;
+      if (s.name.trim().toLowerCase().replace(/\s+/g, ' ') === norm) return true;
+      return false;
+    }) ?? null;
+  }
+
+  const rows: HqSetupQueueRow[] = [];
+
+  for (const db of data) {
+    const item = mapCatalogItem(db);
+    const resolved = resolveToHqFcSupplier(item.supplier);
+    if (!resolved) continue; // not an HQ FC supplier — skip
+
+    // 3. Find a confident HQ Sale Item suggestion
+    //
+    // Confidence rules (strict — never auto-pick silently):
+    //   EXACT MATCH:     One candidate whose name exactly matches the catalog item name
+    //                    → suggestedHqItem = that candidate, multipleHqCandidates = false
+    //   UNIQUE SUPPLIER: Exactly one same-supplier candidate and no exact name match
+    //                    → suggestedHqItem = that single candidate, multipleHqCandidates = false
+    //   AMBIGUOUS:       Multiple same-supplier candidates with no exact name match
+    //                    → suggestedHqItem = null, multipleHqCandidates = true
+    //                    The UI shows "Multiple matches — select in drawer"
+    //   NONE:            Zero same-supplier candidates
+    //                    → suggestedHqItem = null, multipleHqCandidates = false
+    //                    The UI shows "No HQ Sale Item found — create one first"
+    // Collect all hq_sale_items that share this supplier
+    const supplierNorm = resolved.name.trim().toLowerCase().replace(/\s+/g, ' ');
+    const candidates = saleItems.filter(si => {
+      if (!si.sourceCommissary) return false;
+      return si.sourceCommissary.trim().toLowerCase().replace(/\s+/g, ' ') === supplierNorm;
+    });
+
+    const nameLower  = item.name.trim().toLowerCase();
+    const exactMatch = candidates.find(c => c.name.trim().toLowerCase() === nameLower) ?? null;
+
+
+    let suggestedHqItem: SaleItem | null;
+    let multipleHqCandidates: boolean;
+
+    if (exactMatch) {
+      // Unambiguous exact name match — always safe to suggest
+      suggestedHqItem      = exactMatch;
+      multipleHqCandidates = false;
+    } else if (candidates.length === 1) {
+      // Only one same-supplier candidate and no exact name match — still safe to suggest
+      suggestedHqItem      = candidates[0];
+      multipleHqCandidates = false;
+    } else if (candidates.length > 1) {
+      // Multiple candidates, no exact match — do NOT pick one silently
+      suggestedHqItem      = null;
+      multipleHqCandidates = true;
+    } else {
+      // No candidates at all
+      suggestedHqItem      = null;
+      multipleHqCandidates = false;
+    }
+
+    rows.push({
+      catalogItemId:        item.itemId,
+      catalogName:          item.name,
+      catalogSupplier:      item.supplier ?? resolved.name,
+      catalogPrice:         item.price,
+      catalogUnit:          item.uom ?? 'EA',
+      catalogPackQty:       item.packQty,
+      suggestedHqItem,
+      multipleHqCandidates,
+    });
+  }
+
+  return rows;
+}
+
 /**
  * Atomically promote a catalog item from local_vendor → hq_supplied and
  * activate the linked HQ Sale Item — all inside a single PostgreSQL transaction.

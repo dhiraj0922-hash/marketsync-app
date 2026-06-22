@@ -46,6 +46,12 @@ interface Props {
   allHqItems:  SaleItem[];
   /** Full supplier master — for the supplier dropdown */
   suppliers:   any[];
+  /**
+   * Optional — pre-fills and auto-verifies the catalog item ID field.
+   * Use this when opening the drawer from the HQ Setup Queue (where the
+   * catalog item is already known). The admin can still change it.
+   */
+  initialCatalogItemId?: string;
   /** Called after the atomic RPC succeeds so the parent can refresh */
   onSuccess:   () => void;
 }
@@ -62,6 +68,7 @@ export function HqPurchasedSetupDrawer({
   hqItem,
   allHqItems,
   suppliers,
+  initialCatalogItemId,
   onSuccess,
 }: Props) {
   // ── HQ Sale Item selection ─────────────────────────────────────────────────
@@ -94,6 +101,27 @@ export function HqPurchasedSetupDrawer({
   const selectedHqItem = allHqItems.find(i => i.id === selectedHqItemId) ?? null;
   const hqFcSuppliers  = suppliers.filter((s: any) => s.fulfillmentModel === "hq_fulfillment_centre");
 
+  // ── Catalog item lookup ───────────────────────────────────────────────────
+  // Declared BEFORE the reset useEffect so it can safely be listed
+  // as a dependency and called via setTimeout inside that effect.
+  const lookupCatalogItem = useCallback(async (id: string) => {
+    const trimmed = id.trim();
+    if (!trimmed) { setCatalogItem(null); setCatalogError(null); return; }
+    setCatalogLoading(true);
+    setCatalogError(null);
+    const row = await loadOutletCatalogItemById(trimmed);
+    setCatalogLoading(false);
+    if (!row) {
+      setCatalogError(`No catalog item found with ID "${trimmed}".`);
+      setCatalogItem(null);
+    } else if (row.sourceType === "hq_supplied" && row.hqSaleItemId) {
+      setCatalogError(`This catalog item is already linked to HQ Sale Item "${row.hqSaleItemId}". No change needed.`);
+      setCatalogItem(row);
+    } else {
+      setCatalogItem(row);
+    }
+  }, []);
+
   // ── Reset on open/close ───────────────────────────────────────────────────
   useEffect(() => {
     if (!isOpen) return;
@@ -117,38 +145,17 @@ export function HqPurchasedSetupDrawer({
     setValidationErrors([]);
     setSubmitError(null);
     setSubmitSuccess(false);
-  }, [isOpen, hqItem]);
+    // If a catalog item ID was pre-supplied (e.g. from the Setup Queue),
+    // pre-fill the field and trigger auto-lookup so the admin sees it
+    // verified without manual typing.
+    if (initialCatalogItemId) {
+      setCatalogItemId(initialCatalogItemId);
+      // Defer so state is flushed before the async lookup runs
+      setTimeout(() => lookupCatalogItem(initialCatalogItemId), 0);
+    }
+  }, [isOpen, hqItem, initialCatalogItemId, lookupCatalogItem]);
 
   // ── Sync form name/supplier when HQ item selection changes ────────────────
-  useEffect(() => {
-    if (!selectedHqItem) return;
-    setFormName(selectedHqItem.name);
-    setFormSupplier(selectedHqItem.sourceCommissary ?? "");
-    setFormUnit(selectedHqItem.baseUnit ?? "pack");
-    setFormPackQty(selectedHqItem.packQty ?? 1);
-    if (selectedHqItem.manualPrice != null && selectedHqItem.manualPrice > 0) {
-      setFormPrice(selectedHqItem.manualPrice.toFixed(2));
-    }
-  }, [selectedHqItem]);
-
-  // ── Catalog item lookup ───────────────────────────────────────────────────
-  const lookupCatalogItem = useCallback(async (id: string) => {
-    const trimmed = id.trim();
-    if (!trimmed) { setCatalogItem(null); setCatalogError(null); return; }
-    setCatalogLoading(true);
-    setCatalogError(null);
-    const row = await loadOutletCatalogItemById(trimmed);
-    setCatalogLoading(false);
-    if (!row) {
-      setCatalogError(`No catalog item found with ID "${trimmed}".`);
-      setCatalogItem(null);
-    } else if (row.sourceType === "hq_supplied" && row.hqSaleItemId) {
-      setCatalogError(`This catalog item is already linked to HQ Sale Item "${row.hqSaleItemId}". No change needed.`);
-      setCatalogItem(row);
-    } else {
-      setCatalogItem(row);
-    }
-  }, []);
 
   // ── Validate (synchronous) ────────────────────────────────────────────────
   const validate = useCallback((): string[] => {

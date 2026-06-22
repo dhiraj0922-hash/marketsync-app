@@ -16,8 +16,8 @@ import {
   loadCategories, addCategory, convertYieldToBaseUnit,
   loadFinishedGoodLocationAvailability, saveFinishedGoodLocationAvailability,
   loadLatestFgCounts, loadTodayMovementMetrics,
-  loadSuppliers,
-  type SaleItem, type FgLocationPricing
+  loadSuppliers, loadHqSetupQueue,
+  type SaleItem, type FgLocationPricing, type HqSetupQueueRow
 } from "@/lib/storage";
 import { HQOnlyGuard } from "@/components/HQOnlyGuard";
 import { FgImportModal } from "@/components/FgImportModal";
@@ -253,6 +253,11 @@ function HQSaleItemsContent() {
   // HQ Purchased Setup drawer state
   const [isSetupDrawerOpen, setIsSetupDrawerOpen]   = useState(false);
   const [setupDrawerItem, setSetupDrawerItem]       = useState<SaleItem | null>(null);
+  const [setupDrawerCatalogId, setSetupDrawerCatalogId] = useState<string | undefined>(undefined);
+
+  // HQ Setup Queue — catalog rows pending HQ Purchased promotion
+  const [setupQueue, setSetupQueue] = useState<HqSetupQueueRow[]>([]);
+  const [queueExpanded, setQueueExpanded] = useState(true);
 
   // Drawer state
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
@@ -315,6 +320,12 @@ function HQSaleItemsContent() {
       setDbCategories(Array.isArray(cats) ? cats : []);
       setLatestCounts(counts || {});
       setTodayMetrics(metrics || {});
+      // Load HQ Setup Queue (needs suppliers + saleItems both resolved)
+      const queue = await loadHqSetupQueue(
+        Array.isArray(supplierList) ? supplierList : [],
+        Array.isArray(si) ? si : []
+      );
+      setSetupQueue(queue);
     } finally {
       setIsLoading(false);
     }
@@ -618,6 +629,128 @@ function HQSaleItemsContent() {
         </div>
       </div>
 
+      {/* ── HQ Purchased Setup Queue ───────────────────────────────── */}
+      {setupQueue.length > 0 && (
+        <div className="rounded-xl border border-blue-200 bg-white overflow-hidden shadow-sm">
+          {/* Header */}
+          <button
+            className="w-full flex items-center justify-between px-5 py-3.5 bg-blue-50 hover:bg-blue-100 transition-colors border-b border-blue-200"
+            onClick={() => setQueueExpanded(e => !e)}
+          >
+            <div className="flex items-center gap-3">
+              <div className="rounded-lg bg-blue-600 p-1.5">
+                <PackageCheck className="h-4 w-4 text-white" />
+              </div>
+              <div className="text-left">
+                <p className="text-sm font-bold text-blue-900">
+                  HQ Purchased Setup Required — {setupQueue.length} catalog item{setupQueue.length !== 1 ? "s" : ""} pending
+                </p>
+                <p className="text-xs text-blue-600 mt-0.5">
+                  These outlet catalog items are supplied by approved HQ Fulfillment Centre suppliers
+                  but are still routed as Local Vendor. Use &ldquo;Set Up as HQ Purchased&rdquo; to promote each one.
+                </p>
+              </div>
+            </div>
+            <ChevronRight className={`h-4 w-4 text-blue-400 transition-transform ${queueExpanded ? "rotate-90" : ""}`} />
+          </button>
+
+          {/* Queue table */}
+          {queueExpanded && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-blue-50/60 border-b border-blue-100">
+                  <tr>
+                    {["Catalog Item", "Catalog ID", "Supplier", "Current Route", "Suggested HQ Sale Item", "Action"].map(h => (
+                      <th key={h} className="px-4 py-2.5 text-left text-xs font-semibold text-blue-700 uppercase tracking-wider whitespace-nowrap">
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-blue-50">
+                  {setupQueue.map(row => (
+                    <tr key={row.catalogItemId} className="hover:bg-blue-50/40 transition-colors">
+                      {/* Catalog Item */}
+                      <td className="px-4 py-3">
+                        <p className="font-semibold text-slate-900 text-sm leading-tight">{row.catalogName}</p>
+                        <p className="text-[10px] text-slate-400 mt-0.5">
+                          ${row.catalogPrice.toFixed(2)} &middot; {row.catalogUnit}
+                          {row.catalogPackQty > 1 ? ` × ${row.catalogPackQty}` : ""}
+                        </p>
+                      </td>
+
+                      {/* Catalog ID */}
+                      <td className="px-4 py-3">
+                        <code className="text-[10px] font-mono bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded">
+                          {row.catalogItemId}
+                        </code>
+                      </td>
+
+                      {/* Supplier */}
+                      <td className="px-4 py-3">
+                        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
+                          <CheckCircle2 className="h-3 w-3" />
+                          {row.catalogSupplier}
+                        </span>
+                      </td>
+
+                      {/* Current route */}
+                      <td className="px-4 py-3">
+                        <span className="text-xs text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full font-medium">
+                          Local Vendor
+                        </span>
+                      </td>
+
+                      {/* Suggested HQ Sale Item
+                            Three states:
+                            1. Confident suggestion (exact name match OR only one same-supplier candidate)
+                            2. Multiple ambiguous candidates — never auto-picked, admin must choose in drawer
+                            3. No candidates — admin must create an HQ Sale Item first */}
+                      <td className="px-4 py-3">
+                        {row.suggestedHqItem ? (
+                          <div>
+                            <p className="text-xs font-semibold text-slate-800 leading-tight">
+                              {row.suggestedHqItem.name}
+                            </p>
+                            <p className="text-[10px] font-mono text-slate-400 mt-0.5">
+                              {row.suggestedHqItem.id}
+                            </p>
+                          </div>
+                        ) : row.multipleHqCandidates ? (
+                          <span className="inline-flex items-center gap-1 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full">
+                            Multiple matches — select in drawer
+                          </span>
+                        ) : (
+                          <span className="text-xs text-slate-400 italic">No HQ Sale Item found — create one first</span>
+                        )}
+                      </td>
+
+                      {/* Action */}
+                      <td className="px-4 py-3">
+                        <button
+                          onClick={() => {
+                            setSetupDrawerItem(row.suggestedHqItem);
+                            setSetupDrawerCatalogId(row.catalogItemId);
+                            setIsSetupDrawerOpen(true);
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3 py-2 text-[11px] font-bold bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors shadow-sm whitespace-nowrap"
+                        >
+                          <PackageCheck className="h-3.5 w-3.5" />
+                          Set Up as HQ Purchased
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="px-5 py-2.5 border-t border-blue-100 bg-blue-50/40 text-[11px] text-blue-600">
+                🔒 Setup uses an atomic database transaction. Stock, recipes, and old requisitions are not affected.
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ── Metrics ────────────────────────────────────────────────────── */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {[
@@ -650,6 +783,7 @@ function HQSaleItemsContent() {
           onCostApplied={fetchData}
           onSetupHqPurchased={(item) => {
             setSetupDrawerItem(item);
+            setSetupDrawerCatalogId(undefined);  // Cost Audit path has no pre-known catalog item
             setIsSetupDrawerOpen(true);
           }}
           onCreateRecipe={(itemName: string) => {
@@ -662,13 +796,15 @@ function HQSaleItemsContent() {
       {/* ── HQ Purchased Setup Drawer ─────────────────────────────────────── */}
       <HqPurchasedSetupDrawer
         isOpen={isSetupDrawerOpen}
-        onClose={() => { setIsSetupDrawerOpen(false); setSetupDrawerItem(null); }}
+        onClose={() => { setIsSetupDrawerOpen(false); setSetupDrawerItem(null); setSetupDrawerCatalogId(undefined); }}
         hqItem={setupDrawerItem}
         allHqItems={items}
         suppliers={suppliers}
+        initialCatalogItemId={setupDrawerCatalogId}
         onSuccess={() => {
           setIsSetupDrawerOpen(false);
           setSetupDrawerItem(null);
+          setSetupDrawerCatalogId(undefined);
           fetchData();
         }}
       />
