@@ -1567,8 +1567,7 @@ export default function FinishedGoods() {
 
   // ─── JSX ───────────────────────────────────────────────────────────────────
   return (
-    <div className="-m-6 min-h-[calc(100vh-4rem)] bg-slate-50 p-4 text-slate-900 sm:p-6">
-      <div className="mx-auto max-w-[1440px] space-y-6">
+    <div className="w-full space-y-6 text-slate-900">
 
       {/* ── Header ──────────────────────────────────────────────────────── */}
       <div className="rounded-3xl border border-emerald-100 bg-gradient-to-br from-white via-emerald-50/70 to-slate-50 p-5 shadow-sm sm:p-7">
@@ -3299,7 +3298,6 @@ export default function FinishedGoods() {
           </div>
         </div>
       )}
-      </div>
     </div>
   );
 }

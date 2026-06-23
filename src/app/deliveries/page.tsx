@@ -633,9 +633,9 @@ export default function DeliveriesPage() {
   };
 
   return (
-    <div className="delivery-light -m-6 min-h-[calc(100vh-4rem)] bg-slate-50 p-4 text-slate-900 sm:p-6">
+    <div className="delivery-light w-full space-y-6 text-slate-900">
       <style>{deliveryPageCss}</style>
-      <div className="mx-auto max-w-[1440px] space-y-6">
+
         {toast && (
           <div className="fixed right-5 top-20 z-[140] rounded-xl border border-emerald-200 bg-white px-4 py-3 text-sm font-medium text-emerald-800 shadow-2xl">
             {toast}
@@ -1996,7 +1996,6 @@ export default function DeliveriesPage() {
             </div>
           )}
         </Drawer>
-      </div>
     </div>
   );
 }

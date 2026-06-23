@@ -203,9 +203,9 @@ const stockIqDarkShellCss = `
 
 function DarkPageShell({ children }: { children: React.ReactNode }) {
   return (
-    <div className="-m-6 min-h-[calc(100vh-4rem)] bg-[#070707] p-6 text-zinc-100">
+    <div className="-mx-4 -my-4 sm:-mx-5 sm:-my-5 lg:-mx-8 lg:-my-5 xl:-mx-10 min-h-[calc(100vh-4rem)] bg-[#070707] px-4 py-5 sm:px-5 lg:px-8 xl:px-10 text-zinc-100">
       <style>{stockIqDarkShellCss}</style>
-      <div className="mx-auto max-w-[1408px] space-y-5">
+      <div className="w-full space-y-5">
         {children}
       </div>
     </div>
@@ -757,7 +757,7 @@ function LocationManagerView({
 
   if (isLoading) {
     return (
-      <div className="-m-6 min-h-[calc(100vh-4rem)] bg-slate-50 p-6 text-slate-900">
+      <div className="w-full">
         {submitNotice && (
           <div className={`fixed right-4 top-4 z-50 rounded-lg border px-4 py-3 text-sm font-semibold shadow-lg ${
             submitNotice.type === "success"
@@ -775,7 +775,7 @@ function LocationManagerView({
   }
 
   return (
-    <div className="-m-6 min-h-[calc(100vh-4rem)] bg-slate-50 p-4 text-slate-900 sm:p-6">
+    <div className="w-full space-y-6">
       {submitNotice && (
         <div className={`fixed right-4 top-4 z-50 rounded-lg border px-4 py-3 text-sm font-semibold shadow-lg ${
           submitNotice.type === "success"
@@ -791,7 +791,6 @@ function LocationManagerView({
         </div>
       )}
 
-      <div className="mx-auto max-w-[1440px] space-y-6">
         <header className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white px-4 py-4 shadow-sm lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-center gap-3">
             <button
@@ -1490,7 +1489,6 @@ function LocationManagerView({
           )}
         </div>
       </Drawer>
-      </div>
     </div>
   );
 }

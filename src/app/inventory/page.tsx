@@ -3168,7 +3168,7 @@ export default function Inventory() {
   };
 
   if (isLoading) return (
-    <div className="-m-6 flex min-h-[calc(100vh-4rem)] items-center justify-center bg-[#070707] p-12 text-zinc-500">
+    <div className="flex min-h-[40vh] items-center justify-center p-12 text-zinc-500">
       <Loader2 className="mr-2 h-5 w-5 animate-spin" />
       Loading Inventory Module...
     </div>
@@ -3194,7 +3194,7 @@ export default function Inventory() {
 
   return (
 
-    <div className="-m-6 min-h-[calc(100vh-4rem)] bg-[#070707] p-6 text-zinc-100">
+    <div className="-mx-4 -my-4 sm:-mx-5 sm:-my-5 lg:-mx-8 lg:-my-5 xl:-mx-10 bg-[#070707] px-4 py-4 sm:px-5 sm:py-5 lg:px-8 lg:py-5 xl:px-10 text-zinc-100">
       <style>{`
         body .flex.bg-neutral-50.text-neutral-900.min-h-screen {
           background: #070707 !important;
@@ -3233,8 +3233,9 @@ export default function Inventory() {
           color: #e4e4e7 !important;
         }
       `}</style>
-      <div className="mx-auto max-w-[1408px] space-y-5">
+      <div className="w-full space-y-5">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+
         <div>
           <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-zinc-500">Inventory</p>
           <h2 className="mt-2 text-2xl font-semibold tracking-tight text-white">Inventory Items</h2>
@@ -6455,7 +6456,7 @@ export default function Inventory() {
         </div>
       )}
 
-      </div>
+    </div>
     </div>
   );
 }
