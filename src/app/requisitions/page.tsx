@@ -2480,15 +2480,28 @@ function HQAdminView({
                     {["submitted", "draft"].includes((selectedReq?.status ?? "").toLowerCase()) && (() => {
                       const isFF = isHqFulfillment(profile);
 
-                      // hq_fulfillment cannot approve/reject purely local-vendor requisitions.
-                      // Check if ALL items in the requisition are local_vendor.
-                      const allLocalVendor = hqReqItems.length > 0 &&
-                        hqReqItems.every((li: any) =>
-                          (li.sourceType ?? li.source_type ?? '').toLowerCase() === 'local_vendor'
-                        );
-                      const blockedForFF = isFF && allLocalVendor;
+                      // Use the same isHqLine() logic as storage.ts.
+                      // A line is HQ if: has finished_good_id, OR source_type='hq_supplied',
+                      // OR source_type is null/missing and no catalog_item_id (legacy HQ row).
+                      // A line is local_vendor ONLY when source_type='local_vendor' and no FG id.
+                      const isHqLine = (li: any): boolean => {
+                        const fg  = li.finishedGoodId ?? li.finished_good_id ?? null;
+                        const st  = (li.sourceType ?? li.source_type ?? '').toLowerCase().trim();
+                        const cat = li.catalogItemId ?? li.catalog_item_id ?? null;
+                        if (fg) return true;
+                        if (st === 'hq_supplied') return true;
+                        if (st === 'local_vendor') return false;
+                        return !cat; // legacy null: HQ if no catalog_item_id
+                      };
 
-                      if (blockedForFF) {
+                      const hasHqLines  = hqReqItems.length > 0 && hqReqItems.some(isHqLine);
+                      const hasLvLines  = hqReqItems.length > 0 && hqReqItems.some((li: any) => !isHqLine(li));
+                      const allLv       = hqReqItems.length > 0 && !hasHqLines;
+                      const isMixed     = hasHqLines && hasLvLines;
+
+                      // For hq_fulfillment: block only when ALL lines are confirmed local_vendor.
+                      // Unknown/null source_type is treated as HQ (safe default).
+                      if (isFF && allLv) {
                         return (
                           <div className="px-3 py-1.5 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg">
                             Local-vendor requisition — HQ approval not required.
@@ -2498,6 +2511,11 @@ function HQAdminView({
 
                       return (
                         <>
+                          {isMixed && (
+                            <div className="px-3 py-1.5 text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded-lg">
+                              Mixed requisition — HQ items require HQ fulfillment; local-vendor items are excluded from HQ approval.
+                            </div>
+                          )}
                           <button
                             onClick={() => {
                               setRejectModalReqId(selectedReq.id);

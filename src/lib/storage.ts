@@ -2825,6 +2825,34 @@ export async function updateRequisitionStatus(
 }
 
 /**
+ * Canonical HQ-line classifier.
+ *
+ * A requisition_items row is HQ-supplied if ANY of:
+ *   1. finished_good_id IS NOT NULL  — always a Commissary / HQ Finished Good.
+ *   2. source_type = 'hq_supplied'   — explicitly tagged at order time.
+ *   3. source_type IS NULL / ''  AND  catalog_item_id IS NULL
+ *                                  — legacy raw inventory row (pre-migration);
+ *                                    these were always HQ inventory items.
+ *
+ * A row is definitively local_vendor ONLY when:
+ *   source_type = 'local_vendor'  AND  no finished_good_id.
+ *
+ * Accepts DB rows (snake_case) OR mapped front-end rows (camelCase).
+ */
+function isHqLine(row: any): boolean {
+  const fg  = row.finished_good_id ?? row.finishedGoodId ?? null;
+  const st  = (row.source_type ?? row.sourceType ?? '').toLowerCase().trim();
+  const cat = row.catalog_item_id ?? row.catalogItemId ?? null;
+
+  if (fg) return true;                      // Finished Good → always HQ
+  if (st === 'hq_supplied') return true;    // Explicitly tagged HQ
+  if (st === 'local_vendor') return false;  // Explicitly tagged local vendor
+  // Legacy / null source_type: HQ if there's no catalog_item_id
+  // (catalog_item_id = outlet catalog item = local vendor origin)
+  return !cat;
+}
+
+/**
  * Approve a requisition.
  * - Validates the requisition is in an approvable state (submitted / pending / draft).
  * - Rejects local_vendor-only requisitions if the caller is hq_fulfillment (they may
@@ -2860,19 +2888,18 @@ export async function approveRequisition(
     };
   }
 
-  // 2. hq_fulfillment: only approve HQ-supplied requisitions
+  // 2. hq_fulfillment: only approve requisitions that contain at least one HQ line.
+  //    Uses isHqLine() which handles null/legacy source_type safely.
   const normalizedRole = (callerRole ?? '').toLowerCase();
   if (normalizedRole === 'hq_fulfillment') {
     const { data: items } = await supabase
       .from('requisition_items')
-      .select('source_type')
+      .select('source_type, finished_good_id, catalog_item_id')
       .eq('requisition_id', id);
 
-    const allLocalVendor = Array.isArray(items) &&
-      items.length > 0 &&
-      items.every((li: any) => (li.source_type ?? '').toLowerCase() === 'local_vendor');
-
-    if (allLocalVendor) {
+    // Block only when ALL lines are definitively local_vendor — not when source_type is null.
+    const hasAnyHqLine = Array.isArray(items) && items.some(isHqLine);
+    if (Array.isArray(items) && items.length > 0 && !hasAnyHqLine) {
       return {
         success: false,
         error: { message: 'hq_fulfillment cannot approve local-vendor requisitions. Only HQ-supplied requisitions may be approved here.' },
@@ -2925,19 +2952,16 @@ export async function rejectRequisition(
     };
   }
 
-  // 2. hq_fulfillment: only reject HQ-supplied requisitions
+  // 2. hq_fulfillment: only reject requisitions that contain at least one HQ line.
   const normalizedRole = (callerRole ?? '').toLowerCase();
   if (normalizedRole === 'hq_fulfillment') {
     const { data: items } = await supabase
       .from('requisition_items')
-      .select('source_type')
+      .select('source_type, finished_good_id, catalog_item_id')
       .eq('requisition_id', id);
 
-    const allLocalVendor = Array.isArray(items) &&
-      items.length > 0 &&
-      items.every((li: any) => (li.source_type ?? '').toLowerCase() === 'local_vendor');
-
-    if (allLocalVendor) {
+    const hasAnyHqLine = Array.isArray(items) && items.some(isHqLine);
+    if (Array.isArray(items) && items.length > 0 && !hasAnyHqLine) {
       return {
         success: false,
         error: { message: 'hq_fulfillment cannot reject local-vendor requisitions.' },
@@ -8398,23 +8422,35 @@ export async function saveFulfillmentAllocations(allocations: {
   fulfillmentNote: string;
   userId: string;
 }[]): Promise<{ success: boolean; error?: any }> {
-  const updates = allocations.map(a => ({
-    id: a.id,
-    allocated_qty: a.allocatedQty,
-    backorder_qty: a.backorderQty,
-    fulfillment_note: a.fulfillmentNote,
-    fulfilled_by: a.userId,
-    fulfilled_at: new Date().toISOString(),
-  }));
-  
-  const { error } = await supabase
-    .from('requisition_items')
-    .upsert(updates, { onConflict: 'id' });
-    
-  if (error) {
-    console.error('saveFulfillmentAllocations:', error);
-    return { success: false, error };
+  // Safety: validate every entry has a non-empty id.
+  // Never use upsert — if id doesn't match an existing row, upsert would INSERT
+  // a new requisition_items row without requisition_id, violating NOT NULL.
+  const invalid = allocations.filter(a => !a.id || typeof a.id !== 'string' || !a.id.trim());
+  if (invalid.length > 0) {
+    const msg = `saveFulfillmentAllocations: ${invalid.length} allocation(s) have a missing or empty id. Update aborted to prevent data corruption.`;
+    console.error(msg, invalid);
+    return { success: false, error: { message: msg } };
   }
+
+  // Execute UPDATE row-by-row. Abort on first failure.
+  for (const a of allocations) {
+    const { error } = await supabase
+      .from('requisition_items')
+      .update({
+        allocated_qty:    Number(a.allocatedQty),
+        backorder_qty:    Number(a.backorderQty),
+        fulfillment_note: a.fulfillmentNote ?? '',
+        fulfilled_by:     a.userId || null,
+        fulfilled_at:     new Date().toISOString(),
+      })
+      .eq('id', a.id);
+
+    if (error) {
+      console.error('saveFulfillmentAllocations: update failed for id', a.id, error);
+      return { success: false, error };
+    }
+  }
+
   return { success: true };
 }
 

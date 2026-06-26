@@ -241,8 +241,20 @@ export default function FulfillmentPage() {
   const [ticketingId, setTicketingId] = useState<string | null>(null);
 
   const handleCompleteFulfillment = async (requisitionId: string) => {
+    // Collect item IDs that belong to this specific requisition only.
+    // This prevents saving dirty drafts from OTHER requisitions which could
+    // have stale or missing IDs and trigger the NOT NULL violation.
+    const reqItemIds = new Set<string>();
+    for (const group of data) {
+      for (const item of group.items) {
+        if (item.requisitionId === requisitionId) {
+          reqItemIds.add(item.id);
+        }
+      }
+    }
+
     const modifiedList = Object.entries(drafts)
-      .filter(([_, d]) => d.dirty)
+      .filter(([id, d]) => d.dirty && reqItemIds.has(id))
       .map(([id, d]) => ({
         id,
         allocatedQty: Number(d.allocatedQty),
@@ -251,11 +263,19 @@ export default function FulfillmentPage() {
         userId: user?.id || ""
       }));
 
+    // Pre-flight: every entry must have a valid id before we touch the DB.
+    const missingIds = modifiedList.filter(a => !a.id || !a.id.trim());
+    if (missingIds.length > 0) {
+      alert(`Cannot complete fulfillment: ${missingIds.length} allocation row(s) are missing their requisition_item ID. Please refresh and try again.`);
+      return;
+    }
+
     setCompletingId(requisitionId);
     try {
       if (modifiedList.length > 0) {
         const saveRes = await saveFulfillmentAllocations(modifiedList);
         if (!saveRes.success) {
+          // Do NOT proceed to stock movement if allocation save failed.
           alert(`Failed to auto-save allocations: ${saveRes.error?.message}`);
           setCompletingId(null);
           return;
@@ -551,138 +571,166 @@ export default function FulfillmentPage() {
                                 />
                               </TableCell>
                               <TableCell className="py-3.5 text-right px-5 whitespace-nowrap space-x-2">
-                                {/* Approve/Reject — shown only for submitted requisitions */}
-                              {item.requisitionStatus === 'submitted' && (
-                                <div className="flex items-center gap-1.5 mb-1">
-                                  <button
-                                    onClick={() => { setRejectModalReqId(item.requisitionId); setRejectionReason(''); }}
-                                    disabled={rejectActionLoading || approveActionLoading === item.requisitionId}
-                                    className="text-xs font-semibold text-danger-700 bg-danger-50 hover:bg-danger-100 px-2 py-1 rounded-lg border border-danger-200 transition-colors inline-flex items-center gap-1"
-                                  >
-                                    <XSquare className="h-3 w-3" /> Reject
-                                  </button>
-                                  <button
-                                    onClick={async () => {
-                                      setApproveActionLoading(item.requisitionId);
-                                      try {
-                                        const res = await approveRequisition(
-                                          item.requisitionId,
-                                          user?.id ?? '',
-                                          user?.role ?? null
-                                        );
-                                        if (res.success) {
-                                          setToast(`Requisition approved!`);
-                                          await loadData();
-                                        } else {
-                                          alert(`Approval failed: ${res.error?.message ?? 'Unknown error'}`);
-                                        }
-                                      } finally {
-                                        setApproveActionLoading(null);
-                                      }
-                                    }}
-                                    disabled={approveActionLoading === item.requisitionId || rejectActionLoading}
-                                    className="text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-2 py-1 rounded-lg border border-emerald-200 transition-colors inline-flex items-center gap-1"
-                                  >
-                                    {approveActionLoading === item.requisitionId
-                                      ? <Loader2 className="h-3 w-3 animate-spin" />
-                                      : <CheckCircle2 className="h-3 w-3" />
-                                    }
-                                    Approve
-                                  </button>
-                                </div>
-                              )}
-                              {item.requisitionStatus !== "fulfilled" ? (
-                                  <>
-                                    <button
-                                      onClick={() => handleMarkShortRow(item.id, item.quantityRequested)}
-                                      className="text-xs font-semibold text-danger-700 bg-danger-50 hover:bg-danger-100 px-2.5 py-1.5 rounded-lg border border-danger-200 transition-colors"
-                                      title="Mark item as short (sets allocation to 0 and backorders the entire quantity)"
-                                    >
-                                      Mark Short
-                                    </button>
-                                    {/* Safeguard: never show Complete Fulfillment for rejected reqs */}
-                                    {item.requisitionStatus !== 'rejected' && (
-                                      <button
-                                        onClick={() => handleCompleteFulfillment(item.requisitionId)}
-                                        disabled={completingId !== null}
-                                        className="text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1.5 rounded-lg border border-emerald-200 transition-colors inline-flex items-center gap-1"
-                                        title="Complete this entire requisition's stock movement and update HQ inventory levels"
-                                      >
-                                        <PackageCheck className="h-3.5 w-3.5" />
-                                        {completingId === item.requisitionId ? "Processing..." : "Complete Fulfillment"}
-                                      </button>
-                                    )}
-                                  </>
-                                ) : (
-                                  <>
-                                    {item.deliveryTicketId ? (
-                                      <div className="flex flex-col items-end gap-1.5">
-                                        <Badge variant="success" className="font-semibold text-xs py-1 px-2.5">
-                                          Ticket: {item.deliveryTicketNumber}
-                                        </Badge>
-                                        {/* Run assignment dropdown */}
-                                        {activeRuns.length > 0 ? (
-                                          <div className="flex items-center gap-1.5">
-                                            <select
-                                              defaultValue={item.deliveryRunId ?? ""}
-                                              disabled={runAssigning === item.deliveryTicketId}
-                                              onChange={async (e) => {
-                                                const newRunId = e.target.value;
-                                                if (!newRunId) return;
-                                                setRunAssigning(item.deliveryTicketId);
-                                                try {
-                                                  // If already assigned to a different run, unassign first
-                                                  if (item.deliveryRunId && item.deliveryRunId !== newRunId) {
-                                                    const unRes = await removeTicketFromDeliveryRun(item.deliveryTicketId);
-                                                    if (!unRes.success) {
-                                                      alert(`Unassign failed: ${unRes.error?.message}`);
-                                                      return;
-                                                    }
-                                                  }
-                                                  const res = await assignDeliveryTicketToRun(item.deliveryTicketId, newRunId);
-                                                  if (res.success) {
-                                                    setToast(`Ticket assigned to run successfully!`);
-                                                    await loadData();
-                                                  } else {
-                                                    alert(`Assignment failed: ${res.error?.message ?? 'Unknown error'}`);
-                                                  }
-                                                } finally {
-                                                  setRunAssigning(null);
+                                {/* Canonical HQ-line classifier — mirrors storage.ts isHqLine() */}
+                                {(() => {
+                                  const fg  = item.finishedGoodId ?? null;
+                                  const st  = (item.sourceType ?? '').toLowerCase().trim();
+                                  const cat = item.catalogItemId ?? null;
+                                  const isHqItem = fg ? true : st === 'hq_supplied' ? true : st === 'local_vendor' ? false : !cat;
+
+                                  if (!isHqItem) {
+                                    return (
+                                      <span className="text-xs text-amber-600 font-medium italic">
+                                        Local vendor — fulfilled outside HQ
+                                      </span>
+                                    );
+                                  }
+
+                                  return (
+                                    <>
+                                      {/* Approve/Reject — shown only for submitted requisitions */}
+                                      {item.requisitionStatus === 'submitted' && (
+                                        <div className="flex items-center gap-1.5 mb-1">
+                                          <button
+                                            onClick={() => { setRejectModalReqId(item.requisitionId); setRejectionReason(''); }}
+                                            disabled={rejectActionLoading || approveActionLoading === item.requisitionId}
+                                            className="text-xs font-semibold text-danger-700 bg-danger-50 hover:bg-danger-100 px-2 py-1 rounded-lg border border-danger-200 transition-colors inline-flex items-center gap-1"
+                                          >
+                                            <XSquare className="h-3 w-3" /> Reject
+                                          </button>
+                                          <button
+                                            onClick={async () => {
+                                              setApproveActionLoading(item.requisitionId);
+                                              try {
+                                                const res = await approveRequisition(
+                                                  item.requisitionId,
+                                                  user?.id ?? '',
+                                                  user?.role ?? null
+                                                );
+                                                if (res.success) {
+                                                  setToast(`Requisition approved!`);
+                                                  await loadData();
+                                                } else {
+                                                  alert(`Approval failed: ${res.error?.message ?? 'Unknown error'}`);
                                                 }
-                                              }}
-                                              className="text-xs border border-neutral-200 rounded-lg px-2 py-1 bg-white focus:outline-none focus:ring-1 focus:ring-brand-500 text-neutral-700"
+                                              } finally {
+                                                setApproveActionLoading(null);
+                                              }
+                                            }}
+                                            disabled={approveActionLoading === item.requisitionId || rejectActionLoading}
+                                            className="text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-2 py-1 rounded-lg border border-emerald-200 transition-colors inline-flex items-center gap-1"
+                                          >
+                                            {approveActionLoading === item.requisitionId
+                                              ? <Loader2 className="h-3 w-3 animate-spin" />
+                                              : <CheckCircle2 className="h-3 w-3" />
+                                            }
+                                            Approve
+                                          </button>
+                                        </div>
+                                      )}
+                                      {item.requisitionStatus !== "fulfilled" ? (
+                                          <>
+                                            <button
+                                              onClick={() => handleMarkShortRow(item.id, item.quantityRequested)}
+                                              className="text-xs font-semibold text-danger-700 bg-danger-50 hover:bg-danger-100 px-2.5 py-1.5 rounded-lg border border-danger-200 transition-colors"
+                                              title="Mark item as short (sets allocation to 0 and backorders the entire quantity)"
                                             >
-                                              <option value="">{item.deliveryRunId ? 'Change Run' : 'Assign to Run'}</option>
-                                              {activeRuns.map(run => (
-                                                <option key={run.id} value={run.id}>{run.label}</option>
-                                              ))}
-                                            </select>
-                                            {runAssigning === item.deliveryTicketId && (
-                                              <Loader2 className="h-3.5 w-3.5 animate-spin text-neutral-400" />
-                                            )}
-                                          </div>
+                                              Mark Short
+                                            </button>
+                                            {/* Safeguard: never show Complete Fulfillment for rejected reqs */}
+                                            {item.requisitionStatus !== 'rejected' && (() => {
+                                              // Complete Fulfillment requires the requisition to be APPROVED.
+                                              // Submitted reqs must be approved first.
+                                              const isApproved = item.requisitionStatus === 'approved';
+                                              return (
+                                                <button
+                                                  onClick={() => handleCompleteFulfillment(item.requisitionId)}
+                                                  disabled={completingId !== null || !isApproved}
+                                                  className={`text-xs font-bold px-2.5 py-1.5 rounded-lg border transition-colors inline-flex items-center gap-1 ${
+                                                    isApproved
+                                                      ? 'text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border-emerald-200'
+                                                      : 'text-neutral-400 bg-neutral-50 border-neutral-200 cursor-not-allowed opacity-60'
+                                                  }`}
+                                                  title={isApproved ? 'Complete stock movement for this requisition' : 'Requisition must be approved before completing fulfillment'}
+                                                >
+                                                  <PackageCheck className="h-3.5 w-3.5" />
+                                                  {completingId === item.requisitionId ? 'Processing...' : 'Complete Fulfillment'}
+                                                </button>
+                                              );
+                                            })()}
+                                          </>
                                         ) : (
-                                          <span className="text-[10px] text-neutral-400 italic">No active runs</span>
+                                          <>
+                                            {item.deliveryTicketId ? (
+                                              <div className="flex flex-col items-end gap-1.5">
+                                                <Badge variant="success" className="font-semibold text-xs py-1 px-2.5">
+                                                  Ticket: {item.deliveryTicketNumber}
+                                                </Badge>
+                                                {/* Run assignment dropdown */}
+                                                {activeRuns.length > 0 ? (
+                                                  <div className="flex items-center gap-1.5">
+                                                    <select
+                                                      defaultValue={item.deliveryRunId ?? ""}
+                                                      disabled={runAssigning === item.deliveryTicketId}
+                                                      onChange={async (e) => {
+                                                        const newRunId = e.target.value;
+                                                        if (!newRunId) return;
+                                                        setRunAssigning(item.deliveryTicketId);
+                                                        try {
+                                                          if (item.deliveryRunId && item.deliveryRunId !== newRunId) {
+                                                            const unRes = await removeTicketFromDeliveryRun(item.deliveryTicketId);
+                                                            if (!unRes.success) {
+                                                              alert(`Unassign failed: ${unRes.error?.message}`);
+                                                              return;
+                                                            }
+                                                          }
+                                                          const res = await assignDeliveryTicketToRun(item.deliveryTicketId, newRunId);
+                                                          if (res.success) {
+                                                            setToast(`Ticket assigned to run successfully!`);
+                                                            await loadData();
+                                                          } else {
+                                                            alert(`Assignment failed: ${res.error?.message ?? 'Unknown error'}`);
+                                                          }
+                                                        } finally {
+                                                          setRunAssigning(null);
+                                                        }
+                                                      }}
+                                                      className="text-xs border border-neutral-200 rounded-lg px-2 py-1 bg-white focus:outline-none focus:ring-1 focus:ring-brand-500 text-neutral-700"
+                                                    >
+                                                      <option value="">{item.deliveryRunId ? 'Change Run' : 'Assign to Run'}</option>
+                                                      {activeRuns.map(run => (
+                                                        <option key={run.id} value={run.id}>{run.label}</option>
+                                                      ))}
+                                                    </select>
+                                                    {runAssigning === item.deliveryTicketId && (
+                                                      <Loader2 className="h-3.5 w-3.5 animate-spin text-neutral-400" />
+                                                    )}
+                                                  </div>
+                                                ) : (
+                                                  <span className="text-[10px] text-neutral-400 italic">No active runs</span>
+                                                )}
+                                              </div>
+                                            ) : (
+                                              /* Safeguard: no ticket button for rejected reqs */
+                                              item.requisitionStatus !== 'rejected' ? (
+                                                <button
+                                                  onClick={() => handleCreateDeliveryTicket(item.requisitionId)}
+                                                  disabled={ticketingId !== null}
+                                                  className="text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 px-2.5 py-1.5 rounded-lg transition-colors inline-flex items-center gap-1 shadow-sm"
+                                                  title="Generate a delivery ticket using the fulfilled allocations for this requisition"
+                                                >
+                                                  <Truck className="h-3.5 w-3.5" />
+                                                  {ticketingId === item.requisitionId ? "Creating..." : "Create Delivery Ticket"}
+                                                </button>
+                                              ) : (
+                                                <span className="text-xs text-danger-500 font-semibold">Rejected</span>
+                                              )
+                                            )}
+                                          </>
                                         )}
-                                      </div>
-                                    ) : (
-                                      /* Safeguard: no ticket button for rejected reqs */
-                                      item.requisitionStatus !== 'rejected' ? (
-                                        <button
-                                          onClick={() => handleCreateDeliveryTicket(item.requisitionId)}
-                                          disabled={ticketingId !== null}
-                                          className="text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 px-2.5 py-1.5 rounded-lg transition-colors inline-flex items-center gap-1 shadow-sm"
-                                          title="Generate a delivery ticket using the fulfilled allocations for this requisition"
-                                        >
-                                          <Truck className="h-3.5 w-3.5" />
-                                          {ticketingId === item.requisitionId ? "Creating..." : "Create Delivery Ticket"}
-                                        </button>
-                                      ) : (
-                                        <span className="text-xs text-danger-500 font-semibold">Rejected</span>
-                                      )
-                                    )}
-                                  </>
-                                )}
+                                    </>
+                                  );
+                                })()}
                               </TableCell>
                             </TableRow>
                           );
