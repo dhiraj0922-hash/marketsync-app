@@ -5,9 +5,9 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/components/AuthProvider";
-import { getFulfillmentSummary, saveFulfillmentAllocations, completeFulfillmentMovement, createDeliveryTicketFromRequisition } from "@/lib/storage";
+import { getFulfillmentSummary, saveFulfillmentAllocations, completeFulfillmentMovement, createDeliveryTicketFromRequisition, approveRequisition, rejectRequisition, getActiveDeliveryRuns, assignDeliveryTicketToRun, removeTicketFromDeliveryRun } from "@/lib/storage";
 import { isHqFulfillment, isHqMaster, isHqOps } from "@/lib/roles";
-import { ChevronDown, ChevronRight, Search, Save, Check, RefreshCw, AlertTriangle, Play, Sparkles, Truck, PackageCheck } from "lucide-react";
+import { ChevronDown, ChevronRight, Search, Save, Check, RefreshCw, AlertTriangle, Play, Sparkles, Truck, PackageCheck, CheckCircle2, XSquare, Loader2 } from "lucide-react";
 
 export default function FulfillmentPage() {
   const { user } = useAuth();
@@ -28,12 +28,26 @@ export default function FulfillmentPage() {
   // key: line_id, value: { allocatedQty: number, backorderQty: number, fulfillmentNote: string, dirty: boolean }
   const [drafts, setDrafts] = useState<Record<string, { allocatedQty: number; backorderQty: number; fulfillmentNote: string; dirty: boolean }>>({});
 
+  // Active delivery runs for the run-assignment dropdown
+  const [activeRuns, setActiveRuns] = useState<{ id: string; runNumber: string; label: string; status: string }[]>([]);
+  const [runAssigning, setRunAssigning] = useState<string | null>(null); // ticketId being reassigned
+
+  // Rejection modal
+  const [rejectModalReqId, setRejectModalReqId] = useState<string | null>(null);
+  const [rejectionReason, setRejectionReason] = useState("");
+  const [rejectActionLoading, setRejectActionLoading] = useState(false);
+  const [approveActionLoading, setApproveActionLoading] = useState<string | null>(null);
+
   const loadData = async () => {
     setLoading(true);
     try {
-      const result = await getFulfillmentSummary();
+      const [result, runs] = await Promise.all([
+        getFulfillmentSummary(),
+        getActiveDeliveryRuns(),
+      ]);
       setData(result);
-      
+      setActiveRuns(runs);
+
       // Initialize drafts
       const initialDrafts: typeof drafts = {};
       for (const group of result) {
@@ -306,6 +320,7 @@ export default function FulfillmentPage() {
   }
 
   return (
+    <>
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
@@ -536,7 +551,47 @@ export default function FulfillmentPage() {
                                 />
                               </TableCell>
                               <TableCell className="py-3.5 text-right px-5 whitespace-nowrap space-x-2">
-                                {item.requisitionStatus !== "fulfilled" ? (
+                                {/* Approve/Reject — shown only for submitted requisitions */}
+                              {item.requisitionStatus === 'submitted' && (
+                                <div className="flex items-center gap-1.5 mb-1">
+                                  <button
+                                    onClick={() => { setRejectModalReqId(item.requisitionId); setRejectionReason(''); }}
+                                    disabled={rejectActionLoading || approveActionLoading === item.requisitionId}
+                                    className="text-xs font-semibold text-danger-700 bg-danger-50 hover:bg-danger-100 px-2 py-1 rounded-lg border border-danger-200 transition-colors inline-flex items-center gap-1"
+                                  >
+                                    <XSquare className="h-3 w-3" /> Reject
+                                  </button>
+                                  <button
+                                    onClick={async () => {
+                                      setApproveActionLoading(item.requisitionId);
+                                      try {
+                                        const res = await approveRequisition(
+                                          item.requisitionId,
+                                          user?.id ?? '',
+                                          user?.role ?? null
+                                        );
+                                        if (res.success) {
+                                          setToast(`Requisition approved!`);
+                                          await loadData();
+                                        } else {
+                                          alert(`Approval failed: ${res.error?.message ?? 'Unknown error'}`);
+                                        }
+                                      } finally {
+                                        setApproveActionLoading(null);
+                                      }
+                                    }}
+                                    disabled={approveActionLoading === item.requisitionId || rejectActionLoading}
+                                    className="text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-2 py-1 rounded-lg border border-emerald-200 transition-colors inline-flex items-center gap-1"
+                                  >
+                                    {approveActionLoading === item.requisitionId
+                                      ? <Loader2 className="h-3 w-3 animate-spin" />
+                                      : <CheckCircle2 className="h-3 w-3" />
+                                    }
+                                    Approve
+                                  </button>
+                                </div>
+                              )}
+                              {item.requisitionStatus !== "fulfilled" ? (
                                   <>
                                     <button
                                       onClick={() => handleMarkShortRow(item.id, item.quantityRequested)}
@@ -545,32 +600,86 @@ export default function FulfillmentPage() {
                                     >
                                       Mark Short
                                     </button>
-                                    <button
-                                      onClick={() => handleCompleteFulfillment(item.requisitionId)}
-                                      disabled={completingId !== null}
-                                      className="text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1.5 rounded-lg border border-emerald-200 transition-colors inline-flex items-center gap-1"
-                                      title="Complete this entire requisition's stock movement and update HQ inventory levels"
-                                    >
-                                      <PackageCheck className="h-3.5 w-3.5" />
-                                      {completingId === item.requisitionId ? "Processing..." : "Complete Fulfillment"}
-                                    </button>
+                                    {/* Safeguard: never show Complete Fulfillment for rejected reqs */}
+                                    {item.requisitionStatus !== 'rejected' && (
+                                      <button
+                                        onClick={() => handleCompleteFulfillment(item.requisitionId)}
+                                        disabled={completingId !== null}
+                                        className="text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1.5 rounded-lg border border-emerald-200 transition-colors inline-flex items-center gap-1"
+                                        title="Complete this entire requisition's stock movement and update HQ inventory levels"
+                                      >
+                                        <PackageCheck className="h-3.5 w-3.5" />
+                                        {completingId === item.requisitionId ? "Processing..." : "Complete Fulfillment"}
+                                      </button>
+                                    )}
                                   </>
                                 ) : (
                                   <>
                                     {item.deliveryTicketId ? (
-                                      <Badge variant="success" className="font-semibold text-xs py-1 px-2.5">
-                                        Ticket: {item.deliveryTicketNumber}
-                                      </Badge>
+                                      <div className="flex flex-col items-end gap-1.5">
+                                        <Badge variant="success" className="font-semibold text-xs py-1 px-2.5">
+                                          Ticket: {item.deliveryTicketNumber}
+                                        </Badge>
+                                        {/* Run assignment dropdown */}
+                                        {activeRuns.length > 0 ? (
+                                          <div className="flex items-center gap-1.5">
+                                            <select
+                                              defaultValue={item.deliveryRunId ?? ""}
+                                              disabled={runAssigning === item.deliveryTicketId}
+                                              onChange={async (e) => {
+                                                const newRunId = e.target.value;
+                                                if (!newRunId) return;
+                                                setRunAssigning(item.deliveryTicketId);
+                                                try {
+                                                  // If already assigned to a different run, unassign first
+                                                  if (item.deliveryRunId && item.deliveryRunId !== newRunId) {
+                                                    const unRes = await removeTicketFromDeliveryRun(item.deliveryTicketId);
+                                                    if (!unRes.success) {
+                                                      alert(`Unassign failed: ${unRes.error?.message}`);
+                                                      return;
+                                                    }
+                                                  }
+                                                  const res = await assignDeliveryTicketToRun(item.deliveryTicketId, newRunId);
+                                                  if (res.success) {
+                                                    setToast(`Ticket assigned to run successfully!`);
+                                                    await loadData();
+                                                  } else {
+                                                    alert(`Assignment failed: ${res.error?.message ?? 'Unknown error'}`);
+                                                  }
+                                                } finally {
+                                                  setRunAssigning(null);
+                                                }
+                                              }}
+                                              className="text-xs border border-neutral-200 rounded-lg px-2 py-1 bg-white focus:outline-none focus:ring-1 focus:ring-brand-500 text-neutral-700"
+                                            >
+                                              <option value="">{item.deliveryRunId ? 'Change Run' : 'Assign to Run'}</option>
+                                              {activeRuns.map(run => (
+                                                <option key={run.id} value={run.id}>{run.label}</option>
+                                              ))}
+                                            </select>
+                                            {runAssigning === item.deliveryTicketId && (
+                                              <Loader2 className="h-3.5 w-3.5 animate-spin text-neutral-400" />
+                                            )}
+                                          </div>
+                                        ) : (
+                                          <span className="text-[10px] text-neutral-400 italic">No active runs</span>
+                                        )}
+                                      </div>
                                     ) : (
-                                      <button
-                                        onClick={() => handleCreateDeliveryTicket(item.requisitionId)}
-                                        disabled={ticketingId !== null}
-                                        className="text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 px-2.5 py-1.5 rounded-lg transition-colors inline-flex items-center gap-1 shadow-sm"
-                                        title="Generate a delivery ticket using the fulfilled allocations for this requisition"
-                                      >
-                                        <Truck className="h-3.5 w-3.5" />
-                                        {ticketingId === item.requisitionId ? "Creating..." : "Create Delivery Ticket"}
-                                      </button>
+                                      /* Safeguard: no ticket button for rejected reqs */
+                                      item.requisitionStatus !== 'rejected' ? (
+                                        <button
+                                          onClick={() => handleCreateDeliveryTicket(item.requisitionId)}
+                                          disabled={ticketingId !== null}
+                                          className="text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 px-2.5 py-1.5 rounded-lg transition-colors inline-flex items-center gap-1 shadow-sm"
+                                          title="Generate a delivery ticket using the fulfilled allocations for this requisition"
+                                        >
+                                          <Truck className="h-3.5 w-3.5" />
+                                          {ticketingId === item.requisitionId ? "Creating..." : "Create Delivery Ticket"}
+                                        </button>
+                                      ) : (
+                                        <span className="text-xs text-danger-500 font-semibold">Rejected</span>
+                                      )
                                     )}
                                   </>
                                 )}
@@ -588,5 +697,77 @@ export default function FulfillmentPage() {
         </div>
       )}
     </div>
+
+    {/* ── Rejection Modal ─────────────────────────────────────────────────── */}
+    {rejectModalReqId && (
+      <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-sm">
+        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6 flex flex-col gap-4">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center justify-center w-10 h-10 rounded-full bg-danger-100">
+              <XSquare className="h-5 w-5 text-danger-600" />
+            </div>
+            <div>
+              <h3 className="text-base font-bold text-neutral-900">Reject Requisition</h3>
+              <p className="text-xs text-neutral-500">This action cannot be undone.</p>
+            </div>
+          </div>
+          <div>
+            <label className="block text-sm font-semibold text-neutral-700 mb-1.5">
+              Rejection Reason <span className="text-danger-600">*</span>
+            </label>
+            <textarea
+              rows={3}
+              value={rejectionReason}
+              onChange={e => setRejectionReason(e.target.value)}
+              placeholder="Explain why this requisition is being rejected…"
+              className="w-full border border-neutral-300 rounded-lg p-3 text-sm text-neutral-900 resize-none focus:outline-none focus:ring-2 focus:ring-danger-400 placeholder:text-neutral-400"
+              autoFocus
+            />
+            {rejectionReason.trim() === '' && (
+              <p className="mt-1 text-xs text-danger-600">A reason is required before rejecting.</p>
+            )}
+          </div>
+          <div className="flex items-center justify-end gap-3 pt-2 border-t border-neutral-100">
+            <button
+              onClick={() => { setRejectModalReqId(null); setRejectionReason(''); }}
+              disabled={rejectActionLoading}
+              className="px-4 py-2 text-sm font-medium text-neutral-600 bg-neutral-100 hover:bg-neutral-200 rounded-lg transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={async () => {
+                if (!rejectionReason.trim() || rejectActionLoading) return;
+                setRejectActionLoading(true);
+                try {
+                  const res = await rejectRequisition(
+                    rejectModalReqId,
+                    user?.id ?? '',
+                    rejectionReason.trim(),
+                    user?.role ?? null
+                  );
+                  if (res.success) {
+                    setToast('Requisition rejected.');
+                    setRejectModalReqId(null);
+                    setRejectionReason('');
+                    await loadData();
+                  } else {
+                    alert(`Rejection failed: ${res.error?.message ?? 'Unknown error'}`);
+                  }
+                } finally {
+                  setRejectActionLoading(false);
+                }
+              }}
+              disabled={!rejectionReason.trim() || rejectActionLoading}
+              className="px-4 py-2 text-sm font-medium bg-danger-600 text-white rounded-lg hover:bg-danger-700 transition-colors flex items-center gap-2 disabled:opacity-50"
+            >
+              {rejectActionLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <XSquare className="h-4 w-4" />}
+              {rejectActionLoading ? 'Rejecting...' : 'Confirm Rejection'}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }

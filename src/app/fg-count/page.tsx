@@ -123,7 +123,7 @@ function blankRows(items: SaleItem[], expectedMap: Record<string, number>): Coun
 
 export default function FgCountPage() {
   return (
-    <HQOnlyGuard>
+    <HQOnlyGuard allowFulfillment={true}>
       <FgCountContent />
     </HQOnlyGuard>
   );

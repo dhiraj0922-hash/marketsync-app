@@ -2732,7 +2732,13 @@ const mapRequisitionToFrontend = (db: any) => ({
     // totalAmount: stored in DB as total_amount. Falls back to 0 for legacy rows
     // that were created before this column existed (or before backfill was run).
     totalAmount: db.total_amount != null ? Number(db.total_amount) : 0,
-    lineItems: db.lineitems || []
+    lineItems: db.lineitems || [],
+    // ── Approve / Reject audit fields (added in migration §12) ────────────
+    approvedBy:       db.approved_by       ?? null,
+    approvedAt:       db.approved_at       ?? null,
+    rejectedBy:       db.rejected_by       ?? null,
+    rejectedAt:       db.rejected_at       ?? null,
+    rejectionReason:  db.rejection_reason  ?? null,
 });
 
 const mapRequisitionToDB = (req: any) => ({
@@ -2782,12 +2788,29 @@ export async function saveRequisitions(data: any[]) {
  */
 export async function updateRequisitionStatus(
   id: string,
-  status: string
+  status: string,
+  auditPayload?: {
+    approvedBy?:       string | null;
+    approvedAt?:       string | null;
+    rejectedBy?:       string | null;
+    rejectedAt?:       string | null;
+    rejectionReason?:  string | null;
+  }
 ): Promise<{ success: boolean; error?: any }> {
   const cleanStatus = status.toLowerCase();
+
+  const patch: Record<string, any> = { status: cleanStatus };
+  if (auditPayload) {
+    if (auditPayload.approvedBy  !== undefined) patch.approved_by       = auditPayload.approvedBy;
+    if (auditPayload.approvedAt  !== undefined) patch.approved_at       = auditPayload.approvedAt;
+    if (auditPayload.rejectedBy  !== undefined) patch.rejected_by       = auditPayload.rejectedBy;
+    if (auditPayload.rejectedAt  !== undefined) patch.rejected_at       = auditPayload.rejectedAt;
+    if (auditPayload.rejectionReason !== undefined) patch.rejection_reason = auditPayload.rejectionReason;
+  }
+
   const { error } = await supabase
     .from('requisitions')
-    .update({ status: cleanStatus })
+    .update(patch)
     .eq('id', id);
   if (error) {
     console.error('updateRequisitionStatus:', error);
@@ -2799,6 +2822,162 @@ export async function updateRequisitionStatus(
   }
 
   return { success: true };
+}
+
+/**
+ * Approve a requisition.
+ * - Validates the requisition is in an approvable state (submitted / pending / draft).
+ * - Rejects local_vendor-only requisitions if the caller is hq_fulfillment (they may
+ *   only action HQ-supplied requisitions).
+ * - Writes approved_by, approved_at alongside the status change.
+ *
+ * @param id          - requisition ID
+ * @param approverId  - auth.uid() of the approver
+ * @param callerRole  - front-end resolved role; used for local-vendor guard
+ */
+export async function approveRequisition(
+  id: string,
+  approverId: string,
+  callerRole?: string | null
+): Promise<{ success: boolean; error?: any }> {
+  // 1. Load current requisition status and source check
+  const { data: req, error: fetchErr } = await supabase
+    .from('requisitions')
+    .select('id, status')
+    .eq('id', id)
+    .single();
+
+  if (fetchErr || !req) {
+    return { success: false, error: fetchErr ?? { message: 'Requisition not found.' } };
+  }
+
+  const currentStatus = (req.status ?? '').toLowerCase();
+  const approvable = ['submitted', 'pending', 'draft'];
+  if (!approvable.includes(currentStatus)) {
+    return {
+      success: false,
+      error: { message: `Cannot approve a requisition with status "${currentStatus}".` },
+    };
+  }
+
+  // 2. hq_fulfillment: only approve HQ-supplied requisitions
+  const normalizedRole = (callerRole ?? '').toLowerCase();
+  if (normalizedRole === 'hq_fulfillment') {
+    const { data: items } = await supabase
+      .from('requisition_items')
+      .select('source_type')
+      .eq('requisition_id', id);
+
+    const allLocalVendor = Array.isArray(items) &&
+      items.length > 0 &&
+      items.every((li: any) => (li.source_type ?? '').toLowerCase() === 'local_vendor');
+
+    if (allLocalVendor) {
+      return {
+        success: false,
+        error: { message: 'hq_fulfillment cannot approve local-vendor requisitions. Only HQ-supplied requisitions may be approved here.' },
+      };
+    }
+  }
+
+  // 3. Write status + audit fields atomically
+  return updateRequisitionStatus(id, 'approved', {
+    approvedBy: approverId,
+    approvedAt: new Date().toISOString(),
+  });
+}
+
+/**
+ * Reject a requisition with a mandatory rejection reason.
+ * - Validates current status is rejectable (submitted / pending / draft).
+ * - Rejects local_vendor-only requisitions if caller is hq_fulfillment.
+ * - Prevents rejection of already-fulfilled or cancelled requisitions.
+ * - Writes rejected_by, rejected_at, rejection_reason atomically.
+ */
+export async function rejectRequisition(
+  id: string,
+  rejectorId: string,
+  rejectionReason: string,
+  callerRole?: string | null
+): Promise<{ success: boolean; error?: any }> {
+  const reason = (rejectionReason ?? '').trim();
+  if (!reason) {
+    return { success: false, error: { message: 'A rejection reason is required.' } };
+  }
+
+  // 1. Load current status
+  const { data: req, error: fetchErr } = await supabase
+    .from('requisitions')
+    .select('id, status')
+    .eq('id', id)
+    .single();
+
+  if (fetchErr || !req) {
+    return { success: false, error: fetchErr ?? { message: 'Requisition not found.' } };
+  }
+
+  const currentStatus = (req.status ?? '').toLowerCase();
+  const rejectable = ['submitted', 'pending', 'draft'];
+  if (!rejectable.includes(currentStatus)) {
+    return {
+      success: false,
+      error: { message: `Cannot reject a requisition with status "${currentStatus}". Only submitted or pending requisitions may be rejected.` },
+    };
+  }
+
+  // 2. hq_fulfillment: only reject HQ-supplied requisitions
+  const normalizedRole = (callerRole ?? '').toLowerCase();
+  if (normalizedRole === 'hq_fulfillment') {
+    const { data: items } = await supabase
+      .from('requisition_items')
+      .select('source_type')
+      .eq('requisition_id', id);
+
+    const allLocalVendor = Array.isArray(items) &&
+      items.length > 0 &&
+      items.every((li: any) => (li.source_type ?? '').toLowerCase() === 'local_vendor');
+
+    if (allLocalVendor) {
+      return {
+        success: false,
+        error: { message: 'hq_fulfillment cannot reject local-vendor requisitions.' },
+      };
+    }
+  }
+
+  // 3. Write status + full audit trail
+  return updateRequisitionStatus(id, 'rejected', {
+    rejectedBy:       rejectorId,
+    rejectedAt:       new Date().toISOString(),
+    rejectionReason:  reason,
+  });
+}
+
+/**
+ * Returns active delivery runs that are eligible to have tickets assigned.
+ * Only 'assigned', 'loaded', and 'in_progress' runs are returned.
+ * Completed, cancelled, and closed runs are excluded.
+ */
+export async function getActiveDeliveryRuns(): Promise<{ id: string; runNumber: string; label: string; status: string }[]> {
+  const { data, error } = await supabase
+    .from('delivery_runs')
+    .select('id, run_number, run_date, status')
+    .in('status', ['assigned', 'loaded', 'in_progress'])
+    .order('run_date', { ascending: false })
+    .order('created_at', { ascending: false })
+    .limit(50);
+
+  if (error || !data) {
+    console.error('[getActiveDeliveryRuns]', error);
+    return [];
+  }
+
+  return data.map((r: any) => ({
+    id:        r.id,
+    runNumber: r.run_number ?? r.id,
+    label:     `${r.run_number ?? r.id} — ${r.run_date ?? ''} (${r.status})`,
+    status:    r.status,
+  }));
 }
 
 // ----------------------------------------------------------------------------
@@ -4969,8 +5148,9 @@ export async function getDeliveryTicketById(id: string) {
     .from('delivery_tickets')
     .select('*, delivery_runs(*, drivers(*), vehicles(*)), delivery_ticket_items(*)')
     .eq('id', id)
-    .single();
+    .maybeSingle();
   if (error) return { success: false, error };
+  if (!data) return { success: false, error: { message: 'Delivery ticket not found or access denied.' } };
   return { success: true, data: mapDeliveryTicketToFrontend(data) };
 }
 
@@ -8139,7 +8319,7 @@ export async function getFulfillmentSummary(): Promise<any[]> {
       .in('requisition_id', reqIds),
     supabase
       .from('delivery_tickets')
-      .select('id, ticket_number, requisition_id')
+      .select('id, ticket_number, requisition_id, delivery_run_id')
       .in('requisition_id', reqIds)
   ]);
     
@@ -8189,6 +8369,7 @@ export async function getFulfillmentSummary(): Promise<any[]> {
       fulfillmentNote: item.fulfillmentNote || '',
       deliveryTicketId: ticket?.id || null,
       deliveryTicketNumber: ticket?.ticket_number || null,
+      deliveryRunId: ticket?.delivery_run_id ?? null,
       isFGMode: item.isFGMode,
       packQty: item.packQty,
       packCount: item.packCount,
@@ -8196,6 +8377,8 @@ export async function getFulfillmentSummary(): Promise<any[]> {
       packPrice: item.packPrice,
       lineTotal: item.lineTotal,
       unit: item.unit,
+      // ── Source type — used to gate hq_fulfillment approve/reject ──────────
+      sourceType: item.sourceType ?? null,
     });
   }
   

@@ -400,3 +400,254 @@ CREATE TRIGGER trg_enforce_requisition_items_fulfillment_column_guards
   BEFORE UPDATE ON public.requisition_items
   FOR EACH ROW
   EXECUTE FUNCTION public.enforce_requisition_items_fulfillment_column_guards();
+
+-- ── 12. Add Approve / Reject audit columns to requisitions header ─────────────
+-- SAFE: IF NOT EXISTS prevents failure when re-running the migration.
+ALTER TABLE public.requisitions ADD COLUMN IF NOT EXISTS approved_by       uuid;
+ALTER TABLE public.requisitions ADD COLUMN IF NOT EXISTS approved_at       timestamptz;
+ALTER TABLE public.requisitions ADD COLUMN IF NOT EXISTS rejected_by       uuid;
+ALTER TABLE public.requisitions ADD COLUMN IF NOT EXISTS rejected_at       timestamptz;
+ALTER TABLE public.requisitions ADD COLUMN IF NOT EXISTS rejection_reason  text;
+
+-- ── 13. Replace column-guard trigger for requisitions ─────────────────────────
+-- Previous version only whitelisted `status`.
+-- This version also whitelists the 5 new audit columns so that approve/reject
+-- writes don't get blocked. All other columns remain protected.
+CREATE OR REPLACE FUNCTION public.enforce_requisitions_fulfillment_column_guards()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF public.is_hq_fulfillment_profile() THEN
+    -- Fields that hq_fulfillment must NEVER touch
+    IF NEW.id               IS DISTINCT FROM OLD.id               OR
+       NEW.location         IS DISTINCT FROM OLD.location         OR
+       NEW.requestedby      IS DISTINCT FROM OLD.requestedby      OR
+       NEW.date             IS DISTINCT FROM OLD.date             OR
+       NEW.items            IS DISTINCT FROM OLD.items            OR
+       NEW.notes            IS DISTINCT FROM OLD.notes            OR
+       NEW.lineitems        IS DISTINCT FROM OLD.lineitems        OR
+       NEW.created_at       IS DISTINCT FROM OLD.created_at       OR
+       NEW.location_id      IS DISTINCT FROM OLD.location_id      OR
+       NEW.created_by       IS DISTINCT FROM OLD.created_by       OR
+       NEW.updated_at       IS DISTINCT FROM OLD.updated_at       OR
+       NEW.total_amount     IS DISTINCT FROM OLD.total_amount
+    THEN
+      RAISE EXCEPTION
+        'hq_fulfillment: only status, approved_by, approved_at, rejected_by, rejected_at, rejection_reason may be updated on requisitions.';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_enforce_requisitions_fulfillment_column_guards ON public.requisitions;
+CREATE TRIGGER trg_enforce_requisitions_fulfillment_column_guards
+  BEFORE UPDATE ON public.requisitions
+  FOR EACH ROW
+  EXECUTE FUNCTION public.enforce_requisitions_fulfillment_column_guards();
+
+-- ── 14. DB-level status-transition validation for hq_fulfillment ──────────────
+-- Based on full codebase audit (2026-06-26):
+--
+-- STATUSES ACTUALLY WRITTEN TO requisitions.status:
+--   'draft'             -- initial state / mock creation
+--   'submitted'         -- outlet submits a requisition
+--   'approved'          -- HQ approves; also written by finalizeRequisitionFulfillment
+--                          when not all lines are fulfilled (stays approved).
+--   'rejected'          -- HQ rejects (with mandatory rejection_reason)
+--   'fulfilled'         -- completeFulfillmentMovement() and finalizeRequisitionFulfillment
+--                          when all lines are fully fulfilled
+--   'partial'           -- ONLY written by old saveRequisitions() bulk path used by
+--                          hq_master/hq_ops; hq_fulfillment does NOT use this path
+--   'backordered'       -- UI display filter only; not currently written by any JS path
+--
+-- STATUSES THAT ARE NOT WRITTEN TO requisitions.status:
+--   'partially_fulfilled' -- only written to requisition_backorders.status (NOT the header)
+--   'completed'           -- only used for delivery_run.status and vehicle logs
+--   'pending'             -- only a UI read filter; not written
+--
+-- TRIGGER SCOPE:
+--   Applies to hq_fulfillment only. hq_master / hq_ops / SECURITY DEFINER RPCs bypass.
+
+CREATE OR REPLACE FUNCTION public.enforce_requisition_status_transitions()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_old text := lower(coalesce(OLD.status, ''));
+  v_new text := lower(coalesce(NEW.status, ''));
+BEGIN
+  -- ── Bypass: only enforced for hq_fulfillment callers ──────────────────────
+  -- hq_master, hq_ops, hq_admin bypass this trigger.
+  -- SECURITY DEFINER RPCs (finalize_requisition_fulfillment_v3) also bypass
+  -- because they run as the table owner role, not the calling user's role.
+  IF NOT public.is_hq_fulfillment_profile() THEN
+    RETURN NEW;
+  END IF;
+
+  -- ── No-op: status unchanged — always allow ────────────────────────────────
+  -- finalizeRequisitionFulfillment writes approved→approved when not all done.
+  IF v_new = v_old THEN
+    RETURN NEW;
+  END IF;
+
+  -- ── APPROVE: submitted / pending / draft → approved ───────────────────────
+  IF v_new = 'approved' AND v_old IN ('submitted', 'pending', 'draft') THEN
+    RETURN NEW;
+  END IF;
+
+  -- ── REJECT: submitted / pending / draft → rejected ────────────────────────
+  -- Mandatory rejection_reason enforced here AND in the application layer.
+  IF v_new = 'rejected' AND v_old IN ('submitted', 'pending', 'draft') THEN
+    IF coalesce(trim(NEW.rejection_reason), '') = '' THEN
+      RAISE EXCEPTION 'rejection_reason is required when rejecting a requisition.';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  -- ── FULFILL: approved → fulfilled ─────────────────────────────────────────
+  -- completeFulfillmentMovement() always transitions approved → fulfilled.
+  -- Also accept from 'partial' and 'backordered' in case those statuses were
+  -- written by hq_master flows before hq_fulfillment takes over.
+  -- NOTE: 'partially_fulfilled' is NEVER written to requisitions.status;
+  --       it is only written to requisition_backorders.status.
+  IF v_new = 'fulfilled' AND v_old IN ('approved', 'partial', 'backordered') THEN
+    RETURN NEW;
+  END IF;
+
+  -- ── BLOCK ALL OTHER TRANSITIONS ───────────────────────────────────────────
+  RAISE EXCEPTION
+    'hq_fulfillment: status transition from "%" to "%" is not permitted. '
+    'Allowed: submitted/draft→approved, submitted/draft→rejected (requires reason), '
+    'approved→fulfilled.',
+    v_old, v_new;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_enforce_requisition_status_transitions ON public.requisitions;
+CREATE TRIGGER trg_enforce_requisition_status_transitions
+  BEFORE UPDATE OF status ON public.requisitions
+  FOR EACH ROW
+  EXECUTE FUNCTION public.enforce_requisition_status_transitions();
+
+-- ── 15. RLS for fg_count_sessions and fg_count_lines ─────────────────────────
+-- The FG Count page uses these tables. hq_fulfillment must be able to
+-- SELECT, INSERT, and UPDATE count records.
+
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_name = 'fg_count_sessions'
+  ) THEN
+    ALTER TABLE public.fg_count_sessions ENABLE ROW LEVEL SECURITY;
+
+    DROP POLICY IF EXISTS "FG Count Sessions: read by hq or fulfillment" ON public.fg_count_sessions;
+    CREATE POLICY "FG Count Sessions: read by hq or fulfillment"
+      ON public.fg_count_sessions FOR SELECT TO authenticated
+      USING (public.is_hq_admin_profile() OR public.is_hq_fulfillment_profile());
+
+    DROP POLICY IF EXISTS "FG Count Sessions: insert by hq or fulfillment" ON public.fg_count_sessions;
+    CREATE POLICY "FG Count Sessions: insert by hq or fulfillment"
+      ON public.fg_count_sessions FOR INSERT TO authenticated
+      WITH CHECK (public.is_hq_admin_profile() OR public.is_hq_fulfillment_profile());
+
+    DROP POLICY IF EXISTS "FG Count Sessions: update by hq or fulfillment" ON public.fg_count_sessions;
+    CREATE POLICY "FG Count Sessions: update by hq or fulfillment"
+      ON public.fg_count_sessions FOR UPDATE TO authenticated
+      USING (public.is_hq_admin_profile() OR public.is_hq_fulfillment_profile())
+      WITH CHECK (public.is_hq_admin_profile() OR public.is_hq_fulfillment_profile());
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_name = 'fg_count_lines'
+  ) THEN
+    ALTER TABLE public.fg_count_lines ENABLE ROW LEVEL SECURITY;
+
+    DROP POLICY IF EXISTS "FG Count Lines: read by hq or fulfillment" ON public.fg_count_lines;
+    CREATE POLICY "FG Count Lines: read by hq or fulfillment"
+      ON public.fg_count_lines FOR SELECT TO authenticated
+      USING (public.is_hq_admin_profile() OR public.is_hq_fulfillment_profile());
+
+    DROP POLICY IF EXISTS "FG Count Lines: insert by hq or fulfillment" ON public.fg_count_lines;
+    CREATE POLICY "FG Count Lines: insert by hq or fulfillment"
+      ON public.fg_count_lines FOR INSERT TO authenticated
+      WITH CHECK (public.is_hq_admin_profile() OR public.is_hq_fulfillment_profile());
+
+    DROP POLICY IF EXISTS "FG Count Lines: update by hq or fulfillment" ON public.fg_count_lines;
+    CREATE POLICY "FG Count Lines: update by hq or fulfillment"
+      ON public.fg_count_lines FOR UPDATE TO authenticated
+      USING (public.is_hq_admin_profile() OR public.is_hq_fulfillment_profile())
+      WITH CHECK (public.is_hq_admin_profile() OR public.is_hq_fulfillment_profile());
+  END IF;
+END $$;
+
+-- hq_sale_items READ for FG Count page
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT FROM pg_policies
+    WHERE schemaname = 'public'
+      AND tablename  = 'hq_sale_items'
+      AND policyname = 'HQ Sale Items: read by fulfillment'
+  ) THEN
+    CREATE POLICY "HQ Sale Items: read by fulfillment"
+      ON public.hq_sale_items FOR SELECT TO authenticated
+      USING (public.is_hq_admin_profile() OR public.is_hq_fulfillment_profile());
+  END IF;
+END $$;
+
+-- ── 16. Delivery ticket run-assignment duplicate-prevention guard ──────────────
+-- Prevents hq_fulfillment from overwriting an existing delivery_run_id without
+-- first unassigning the ticket. hq_master / hq_ops are exempt.
+CREATE OR REPLACE FUNCTION public.enforce_delivery_ticket_run_assignment()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NOT public.is_hq_fulfillment_profile() THEN
+    RETURN NEW;
+  END IF;
+
+  -- Block reassignment: old run exists AND new run is different (not unassigning)
+  IF NEW.delivery_run_id IS NOT NULL
+     AND OLD.delivery_run_id IS NOT NULL
+     AND NEW.delivery_run_id IS DISTINCT FROM OLD.delivery_run_id
+  THEN
+    RAISE EXCEPTION
+      'Ticket is already assigned to run %. Unassign from the current run before reassigning.',
+      OLD.delivery_run_id;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_enforce_delivery_ticket_run_assignment ON public.delivery_tickets;
+CREATE TRIGGER trg_enforce_delivery_ticket_run_assignment
+  BEFORE UPDATE OF delivery_run_id ON public.delivery_tickets
+  FOR EACH ROW
+  EXECUTE FUNCTION public.enforce_delivery_ticket_run_assignment();
+
+-- ── 17. Post-migration verification queries ───────────────────────────────────
+-- Run these in Supabase SQL Editor after applying the migration.
+/*
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_schema = 'public' AND table_name = 'requisitions'
+  AND column_name IN ('approved_by','approved_at','rejected_by','rejected_at','rejection_reason')
+ORDER BY column_name;
+
+SELECT tgname, tgenabled FROM pg_trigger
+WHERE tgrelid = 'public.requisitions'::regclass AND tgname LIKE 'trg_%'
+ORDER BY tgname;
+
+SELECT tgname FROM pg_trigger
+WHERE tgrelid = 'public.delivery_tickets'::regclass
+  AND tgname = 'trg_enforce_delivery_ticket_run_assignment';
+
+SELECT user_id, email, role, is_active
+FROM public.user_profiles WHERE role = 'hq_fulfillment';
+*/

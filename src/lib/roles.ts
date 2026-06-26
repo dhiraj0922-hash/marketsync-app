@@ -131,10 +131,15 @@ export function canAccessPath(user: { role?: string | null } | null | undefined,
       "/requisitions",
       "/inventory/count",
       "/hq-sale-items/count",
+      "/fg-count",           // direct URL alias — same content as /hq-sale-items/count
       "/deliveries/tickets",
     ].some(allowed => path === allowed || path.startsWith(`${allowed}/`));
   }
-  if (isDriver(user)) return path === "/deliveries";
+  if (isDriver(user)) {
+    return path === "/deliveries"
+      || path.startsWith("/deliveries/tickets/")
+      || path.startsWith("/deliveries/runs/");
+  }
   if (isHqOps(user)) {
     return [
       "/inventory",

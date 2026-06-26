@@ -8,11 +8,18 @@ import { Header } from "@/components/Header";
 export function AppLayoutWrapper({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const isLoginPage = pathname === "/login";
+  const isPrintPage =
+    pathname?.startsWith("/deliveries/tickets/") && pathname.endsWith("/print") ||
+    pathname?.startsWith("/deliveries/runs/") && pathname.endsWith("/print");
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   return isLoginPage ? (
     <main className="w-full h-screen bg-neutral-50 flex items-center justify-center">
+      {children}
+    </main>
+  ) : isPrintPage ? (
+    <main className="w-full min-h-screen bg-white">
       {children}
     </main>
   ) : (

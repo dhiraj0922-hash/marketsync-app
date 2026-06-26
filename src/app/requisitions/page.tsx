@@ -44,6 +44,8 @@ import {
   loadRequisitionItems,
   loadRequisitionItemsBatch,
   updateRequisitionStatus,
+  approveRequisition,
+  rejectRequisition,
   updateRequisitionItemFulfilled,
   getHQAvailabilityLabel,
   sendHqRequisitionNotification,
@@ -1365,9 +1367,16 @@ function LocationManagerView({
 
           {/* Rejected banner */}
           {(selectedReq?.status === "rejected" || selectedReq?.status === "Rejected") && (
-            <div className="bg-danger-50 border border-danger-200 rounded-lg p-4 flex items-center gap-3">
-              <XSquare className="h-5 w-5 text-danger-600 shrink-0" />
-              <p className="text-sm text-danger-700 font-medium">This requisition was rejected by HQ.</p>
+            <div className="bg-danger-50 border border-danger-200 rounded-lg p-4 flex flex-col gap-1.5">
+              <div className="flex items-center gap-3">
+                <XSquare className="h-5 w-5 text-danger-600 shrink-0" />
+                <p className="text-sm text-danger-700 font-medium">This requisition was rejected by HQ.</p>
+              </div>
+              {selectedReq?.rejectionReason && (
+                <p className="text-xs text-danger-600 pl-8">
+                  <span className="font-semibold">Reason:</span> {selectedReq.rejectionReason}
+                </p>
+              )}
             </div>
           )}
 
@@ -1530,6 +1539,12 @@ function HQAdminView({
   const [deliveryTicketLoading, setDeliveryTicketLoading] = useState(false);
   // Cache line items per req id so table rows show real values once a req is opened
   const [reqItemsCache, setReqItemsCache] = useState<Map<string, any[]>>(new Map());
+
+  // ── Rejection modal state ─────────────────────────────────────────────────
+  const [rejectModalReqId, setRejectModalReqId] = useState<string | null>(null);
+  const [rejectionReason, setRejectionReason] = useState("");
+  const [rejectActionLoading, setRejectActionLoading] = useState(false);
+  const [approveActionLoading, setApproveActionLoading] = useState(false);
 
   // Backorders state
   const [backorders, setBackorders] = useState<any[]>([]);
@@ -2461,19 +2476,74 @@ function HQAdminView({
                             : "Generate Delivery Ticket"}
                       </button>
                     )}
-                    {/* Approve / Reject — only for submitted/draft */}
-                    {["submitted", "draft"].includes((selectedReq?.status ?? "").toLowerCase()) && !isHqFulfillment(profile) && (
-                      <>
-                        <button onClick={() => handleUpdateReqStatus(selectedReq.id, "rejected")}
-                          className="px-4 py-2 text-sm font-medium bg-white border border-danger-200 text-danger-700 rounded-lg hover:bg-danger-50 transition-colors shadow-sm flex items-center gap-2">
-                          <XSquare className="h-4 w-4" /> Reject
-                        </button>
-                        <button onClick={() => handleUpdateReqStatus(selectedReq.id, "approved")}
-                          className="px-4 py-2 text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors shadow-sm flex items-center gap-2">
-                          <CheckCircle2 className="h-4 w-4" /> Approve
-                        </button>
-                      </>
-                    )}
+                    {/* Approve / Reject — submitted/draft reqs only */}
+                    {["submitted", "draft"].includes((selectedReq?.status ?? "").toLowerCase()) && (() => {
+                      const isFF = isHqFulfillment(profile);
+
+                      // hq_fulfillment cannot approve/reject purely local-vendor requisitions.
+                      // Check if ALL items in the requisition are local_vendor.
+                      const allLocalVendor = hqReqItems.length > 0 &&
+                        hqReqItems.every((li: any) =>
+                          (li.sourceType ?? li.source_type ?? '').toLowerCase() === 'local_vendor'
+                        );
+                      const blockedForFF = isFF && allLocalVendor;
+
+                      if (blockedForFF) {
+                        return (
+                          <div className="px-3 py-1.5 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg">
+                            Local-vendor requisition — HQ approval not required.
+                          </div>
+                        );
+                      }
+
+                      return (
+                        <>
+                          <button
+                            onClick={() => {
+                              setRejectModalReqId(selectedReq.id);
+                              setRejectionReason("");
+                            }}
+                            disabled={rejectActionLoading || approveActionLoading}
+                            className="px-4 py-2 text-sm font-medium bg-white border border-danger-200 text-danger-700 rounded-lg hover:bg-danger-50 transition-colors shadow-sm flex items-center gap-2 disabled:opacity-50"
+                          >
+                            <XSquare className="h-4 w-4" /> Reject
+                          </button>
+                          <button
+                            onClick={async () => {
+                              if (!selectedReq || approveActionLoading) return;
+                              setApproveActionLoading(true);
+                              try {
+                                const res = await approveRequisition(
+                                  selectedReq.id,
+                                  profile?.id ?? '',
+                                  profile?.role ?? null
+                                );
+                                if (res.success) {
+                                  // Refresh the local list
+                                  setRequisitions(prev =>
+                                    prev.map(r =>
+                                      r.id === selectedReq.id
+                                        ? { ...r, status: 'approved', approvedBy: profile?.id, approvedAt: new Date().toISOString() }
+                                        : r
+                                    )
+                                  );
+                                  setSelectedReq((prev: any) => prev ? { ...prev, status: 'approved' } : prev);
+                                } else {
+                                  alert(`Approval failed: ${res.error?.message ?? 'Unknown error'}`);
+                                }
+                              } finally {
+                                setApproveActionLoading(false);
+                              }
+                            }}
+                            disabled={approveActionLoading || rejectActionLoading}
+                            className="px-4 py-2 text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors shadow-sm flex items-center gap-2 disabled:opacity-50"
+                          >
+                            {approveActionLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                            {approveActionLoading ? 'Approving...' : 'Approve'}
+                          </button>
+                        </>
+                      );
+                    })()}
                     {/* Complete Fulfillment — shown for approved when NOT locked */}
                     {selectedReq && FULFILLABLE_STATUSES.has((selectedReq.status ?? "").toLowerCase()) && !isFulfillmentLocked && (() => {
                       // ── Pre-flight: classify every line before allowing submission ──────────
@@ -3404,6 +3474,91 @@ function HQAdminView({
           </div>
         </div>
       </Drawer>
+
+      {/* ── Rejection Modal ──────────────────────────────────────────────────── */}
+      {rejectModalReqId && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6 flex flex-col gap-4">
+            <div className="flex items-center gap-3">
+              <div className="flex items-center justify-center w-10 h-10 rounded-full bg-danger-100">
+                <XSquare className="h-5 w-5 text-danger-600" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-neutral-900">Reject Requisition</h3>
+                <p className="text-xs text-neutral-500">This action cannot be undone.</p>
+              </div>
+            </div>
+            <div>
+              <label className="block text-sm font-semibold text-neutral-700 mb-1.5">
+                Rejection Reason <span className="text-danger-600">*</span>
+              </label>
+              <textarea
+                rows={3}
+                value={rejectionReason}
+                onChange={e => setRejectionReason(e.target.value)}
+                placeholder="Explain why this requisition is being rejected…"
+                className="w-full border border-neutral-300 rounded-lg p-3 text-sm text-neutral-900 resize-none focus:outline-none focus:ring-2 focus:ring-danger-400 placeholder:text-neutral-400"
+                autoFocus
+              />
+              {rejectionReason.trim() === '' && (
+                <p className="mt-1 text-xs text-danger-600">A reason is required before rejecting.</p>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-3 pt-2 border-t border-neutral-100">
+              <button
+                onClick={() => { setRejectModalReqId(null); setRejectionReason(''); }}
+                disabled={rejectActionLoading}
+                className="px-4 py-2 text-sm font-medium text-neutral-600 bg-neutral-100 hover:bg-neutral-200 rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={async () => {
+                  if (!rejectionReason.trim() || rejectActionLoading) return;
+                  setRejectActionLoading(true);
+                  try {
+                    const res = await rejectRequisition(
+                      rejectModalReqId,
+                      profile?.id ?? '',
+                      rejectionReason.trim(),
+                      profile?.role ?? null
+                    );
+                    if (res.success) {
+                      setRequisitions(prev =>
+                        prev.map(r =>
+                          r.id === rejectModalReqId
+                            ? { ...r, status: 'rejected', rejectionReason: rejectionReason.trim(), rejectedBy: profile?.id, rejectedAt: new Date().toISOString() }
+                            : r
+                        )
+                      );
+                      if (selectedReq?.id === rejectModalReqId) {
+                        setSelectedReq((prev: any) => prev ? {
+                          ...prev,
+                          status: 'rejected',
+                          rejectionReason: rejectionReason.trim(),
+                          rejectedBy: profile?.id,
+                          rejectedAt: new Date().toISOString()
+                        } : prev);
+                      }
+                      setRejectModalReqId(null);
+                      setRejectionReason('');
+                    } else {
+                      alert(`Rejection failed: ${res.error?.message ?? 'Unknown error'}`);
+                    }
+                  } finally {
+                    setRejectActionLoading(false);
+                  }
+                }}
+                disabled={!rejectionReason.trim() || rejectActionLoading}
+                className="px-4 py-2 text-sm font-medium bg-danger-600 text-white rounded-lg hover:bg-danger-700 transition-colors flex items-center gap-2 disabled:opacity-50"
+              >
+                {rejectActionLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <XSquare className="h-4 w-4" />}
+                {rejectActionLoading ? 'Rejecting...' : 'Confirm Rejection'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </DarkPageShell>
   );
 }

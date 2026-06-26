@@ -65,6 +65,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser]           = useState<AppUser | null>(null);
   const [loading, setLoading]     = useState(true);
   const [bootstrapError, setBootstrapError] = useState<BootstrapError>(null);
+  const [mounted, setMounted]     = useState(false);
+  const [hostname, setHostname]   = useState("");
 
   const router   = useRouter();
   const pathname = usePathname();
@@ -84,6 +86,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     loadingRef.current = false;
     setLoading(false);
   };
+
+  useEffect(() => {
+    setMounted(true);
+    setHostname(window.location.hostname);
+  }, []);
 
   // ── Profile loader ────────────────────────────────────────────────────────
   /**
@@ -219,9 +226,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
         if (!supabaseConfigured) {
           console.error("[AuthProvider] Supabase env vars missing — check NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY.");
-          diagLog("Supabase not configured", {
-            hostname: typeof window !== "undefined" ? window.location.hostname : "ssr",
-          });
+          diagLog("Supabase not configured");
           setUser(null);
           return;
         }
@@ -521,7 +526,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 <div>Current path: <strong>{pathname}</strong></div>
                 <div>Bootstrap error: <strong>{bootstrapError ?? "none"}</strong></div>
                 <div>Profile error: <strong>{String(!!user?.profileError)}</strong></div>
-                <div>Hostname: <strong>{typeof window !== "undefined" ? window.location.hostname : "ssr"}</strong></div>
+                <div>Hostname: <strong>{mounted ? hostname : ""}</strong></div>
               </div>
             </details>
           )}

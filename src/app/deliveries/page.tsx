@@ -60,6 +60,7 @@ import {
   UserRound,
   AlertTriangle,
   Bell,
+  ChevronRight,
   FileText,
   Gauge,
   Play,
@@ -69,6 +70,12 @@ import {
 
 const ticketStatuses: DeliveryTicketStatus[] = ["draft", "assigned", "loaded", "out_for_delivery", "delivered", "issue_reported", "cancelled"];
 const runStatuses: DeliveryRunStatus[] = ["draft", "assigned", "loaded", "in_progress", "completed", "cancelled"];
+
+const getTicketPrintUrl = (ticketId: string, mode?: "print" | "pdf") =>
+  `/deliveries/tickets/${ticketId}/print${mode ? `?mode=${mode}` : ""}`;
+
+const getRunTicketsPrintUrl = (runId: string, mode?: "print" | "pdf") =>
+  `/deliveries/runs/${runId}/print${mode ? `?mode=${mode}` : ""}`;
 
 const deliveryPageCss = `
   @media print {
@@ -383,6 +390,44 @@ export default function DeliveriesPage() {
     setToast("Stop marked arrived.");
     if (selectedTicket?.id === target.id) setSelectedTicket({ ...selectedTicket, arrivedAt: new Date().toISOString(), status: "out_for_delivery" });
     await refresh();
+  };
+
+  const openTicketPrintView = (ticket: any, mode: "view" | "print" | "pdf" = "view") => {
+    if (!ticket?.id) {
+      setToast("Delivery ticket is missing an internal ID.");
+      return;
+    }
+    const printMode = mode === "view" ? undefined : mode;
+    const url = getTicketPrintUrl(ticket.id, printMode);
+    console.log("[Delivery Ticket Print Action]", {
+      action: mode,
+      ticketId: ticket.id,
+      ticketNumber: ticket.ticketNumber,
+      printUrl: url,
+    });
+    const printWindow = window.open(url, "_blank", "noopener,noreferrer");
+    if (!printWindow) {
+      setToast("Browser blocked the print window. Allow pop-ups and try again.");
+    }
+  };
+
+  const openRunTicketsPrintView = (run: any, mode: "view" | "print" | "pdf" = "print") => {
+    if (!run?.id) {
+      setToast("Delivery run is missing an internal ID.");
+      return;
+    }
+    const printMode = mode === "view" ? undefined : mode;
+    const url = getRunTicketsPrintUrl(run.id, printMode);
+    console.log("[Delivery Run Tickets Print Action]", {
+      action: mode,
+      runId: run.id,
+      runNumber: run.runNumber,
+      printUrl: url,
+    });
+    const printWindow = window.open(url, "_blank", "noopener,noreferrer");
+    if (!printWindow) {
+      setToast("Browser blocked the print window. Allow pop-ups and try again.");
+    }
   };
 
   const reportIssue = async (ticket?: any) => {
@@ -1118,7 +1163,11 @@ export default function DeliveriesPage() {
           variant="dialog"
           footer={selectedTicket && (
             <div className="flex w-full flex-wrap items-center justify-between gap-2">
-              <button onClick={() => window.print()} className="inline-flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50"><Printer className="h-4 w-4" /> Print</button>
+              <div className="flex flex-wrap gap-2">
+                <button onClick={() => openTicketPrintView(selectedTicket, "print")} className="inline-flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50"><Printer className="h-4 w-4" /> Print Ticket</button>
+                <button onClick={() => openTicketPrintView(selectedTicket, "pdf")} className="inline-flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50"><FileText className="h-4 w-4" /> Download PDF</button>
+                <button onClick={() => openTicketPrintView(selectedTicket, "view")} className="inline-flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50"><ChevronRight className="h-4 w-4" /> Open Print View</button>
+              </div>
               <div className="flex flex-wrap gap-2">
                 {hqAdmin && ticketStatuses.map((status) => (
                   <button key={status} onClick={async () => { const res = await updateDeliveryTicketStatus(selectedTicket.id, status); if (!res.success) alert(res.error?.message ?? "Update failed"); else { setSelectedTicket({ ...selectedTicket, status }); await refresh(); } }} className="rounded-lg border border-neutral-200 bg-white px-3 py-2 text-xs font-semibold text-neutral-700 hover:bg-slate-50">{labelize(status)}</button>
@@ -1133,6 +1182,17 @@ export default function DeliveriesPage() {
         >
           {selectedTicket && (
             <div className="space-y-4 text-neutral-700">
+              <div className="flex flex-col gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-sm font-bold text-blue-950">Dispatch paperwork</p>
+                  <p className="text-xs text-blue-700">Print or save this delivery ticket before the driver starts the run.</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button onClick={() => openTicketPrintView(selectedTicket, "print")} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-700"><Printer className="h-4 w-4" /> Print Ticket</button>
+                  <button onClick={() => openTicketPrintView(selectedTicket, "pdf")} className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-100"><FileText className="h-4 w-4" /> Download PDF</button>
+                  <button onClick={() => openTicketPrintView(selectedTicket, "view")} className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-100"><ChevronRight className="h-4 w-4" /> Open Print View</button>
+                </div>
+              </div>
               <div id="delivery-ticket-print" className="rounded-xl border border-neutral-200 bg-white p-5">
                 <div className="flex flex-col gap-3 border-b border-neutral-200 pb-4 sm:flex-row sm:items-start sm:justify-between">
                   <div>
@@ -1623,17 +1683,27 @@ export default function DeliveriesPage() {
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
                     <h4 className="text-xs font-bold uppercase tracking-wider text-neutral-500">Stops List</h4>
-                    {hqAdmin && orderedTickets.length > 0 && (
-                      <button
-                        onClick={() => {
-                          setSelectedStopsToAssign([]);
-                          setShowAddStopsPicker(true);
-                        }}
-                        className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-2.5 py-1 text-xs font-semibold text-neutral-700 hover:bg-neutral-50"
-                      >
-                        <Plus className="h-3.5 w-3.5 text-neutral-500" /> Add Tickets
-                      </button>
-                    )}
+                    <div className="flex flex-wrap gap-2">
+                      {orderedTickets.length > 0 && (
+                        <button
+                          onClick={() => openRunTicketsPrintView(routeRun, "print")}
+                          className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100"
+                        >
+                          <Printer className="h-3.5 w-3.5" /> Print All Tickets
+                        </button>
+                      )}
+                      {hqAdmin && orderedTickets.length > 0 && (
+                        <button
+                          onClick={() => {
+                            setSelectedStopsToAssign([]);
+                            setShowAddStopsPicker(true);
+                          }}
+                          className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-2.5 py-1 text-xs font-semibold text-neutral-700 hover:bg-neutral-50"
+                        >
+                          <Plus className="h-3.5 w-3.5 text-neutral-500" /> Add Tickets
+                        </button>
+                      )}
+                    </div>
                   </div>
 
                   <div className="space-y-2">
@@ -1805,6 +1875,7 @@ export default function DeliveriesPage() {
                                   </>
                                 )}
                                 <button onClick={() => setSelectedTicket(ticket)} className="rounded border border-neutral-200 px-2 py-1 text-xs font-semibold hover:bg-neutral-50">Open Ticket</button>
+                                <button onClick={() => openTicketPrintView(ticket, "print")} className="rounded border border-blue-200 bg-blue-50 px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100">Print Ticket</button>
                                 {(hqAdmin || driverUser) && <button onClick={() => markArrived(ticket)} className="rounded border border-blue-200 bg-blue-50 px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100">Mark Arrived</button>}
                                 {(hqAdmin || driverUser || managerUser) && <button onClick={() => { setSelectedTicket(ticket); }} className="rounded border border-success-200 bg-success-50 px-2 py-1 text-xs font-semibold text-success-700 hover:bg-success-100">{managerUser ? "Confirm Receipt" : "Mark Delivered"}</button>}
                                 {(hqAdmin || driverUser || managerUser) && <button onClick={() => reportIssue(ticket)} className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-700 hover:bg-amber-100">Report Issue</button>}
@@ -1931,7 +2002,14 @@ export default function DeliveriesPage() {
         </Drawer>
 
         <Drawer isOpen={!!runReport} onClose={() => setRunReport(null)} title={`Delivery Run Report ${runReport?.run?.runNumber ?? ""}`} variant="dialog">
-          {runReport && <DeliveryRunReport report={runReport} onPrint={() => window.print()} />}
+          {runReport && (
+            <DeliveryRunReport
+              report={runReport}
+              onPrint={() => window.print()}
+              onPrintTicket={(ticket) => openTicketPrintView(ticket, "print")}
+              onPrintAllTickets={(run) => openRunTicketsPrintView(run, "print")}
+            />
+          )}
         </Drawer>
 
         <Drawer isOpen={!!selectedVehicleLog} onClose={() => setSelectedVehicleLog(null)} title={`Vehicle Daily Log ${selectedVehicleLog?.vehicle?.vehicleName ?? ""}`} variant="dialog">
@@ -2009,7 +2087,17 @@ function InfoLine({ icon, label, value }: { icon: React.ReactNode; label: string
   );
 }
 
-function DeliveryRunReport({ report, onPrint }: { report: any; onPrint: () => void }) {
+function DeliveryRunReport({
+  report,
+  onPrint,
+  onPrintTicket,
+  onPrintAllTickets,
+}: {
+  report: any;
+  onPrint: () => void;
+  onPrintTicket: (ticket: any) => void;
+  onPrintAllTickets: (run: any) => void;
+}) {
   const run = report.run;
   const vehicleLog = report.vehicleDailyLog;
   const vehicleTotals = report.vehicleTotals ?? {};
@@ -2025,9 +2113,14 @@ function DeliveryRunReport({ report, onPrint }: { report: any; onPrint: () => vo
             <h2 className="mt-1 text-2xl font-bold text-neutral-950">{run.runNumber}</h2>
             <p className="text-sm text-neutral-500">{run.runDate} · {run.driver?.name ?? "No driver"} · {run.vehicle?.vehicleName ?? "No vehicle"}</p>
           </div>
-          <button onClick={onPrint} className="print:hidden inline-flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50">
-            <Printer className="h-4 w-4" /> Print
-          </button>
+          <div className="print:hidden flex flex-wrap gap-2">
+            <button onClick={onPrintAllTickets.bind(null, run)} className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-100">
+              <Printer className="h-4 w-4" /> Print All Tickets
+            </button>
+            <button onClick={onPrint} className="inline-flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50">
+              <Printer className="h-4 w-4" /> Print Report
+            </button>
+          </div>
         </div>
 
         <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
@@ -2097,7 +2190,7 @@ function DeliveryRunReport({ report, onPrint }: { report: any; onPrint: () => vo
           <h3 className="mb-2 text-sm font-bold text-neutral-950">Stops Summary</h3>
           <table className="w-full text-sm">
             <thead><tr className="border-b border-neutral-200 text-left text-xs uppercase text-neutral-500">
-              <th className="py-2">Stop</th><th>Ticket</th><th>Location</th><th>Requisition</th><th>Status</th><th>Arrived</th><th>Delivered</th><th>Received</th><th>Issues</th>
+              <th className="py-2">Stop</th><th>Ticket</th><th>Location</th><th>Requisition</th><th>Status</th><th>Arrived</th><th>Delivered</th><th>Received</th><th>Issues</th><th className="print:hidden">Action</th>
             </tr></thead>
             <tbody>
               {orderedTickets.map((ticket, index) => (
@@ -2111,6 +2204,11 @@ function DeliveryRunReport({ report, onPrint }: { report: any; onPrint: () => vo
                   <td>{formatDateTime(ticket.deliveredAt)}</td>
                   <td>{ticket.receivedBy || "—"}</td>
                   <td>{(ticket.items ?? []).reduce((sum: number, item: any) => sum + Number(item.issueQty ?? 0), 0)}</td>
+                  <td className="print:hidden">
+                    <button onClick={() => onPrintTicket(ticket)} className="rounded border border-blue-200 bg-blue-50 px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100">
+                      Print Ticket
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
