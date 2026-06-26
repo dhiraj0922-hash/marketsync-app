@@ -332,28 +332,36 @@ CREATE OR REPLACE FUNCTION public.enforce_delivery_tickets_fulfillment_column_gu
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
+DECLARE
+  v_col text;
 BEGIN
   IF public.is_hq_fulfillment_profile() THEN
-    IF NEW.id IS DISTINCT FROM OLD.id OR
-       NEW.ticket_number IS DISTINCT FROM OLD.ticket_number OR
-       NEW.requisition_id IS DISTINCT FROM OLD.requisition_id OR
-       NEW.location_id IS DISTINCT FROM OLD.location_id OR
-       NEW.stop_sequence IS DISTINCT FROM OLD.stop_sequence OR
-       NEW.destination_name IS DISTINCT FROM OLD.destination_name OR
-       NEW.destination_address IS DISTINCT FROM OLD.destination_address OR
-       NEW.destination_contact IS DISTINCT FROM OLD.destination_contact OR
-       NEW.destination_phone IS DISTINCT FROM OLD.destination_phone OR
-       NEW.estimated_arrival_time IS DISTINCT FROM OLD.estimated_arrival_time OR
-       NEW.delivered_at IS DISTINCT FROM OLD.delivered_at OR
-       NEW.received_by IS DISTINCT FROM OLD.received_by OR
-       NEW.proof_photo_url IS DISTINCT FROM OLD.proof_photo_url OR
-       NEW.signature_url IS DISTINCT FROM OLD.signature_url OR
-       NEW.notes IS DISTINCT FROM OLD.notes OR
-       NEW.created_by IS DISTINCT FROM OLD.created_by OR
-       NEW.created_at IS DISTINCT FROM OLD.created_at OR
-       NEW.updated_at IS DISTINCT FROM OLD.updated_at
-    THEN
-      RAISE EXCEPTION 'hq_fulfillment role is only allowed to update status and delivery_run_id on delivery tickets.';
+    -- updated_at is auto-stamped by Supabase moddatetime on every UPDATE.
+    -- It must not be blocked or every hq_fulfillment write will be rejected.
+    IF    NEW.id                    IS DISTINCT FROM OLD.id                    THEN v_col := 'id';
+    ELSIF NEW.ticket_number         IS DISTINCT FROM OLD.ticket_number         THEN v_col := 'ticket_number';
+    ELSIF NEW.requisition_id        IS DISTINCT FROM OLD.requisition_id        THEN v_col := 'requisition_id';
+    ELSIF NEW.location_id           IS DISTINCT FROM OLD.location_id           THEN v_col := 'location_id';
+    ELSIF NEW.stop_sequence         IS DISTINCT FROM OLD.stop_sequence         THEN v_col := 'stop_sequence';
+    ELSIF NEW.destination_name      IS DISTINCT FROM OLD.destination_name      THEN v_col := 'destination_name';
+    ELSIF NEW.destination_address   IS DISTINCT FROM OLD.destination_address   THEN v_col := 'destination_address';
+    ELSIF NEW.destination_contact   IS DISTINCT FROM OLD.destination_contact   THEN v_col := 'destination_contact';
+    ELSIF NEW.destination_phone     IS DISTINCT FROM OLD.destination_phone     THEN v_col := 'destination_phone';
+    ELSIF NEW.estimated_arrival_time IS DISTINCT FROM OLD.estimated_arrival_time THEN v_col := 'estimated_arrival_time';
+    ELSIF NEW.delivered_at          IS DISTINCT FROM OLD.delivered_at          THEN v_col := 'delivered_at';
+    ELSIF NEW.received_by           IS DISTINCT FROM OLD.received_by           THEN v_col := 'received_by';
+    ELSIF NEW.proof_photo_url       IS DISTINCT FROM OLD.proof_photo_url       THEN v_col := 'proof_photo_url';
+    ELSIF NEW.signature_url         IS DISTINCT FROM OLD.signature_url         THEN v_col := 'signature_url';
+    ELSIF NEW.notes                 IS DISTINCT FROM OLD.notes                 THEN v_col := 'notes';
+    ELSIF NEW.created_by            IS DISTINCT FROM OLD.created_by            THEN v_col := 'created_by';
+    ELSIF NEW.created_at            IS DISTINCT FROM OLD.created_at            THEN v_col := 'created_at';
+    END IF;
+
+    IF v_col IS NOT NULL THEN
+      RAISE EXCEPTION
+        'hq_fulfillment: unauthorized column change on delivery_tickets: "%%". '
+        'Only status and delivery_run_id may be updated by this role.',
+        v_col;
     END IF;
   END IF;
   RETURN NEW;
@@ -366,31 +374,42 @@ CREATE TRIGGER trg_enforce_delivery_tickets_fulfillment_column_guards
   FOR EACH ROW
   EXECUTE FUNCTION public.enforce_delivery_tickets_fulfillment_column_guards();
 
--- Requisition items update guard: hq_fulfillment can only update allocations / note columns.
+-- Requisition items update guard: hq_fulfillment can only update allocation / fulfillment columns.
 CREATE OR REPLACE FUNCTION public.enforce_requisition_items_fulfillment_column_guards()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
+DECLARE
+  v_col text;
 BEGIN
   IF public.is_hq_fulfillment_profile() THEN
-    IF NEW.id IS DISTINCT FROM OLD.id OR
-       NEW.requisition_id IS DISTINCT FROM OLD.requisition_id OR
-       NEW.item_id IS DISTINCT FROM OLD.item_id OR
-       NEW.finished_good_id IS DISTINCT FROM OLD.finished_good_id OR
-       NEW.catalog_item_id IS DISTINCT FROM OLD.catalog_item_id OR
-       NEW.source_type IS DISTINCT FROM OLD.source_type OR
-       NEW.supplier_snapshot IS DISTINCT FROM OLD.supplier_snapshot OR
-       NEW.pack_qty_snapshot IS DISTINCT FROM OLD.pack_qty_snapshot OR
-       NEW.item_name_snapshot IS DISTINCT FROM OLD.item_name_snapshot OR
-       NEW.unit_snapshot IS DISTINCT FROM OLD.unit_snapshot OR
-       NEW.source_commissary_snapshot IS DISTINCT FROM OLD.source_commissary_snapshot OR
-       NEW.quantity_requested IS DISTINCT FROM OLD.quantity_requested OR
-       NEW.unit_price IS DISTINCT FROM OLD.unit_price OR
-       NEW.line_total IS DISTINCT FROM OLD.line_total OR
-       NEW.created_at IS DISTINCT FROM OLD.created_at OR
-       NEW.updated_at IS DISTINCT FROM OLD.updated_at
-    THEN
-      RAISE EXCEPTION 'hq_fulfillment role is only allowed to update allocated_qty, backorder_qty, quantity_fulfilled, fulfillment_note, fulfilled_by, and fulfilled_at columns.';
+    -- updated_at is auto-stamped by Supabase moddatetime on every UPDATE.
+    -- It must not be blocked or every hq_fulfillment write will be rejected.
+    -- Allowed columns: allocated_qty, backorder_qty, quantity_fulfilled,
+    --   fulfillment_note, fulfilled_by, fulfilled_at, updated_at (system-managed).
+    IF    NEW.id                          IS DISTINCT FROM OLD.id                          THEN v_col := 'id';
+    ELSIF NEW.requisition_id              IS DISTINCT FROM OLD.requisition_id              THEN v_col := 'requisition_id';
+    ELSIF NEW.item_id                     IS DISTINCT FROM OLD.item_id                     THEN v_col := 'item_id';
+    ELSIF NEW.finished_good_id            IS DISTINCT FROM OLD.finished_good_id            THEN v_col := 'finished_good_id';
+    ELSIF NEW.catalog_item_id             IS DISTINCT FROM OLD.catalog_item_id             THEN v_col := 'catalog_item_id';
+    ELSIF NEW.source_type                 IS DISTINCT FROM OLD.source_type                 THEN v_col := 'source_type';
+    ELSIF NEW.supplier_snapshot           IS DISTINCT FROM OLD.supplier_snapshot           THEN v_col := 'supplier_snapshot';
+    ELSIF NEW.pack_qty_snapshot           IS DISTINCT FROM OLD.pack_qty_snapshot           THEN v_col := 'pack_qty_snapshot';
+    ELSIF NEW.item_name_snapshot          IS DISTINCT FROM OLD.item_name_snapshot          THEN v_col := 'item_name_snapshot';
+    ELSIF NEW.unit_snapshot               IS DISTINCT FROM OLD.unit_snapshot               THEN v_col := 'unit_snapshot';
+    ELSIF NEW.source_commissary_snapshot  IS DISTINCT FROM OLD.source_commissary_snapshot  THEN v_col := 'source_commissary_snapshot';
+    ELSIF NEW.quantity_requested          IS DISTINCT FROM OLD.quantity_requested          THEN v_col := 'quantity_requested';
+    ELSIF NEW.unit_price                  IS DISTINCT FROM OLD.unit_price                  THEN v_col := 'unit_price';
+    ELSIF NEW.line_total                  IS DISTINCT FROM OLD.line_total                  THEN v_col := 'line_total';
+    ELSIF NEW.created_at                  IS DISTINCT FROM OLD.created_at                  THEN v_col := 'created_at';
+    END IF;
+
+    IF v_col IS NOT NULL THEN
+      RAISE EXCEPTION
+        'hq_fulfillment: unauthorized column change on requisition_items: "%%". '
+        'Only allocated_qty, backorder_qty, quantity_fulfilled, fulfillment_note, '
+        'fulfilled_by, fulfilled_at may be updated by this role.',
+        v_col;
     END IF;
   END IF;
   RETURN NEW;
@@ -424,21 +443,21 @@ DECLARE
 BEGIN
   IF public.is_hq_fulfillment_profile() THEN
     -- Fields that hq_fulfillment must NEVER touch.
-    -- updated_at is intentionally excluded from this blocklist:
-    -- Supabase's moddatetime extension stamps it automatically on every row
-    -- UPDATE. It is a system-managed column, not an application-writable
-    -- column, so blocking it would reject every legitimate write.
-    IF NEW.id               IS DISTINCT FROM OLD.id               THEN v_col := 'id';
-    ELSIF NEW.location      IS DISTINCT FROM OLD.location         THEN v_col := 'location';
-    ELSIF NEW.requestedby   IS DISTINCT FROM OLD.requestedby      THEN v_col := 'requestedby';
-    ELSIF NEW.date          IS DISTINCT FROM OLD.date             THEN v_col := 'date';
-    ELSIF NEW.items         IS DISTINCT FROM OLD.items            THEN v_col := 'items';
-    ELSIF NEW.notes         IS DISTINCT FROM OLD.notes            THEN v_col := 'notes';
-    ELSIF NEW.lineitems     IS DISTINCT FROM OLD.lineitems        THEN v_col := 'lineitems';
-    ELSIF NEW.created_at    IS DISTINCT FROM OLD.created_at       THEN v_col := 'created_at';
-    ELSIF NEW.location_id   IS DISTINCT FROM OLD.location_id      THEN v_col := 'location_id';
-    ELSIF NEW.created_by    IS DISTINCT FROM OLD.created_by       THEN v_col := 'created_by';
-    ELSIF NEW.total_amount  IS DISTINCT FROM OLD.total_amount     THEN v_col := 'total_amount';
+    --
+    -- updated_at: intentionally excluded — Supabase moddatetime auto-stamps it.
+    -- total_amount: intentionally excluded — writeFulfilledAndRecalc() legitimately
+    --   updates the fulfilled total on the requisitions header when completing
+    --   fulfillment. Blocking it would prevent completeFulfillmentMovement().
+    IF    NEW.id            IS DISTINCT FROM OLD.id            THEN v_col := 'id';
+    ELSIF NEW.location      IS DISTINCT FROM OLD.location      THEN v_col := 'location';
+    ELSIF NEW.requestedby   IS DISTINCT FROM OLD.requestedby   THEN v_col := 'requestedby';
+    ELSIF NEW.date          IS DISTINCT FROM OLD.date          THEN v_col := 'date';
+    ELSIF NEW.items         IS DISTINCT FROM OLD.items         THEN v_col := 'items';
+    ELSIF NEW.notes         IS DISTINCT FROM OLD.notes         THEN v_col := 'notes';
+    ELSIF NEW.lineitems     IS DISTINCT FROM OLD.lineitems     THEN v_col := 'lineitems';
+    ELSIF NEW.created_at    IS DISTINCT FROM OLD.created_at    THEN v_col := 'created_at';
+    ELSIF NEW.location_id   IS DISTINCT FROM OLD.location_id   THEN v_col := 'location_id';
+    ELSIF NEW.created_by    IS DISTINCT FROM OLD.created_by    THEN v_col := 'created_by';
     END IF;
 
     IF v_col IS NOT NULL THEN
