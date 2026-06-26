@@ -8,7 +8,7 @@ import {
   PackageCheck, Search, Plus, Edit2, ToggleLeft, ToggleRight,
   TrendingUp, TrendingDown, Minus, AlertCircle, Loader2, ChevronRight, DollarSign, Factory,
   CheckCircle2, XCircle, Layers, MapPin, Trash2, PlusCircle, Tag, Upload,
-  Users
+  Users, SlidersHorizontal, ChevronDown, ChevronUp
 } from "lucide-react";
 import {
   loadSaleItems, upsertSaleItem, loadRecipes, loadLocations,
@@ -233,6 +233,16 @@ function HQSaleItemsContent() {
   const [search, setSearch]     = useState("");
   const [filterCategory, setFilterCategory] = useState("All");
   const [filterCommissary, setFilterCommissary] = useState("All");
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
+  const [showColumnMenu, setShowColumnMenu] = useState(false);
+  const [optionalColumns, setOptionalColumns] = useState({
+    commissary: false,
+    makingCost: false,
+    pack: false,
+    today: false,
+    variance: false,
+    visibility: false,
+  });
 
   // DB-driven category list (loaded from categories table)
   const [dbCategories, setDbCategories] = useState<string[]>([]);
@@ -538,6 +548,19 @@ function HQSaleItemsContent() {
     setItems(prev => prev.map(i => i.id === item.id ? { ...i, isRequisitionable: !i.isRequisitionable } : i));
   };
 
+  const toggleExpandedRow = (itemId: string) => {
+    setExpandedRows(prev => {
+      const next = new Set(prev);
+      if (next.has(itemId)) next.delete(itemId);
+      else next.add(itemId);
+      return next;
+    });
+  };
+
+  const toggleOptionalColumn = (key: keyof typeof optionalColumns) => {
+    setOptionalColumns(prev => ({ ...prev, [key]: !prev[key] }));
+  };
+
   // ── Filters ───────────────────────────────────────────────────────────────────
   // allCategories = DB-managed list (sort_order respected) UNION any legacy
   // category strings already on items but not yet in the categories table.
@@ -590,6 +613,58 @@ function HQSaleItemsContent() {
   const totalRequisitionable = items.filter(i => i.isRequisitionable).length;
   const totalValue           = items.reduce((s, i) => s + i.instock * i.effectivePrice, 0);
   const outOfStock           = items.filter(i => i.stockStatus === "out_of_stock").length;
+  const optionalColumnCount = Object.values(optionalColumns).filter(Boolean).length;
+  const catalogColSpan = 7 + optionalColumnCount;
+
+  const renderVarianceBadge = (item: SaleItem) => {
+    const detail = latestCounts[item.id];
+    if (!detail || detail.lastCountDate === null) {
+      return <span className="text-neutral-400 text-xs">No counts</span>;
+    }
+    const v = detail.latestVariance;
+    if (v === 0) {
+      return (
+        <span className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-500">
+          <Minus className="h-3 w-3" /> No change
+        </span>
+      );
+    }
+    if (v > 0) {
+      return (
+        <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">
+          <TrendingUp className="h-3 w-3" /> +{fmt(v)} {item.baseUnit}
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full border border-rose-200 bg-rose-50 px-2 py-0.5 text-xs font-semibold text-rose-700">
+        <TrendingDown className="h-3 w-3" /> {fmt(v)} {item.baseUnit}
+      </span>
+    );
+  };
+
+  const renderVisibilityBadge = (item: SaleItem) => {
+    const mode = item.locationAvailabilityMode ?? 'all';
+    if (mode === 'all') {
+      return (
+        <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">
+          All Locations
+        </span>
+      );
+    }
+    if (mode === 'selected') {
+      return (
+        <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-xs font-semibold text-blue-700">
+          Selected Locations
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center rounded-full border border-neutral-300 bg-neutral-100 px-2 py-0.5 text-xs font-semibold text-neutral-600">
+        HQ Only
+      </span>
+    );
+  };
 
   if (isLoading) return (
     <div className="-m-6 flex min-h-[calc(100vh-4rem)] items-center justify-center gap-2 bg-slate-50 p-16 text-slate-400">
@@ -820,278 +895,340 @@ function HQSaleItemsContent() {
         </div>
       </div>
 
-      {/* ── Table ──────────────────────────────────────────────────────── */}
+      {/* ── Catalog ──────────────────────────────────────────────────────── */}
       <Card className="overflow-hidden rounded-2xl border-slate-200 bg-white shadow-sm">
-        <CardHeader className="flex flex-col gap-4 border-b border-slate-200 bg-white px-4 py-5 xl:flex-row xl:items-center">
-          <div className="min-w-0">
-            <h3 className="text-lg font-semibold text-slate-950">Finished Goods Catalog</h3>
-            <p className="mt-1 text-sm text-slate-500">Review pack quantities, live recipe costs, location visibility, and requisition availability.</p>
+        <CardHeader className="gap-4 border-b border-slate-200 bg-white px-4 py-5">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+            <div className="min-w-0">
+              <h3 className="text-lg font-semibold text-slate-950">Finished Goods Catalog</h3>
+              <p className="mt-1 text-sm text-slate-500">Core fields stay visible at laptop width. Audit details are available in expanded rows or optional columns.</p>
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap xl:justify-end">
+              <div className="relative w-full sm:w-72">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Search finished goods…"
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  className="min-h-11 w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-4 text-sm outline-none ring-emerald-600 transition focus:ring-2"
+                />
+              </div>
+              <select
+                value={filterCategory}
+                onChange={e => setFilterCategory(e.target.value)}
+                className="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none ring-emerald-600 transition focus:ring-2"
+              >
+                <option value="All">All categories</option>
+                {allCategories.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+              <select
+                value={filterCommissary}
+                onChange={e => setFilterCommissary(e.target.value)}
+                className="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none ring-emerald-600 transition focus:ring-2"
+              >
+                <option value="All">All commissaries</option>
+                {COMMISSARY_OPTIONS.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setShowColumnMenu(v => !v)}
+                  className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 sm:w-auto"
+                >
+                  <SlidersHorizontal className="h-4 w-4" /> Columns
+                </button>
+                {showColumnMenu && (
+                  <div className="absolute right-0 z-20 mt-2 w-64 rounded-xl border border-slate-200 bg-white p-3 text-sm shadow-xl">
+                    <p className="mb-2 text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Optional audit columns</p>
+                    {([
+                      ["commissary", "Commissary"],
+                      ["makingCost", "Making Cost"],
+                      ["pack", "Pack"],
+                      ["today", "Today"],
+                      ["variance", "Latest Variance"],
+                      ["visibility", "Visibility"],
+                    ] as const).map(([key, label]) => (
+                      <label key={key} className="flex cursor-pointer items-center justify-between rounded-lg px-2 py-2 text-slate-700 hover:bg-slate-50">
+                        <span>{label}</span>
+                        <input
+                          type="checkbox"
+                          checked={optionalColumns[key]}
+                          onChange={() => toggleOptionalColumn(key)}
+                          className="h-4 w-4 rounded border-slate-300 text-emerald-700"
+                        />
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
-          <div className="relative w-full xl:ml-auto xl:w-80">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-            <input
-              type="text"
-              placeholder="Search finished goods…"
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              className="min-h-11 w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-4 text-sm outline-none ring-emerald-600 transition focus:ring-2"
-            />
-          </div>
-          {/* Category filter — always visible; options come from DB (or CATEGORY_OPTIONS fallback) */}
-          <select
-            value={filterCategory}
-            onChange={e => setFilterCategory(e.target.value)}
-            className="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none ring-emerald-600 transition focus:ring-2"
-          >
-            <option value="All">All categories</option>
-            {allCategories.map(c => <option key={c} value={c}>{c}</option>)}
-          </select>
-          {/* Commissary filter */}
-          <select
-            value={filterCommissary}
-            onChange={e => setFilterCommissary(e.target.value)}
-            className="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none ring-emerald-600 transition focus:ring-2"
-          >
-            <option value="All">All commissaries</option>
-            {COMMISSARY_OPTIONS.map(c => <option key={c} value={c}>{c}</option>)}
-          </select>
         </CardHeader>
-        <CardContent className="overflow-x-auto p-0">
-          <Table>
-            <TableHeader className="bg-slate-50 text-xs uppercase tracking-[0.14em] text-slate-500">
-              <TableRow>
-                <TableHead className="py-4 px-6">Item / SKU</TableHead>
-                <TableHead className="py-3">Category</TableHead>
-                <TableHead className="py-3">Commissary</TableHead>
-                <TableHead className="py-3">Unit</TableHead>
-                <TableHead className="py-3">Making Cost</TableHead>
-                <TableHead className="py-3">Unit Sale Price</TableHead>
-                <TableHead className="py-3">Pack Qty</TableHead>
-                <TableHead className="py-3">Effective Pack Price</TableHead>
-                <TableHead className="py-3">Current On Hand</TableHead>
-                <TableHead className="py-3">Produced Today</TableHead>
-                <TableHead className="py-3">Supplied Today</TableHead>
-                <TableHead className="py-3">Latest Variance</TableHead>
-                <TableHead className="py-3">Status</TableHead>
-                <TableHead className="py-3">Visibility</TableHead>
-                <TableHead className="py-3 text-right px-6">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {filtered.length > 0 ? filtered.map(item => {
-                // DEBUG: verify sourceCommissary coming from DB — remove once confirmed correct
-                console.log('[FG Row]', item.id, item.sourceCommissary);
-                const linkedRecipe = recipes.find(r => r.id === item.sourceRecipeId);
-                return (
-                  <TableRow key={item.id} className="border-slate-100 transition-colors hover:bg-emerald-50/30">
-                    <TableCell className="px-6 py-4">
-                      <div className="flex items-center gap-2">
-                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-500">
-                          <Factory className="h-4 w-4" />
-                        </span>
-                        <div>
-                          <p className="text-sm font-semibold text-slate-950">{item.name}</p>
-                          <p className="flex items-center gap-1 text-xs text-slate-400">
-                            {item.id}
-                            {linkedRecipe && (
-                              <><ChevronRight className="h-3 w-3" /> <span className="text-emerald-700">{linkedRecipe.name}</span></>
-                            )}
-                          </p>
-                        </div>
-                      </div>
-                    </TableCell>
-                    <TableCell className="py-4">
-                      {item.category ? (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-neutral-100 text-neutral-700 border border-neutral-200">
-                          <Tag className="h-3 w-3" />{item.category}
-                        </span>
-                      ) : (
-                        <span className="text-neutral-300 text-xs">—</span>
-                      )}
-                    </TableCell>
-                    {/* Commissary badge */}
-                    <TableCell className="py-4">
-                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold border ${COMMISSARY_COLORS[item.sourceCommissary] ?? "bg-neutral-50 text-neutral-600 border-neutral-200"}`}>
-                        {item.sourceCommissary}
-                      </span>
-                    </TableCell>
-                    <TableCell className="py-4 text-sm text-neutral-700">{item.baseUnit}</TableCell>
-                    {/* Making Cost — always recomputed from linked recipe with unit conversion */}
-                    <TableCell className="py-4 text-sm text-neutral-600">
-                      {(() => {
-                        const lc = computeLiveCost(item, recipes);
-                        if (lc.conversionWarning) return (
-                          <span className="inline-flex items-center gap-1 text-warning-700 text-xs font-medium" title={lc.conversionWarning}>
-                            <AlertCircle className="h-3.5 w-3.5 shrink-0" /> Unit mismatch
-                          </span>
-                        );
-                        return lc.makingCost > 0
-                          ? <><span className="font-semibold text-slate-900">${lc.makingCost.toFixed(4)}</span><span className="text-slate-400">/{item.baseUnit}</span></>
-                          : <span className="text-neutral-300">—</span>;
-                      })()}
-                    </TableCell>
-                    {/* Unit Sale Price — recomputed, respects manual price override */}
-                    <TableCell className="py-4">
-                      {(() => {
-                        const lc = computeLiveCost(item, recipes);
-                        if (lc.conversionWarning) return (
-                          <span className="text-neutral-400 text-xs">—</span>
-                        );
-                        return (
-                          <span className="font-bold text-emerald-700 text-sm">
-                            ${lc.effectivePrice.toFixed(4)}
-                            <span className="text-neutral-400 font-normal">/{item.baseUnit}</span>
-                          </span>
-                        );
-                      })()}
-                    </TableCell>
-                    {/* Pack Qty */}
-                    <TableCell className="py-4 text-sm text-neutral-700">
-                      {item.packQty > 1 ? (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200">
-                          {item.packQty} {item.baseUnit}
-                        </span>
-                      ) : (
-                        <span className="text-neutral-400 text-xs">1 (unit)</span>
-                      )}
-                    </TableCell>
-                    {/* Effective Pack Price = effectivePrice × packQty (recomputed) */}
-                    <TableCell className="py-4">
-                      {(() => {
-                        const packQty = item.packQty > 0 ? item.packQty : 1;
-                        const lc = computeLiveCost(item, recipes);
-                        if (lc.conversionWarning || packQty <= 1) {
-                          return <span className="text-neutral-400 text-xs">{packQty > 1 ? '—' : 'same as unit'}</span>;
-                        }
-                        const packPrice = lc.effectivePrice * packQty;
-                        return (
-                          <span className="font-bold text-emerald-700 text-sm">
-                            ${packPrice.toFixed(2)}
-                            <span className="text-neutral-400 font-normal">/pack</span>
-                          </span>
-                        );
-                      })()}
-                    </TableCell>
-                    {/* Current On Hand */}
-                    <TableCell className="py-4">
-                      <div className="flex flex-col gap-1">
-                        <span className="font-semibold text-slate-900 text-sm">
-                          {item.instock} {item.baseUnit}
-                        </span>
-                        <StockChip status={item.stockStatus} />
-                      </div>
-                    </TableCell>
-                    {/* Produced Today */}
-                    <TableCell className="py-4 text-sm text-neutral-700">
-                      {(todayMetrics[item.id]?.producedToday ?? 0) > 0 ? (
-                        <span className="font-medium text-slate-900">
-                          {fmt(todayMetrics[item.id].producedToday)} {item.baseUnit}
-                        </span>
-                      ) : (
-                        <span className="text-neutral-400 text-xs">—</span>
-                      )}
-                    </TableCell>
-                    {/* Supplied Today */}
-                    <TableCell className="py-4 text-sm text-neutral-700">
-                      {(todayMetrics[item.id]?.suppliedToday ?? 0) > 0 ? (
-                        <span className="font-medium text-slate-900">
-                          {fmt(todayMetrics[item.id].suppliedToday)} {item.baseUnit}
-                        </span>
-                      ) : (
-                        <span className="text-neutral-400 text-xs">—</span>
-                      )}
-                    </TableCell>
-                    {/* Latest Variance */}
-                    <TableCell className="py-4 text-sm">
-                      {(() => {
-                        const detail = latestCounts[item.id];
-                        if (!detail || detail.lastCountDate === null) {
-                          return <span className="text-neutral-400 text-xs">No counts</span>;
-                        }
-                        const v = detail.latestVariance;
-                        if (v === 0) {
-                          return (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-500 border border-slate-200">
-                              <Minus className="h-3 w-3" /> No change
-                            </span>
-                          );
-                        }
-                        if (v > 0) {
-                          return (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                              <TrendingUp className="h-3 w-3" /> +{fmt(v)} {item.baseUnit}
-                            </span>
-                          );
-                        }
-                        return (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-rose-50 text-rose-700 border border-rose-200">
-                            <TrendingDown className="h-3 w-3" /> {fmt(v)} {item.baseUnit}
-                          </span>
-                        );
-                      })()}
-                    </TableCell>
-                    <TableCell className="py-4">
-                      <div className="flex flex-col gap-1">
-                        <ActiveChip active={item.isActive} />
-                        {item.isRequisitionable
-                          ? <span className="text-xs text-success-600 font-medium">Requisitionable</span>
-                          : <span className="text-xs text-neutral-400">Hidden from locations</span>}
-                      </div>
-                    </TableCell>
-                    <TableCell className="py-4">
-                      {(() => {
-                        const mode = item.locationAvailabilityMode ?? 'all';
-                        if (mode === 'all') {
-                          return (
-                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                              All Locations
-                            </span>
-                          );
-                        } else if (mode === 'selected') {
-                          return (
-                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200">
-                              Selected Locations
-                            </span>
-                          );
-                        } else {
-                          return (
-                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-neutral-100 text-neutral-600 border border-neutral-300">
-                              HQ Only
-                            </span>
-                          );
-                        }
-                      })()}
-                    </TableCell>
-                    <TableCell className="py-4 px-6 text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        <button
-                          onClick={() => toggleActive(item)}
-                          title={item.isActive ? "Deactivate" : "Activate"}
-                          className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-emerald-50 hover:text-emerald-700"
-                        >
-                          {item.isActive ? <ToggleRight className="h-4 w-4 text-emerald-700" /> : <ToggleLeft className="h-4 w-4" />}
-                        </button>
-                        <button
-                          onClick={() => openEdit(item)}
-                          className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
-                        >
-                          <Edit2 className="h-4 w-4" />
-                        </button>
-                      </div>
-                    </TableCell>
+        <CardContent className="p-0">
+          <div className="hidden md:block">
+            <div className="max-h-[72vh] overflow-auto">
+              <Table className="min-w-[980px]">
+                <TableHeader className="sticky top-0 z-10 bg-slate-50 text-xs uppercase tracking-[0.14em] text-slate-500 shadow-[0_1px_0_0_rgba(226,232,240,1)]">
+                  <TableRow>
+                    <TableHead className="sticky left-0 z-20 w-[300px] bg-slate-50 px-4 py-4">Item / SKU</TableHead>
+                    <TableHead className="w-[160px] py-3">Category</TableHead>
+                    {optionalColumns.commissary && <TableHead className="w-[150px] py-3">Commissary</TableHead>}
+                    <TableHead className="w-[80px] py-3">Unit</TableHead>
+                    {optionalColumns.makingCost && <TableHead className="w-[140px] py-3">Making Cost</TableHead>}
+                    <TableHead className="w-[160px] py-3">Effective / Selling Price</TableHead>
+                    {optionalColumns.pack && <TableHead className="w-[170px] py-3">Pack</TableHead>}
+                    <TableHead className="w-[150px] py-3">Current On Hand</TableHead>
+                    {optionalColumns.today && <TableHead className="w-[170px] py-3">Today</TableHead>}
+                    {optionalColumns.variance && <TableHead className="w-[150px] py-3">Latest Variance</TableHead>}
+                    <TableHead className="w-[150px] py-3">Status</TableHead>
+                    {optionalColumns.visibility && <TableHead className="w-[150px] py-3">Visibility</TableHead>}
+                    <TableHead className="sticky right-0 z-20 w-[150px] bg-slate-50 px-4 py-3 text-right">Actions</TableHead>
                   </TableRow>
-                );
-              }) : (
-                <TableRow>
-                  <TableCell colSpan={15} className="text-center py-12 text-neutral-400 text-sm">
-                    {search || filterCategory !== "All" || filterCommissary !== "All"
-                      ? "No finished goods match your filters."
-                      : "No finished goods yet. Create your first one to make it available for franchise locations to requisition."}
-                  </TableCell>
-                </TableRow>
-              )}
-            </TableBody>
-          </Table>
+                </TableHeader>
+                <TableBody>
+                  {filtered.length > 0 ? filtered.map(item => {
+                    const linkedRecipe = recipes.find(r => r.id === item.sourceRecipeId);
+                    const lc = computeLiveCost(item, recipes);
+                    const packQty = item.packQty > 0 ? item.packQty : 1;
+                    const packPrice = lc.conversionWarning ? null : lc.effectivePrice * packQty;
+                    const producedToday = todayMetrics[item.id]?.producedToday ?? 0;
+                    const suppliedToday = todayMetrics[item.id]?.suppliedToday ?? 0;
+                    const expanded = expandedRows.has(item.id);
+                    return (
+                      <>
+                        <TableRow key={item.id} className="border-slate-100 transition-colors hover:bg-emerald-50/30">
+                          <TableCell className="sticky left-0 z-10 bg-white px-4 py-4 shadow-[1px_0_0_0_rgba(226,232,240,1)]">
+                            <div className="flex items-center gap-2">
+                              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-500">
+                                <Factory className="h-4 w-4" />
+                              </span>
+                              <div className="min-w-0">
+                                <p className="truncate text-sm font-semibold text-slate-950">{item.name}</p>
+                                <p className="flex min-w-0 items-center gap-1 text-xs text-slate-400">
+                                  <span className="truncate">{item.id}</span>
+                                  {linkedRecipe && (
+                                    <><ChevronRight className="h-3 w-3 shrink-0" /> <span className="truncate text-emerald-700">{linkedRecipe.name}</span></>
+                                  )}
+                                </p>
+                              </div>
+                            </div>
+                          </TableCell>
+                          <TableCell className="py-4">
+                            {item.category ? (
+                              <span className="inline-flex items-center gap-1 rounded-full border border-neutral-200 bg-neutral-100 px-2 py-0.5 text-xs font-semibold text-neutral-700">
+                                <Tag className="h-3 w-3" />{item.category}
+                              </span>
+                            ) : (
+                              <span className="text-neutral-300 text-xs">—</span>
+                            )}
+                          </TableCell>
+                          {optionalColumns.commissary && (
+                            <TableCell className="py-4">
+                              <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold ${COMMISSARY_COLORS[item.sourceCommissary] ?? "bg-neutral-50 text-neutral-600 border-neutral-200"}`}>
+                                {item.sourceCommissary}
+                              </span>
+                            </TableCell>
+                          )}
+                          <TableCell className="py-4 text-sm text-neutral-700">{item.baseUnit}</TableCell>
+                          {optionalColumns.makingCost && (
+                            <TableCell className="py-4 text-sm text-neutral-600">
+                              {lc.conversionWarning ? (
+                                <span className="inline-flex items-center gap-1 text-xs font-medium text-warning-700" title={lc.conversionWarning}>
+                                  <AlertCircle className="h-3.5 w-3.5 shrink-0" /> Unit mismatch
+                                </span>
+                              ) : lc.makingCost > 0 ? (
+                                <><span className="font-semibold text-slate-900">${lc.makingCost.toFixed(4)}</span><span className="text-slate-400">/{item.baseUnit}</span></>
+                              ) : (
+                                <span className="text-neutral-300">—</span>
+                              )}
+                            </TableCell>
+                          )}
+                          <TableCell className="py-4">
+                            {lc.conversionWarning ? (
+                              <span className="text-neutral-400 text-xs">—</span>
+                            ) : (
+                              <span className="text-sm font-bold text-emerald-700">
+                                ${lc.effectivePrice.toFixed(4)}
+                                <span className="font-normal text-neutral-400">/{item.baseUnit}</span>
+                              </span>
+                            )}
+                          </TableCell>
+                          {optionalColumns.pack && (
+                            <TableCell className="py-4 text-sm text-neutral-700">
+                              {packQty > 1 ? (
+                                <span className="font-medium text-slate-900">{packQty} {item.baseUnit} · {packPrice == null ? "—" : `$${packPrice.toFixed(2)}/pack`}</span>
+                              ) : (
+                                <span className="text-neutral-400 text-xs">1 unit · same as unit</span>
+                              )}
+                            </TableCell>
+                          )}
+                          <TableCell className="py-4">
+                            <div className="flex flex-col gap-1">
+                              <span className="text-sm font-semibold text-slate-900">{item.instock} {item.baseUnit}</span>
+                              <StockChip status={item.stockStatus} />
+                            </div>
+                          </TableCell>
+                          {optionalColumns.today && (
+                            <TableCell className="py-4 text-sm text-neutral-700">
+                              <div className="space-y-0.5">
+                                <p><span className="text-slate-400">Produced:</span> {producedToday > 0 ? `${fmt(producedToday)} ${item.baseUnit}` : "—"}</p>
+                                <p><span className="text-slate-400">Supplied:</span> {suppliedToday > 0 ? `${fmt(suppliedToday)} ${item.baseUnit}` : "—"}</p>
+                              </div>
+                            </TableCell>
+                          )}
+                          {optionalColumns.variance && <TableCell className="py-4 text-sm">{renderVarianceBadge(item)}</TableCell>}
+                          <TableCell className="py-4">
+                            <div className="flex flex-col gap-1">
+                              <ActiveChip active={item.isActive} />
+                              {item.isRequisitionable
+                                ? <span className="text-xs font-medium text-success-600">Requisitionable</span>
+                                : <span className="text-xs text-neutral-400">Hidden from locations</span>}
+                            </div>
+                          </TableCell>
+                          {optionalColumns.visibility && <TableCell className="py-4">{renderVisibilityBadge(item)}</TableCell>}
+                          <TableCell className="sticky right-0 z-10 bg-white px-4 py-4 text-right shadow-[-1px_0_0_0_rgba(226,232,240,1)]">
+                            <div className="flex items-center justify-end gap-1">
+                              <button
+                                onClick={() => toggleExpandedRow(item.id)}
+                                title={expanded ? "Hide details" : "Show details"}
+                                className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-blue-50 hover:text-blue-700"
+                              >
+                                {expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                              </button>
+                              <button
+                                onClick={() => toggleActive(item)}
+                                title={item.isActive ? "Deactivate" : "Activate"}
+                                className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-emerald-50 hover:text-emerald-700"
+                              >
+                                {item.isActive ? <ToggleRight className="h-4 w-4 text-emerald-700" /> : <ToggleLeft className="h-4 w-4" />}
+                              </button>
+                              <button
+                                onClick={() => openEdit(item)}
+                                className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+                              >
+                                <Edit2 className="h-4 w-4" />
+                              </button>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                        {expanded && (
+                          <TableRow key={`${item.id}-details`} className="border-slate-100 bg-slate-50/70">
+                            <TableCell colSpan={catalogColSpan} className="px-4 py-4">
+                              <div className="grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-4">
+                                <div className="rounded-xl border border-slate-200 bg-white p-3">
+                                  <p className="text-xs font-bold uppercase tracking-wider text-slate-400">Commissary</p>
+                                  <span className={`mt-2 inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold ${COMMISSARY_COLORS[item.sourceCommissary] ?? "bg-neutral-50 text-neutral-600 border-neutral-200"}`}>{item.sourceCommissary}</span>
+                                </div>
+                                <div className="rounded-xl border border-slate-200 bg-white p-3">
+                                  <p className="text-xs font-bold uppercase tracking-wider text-slate-400">Cost / Pack</p>
+                                  <p className="mt-2 font-semibold text-slate-900">{lc.conversionWarning ? "Unit mismatch" : `$${lc.makingCost.toFixed(4)}/${item.baseUnit}`}</p>
+                                  <p className="text-xs text-slate-500">{packQty > 1 ? `${packQty} ${item.baseUnit} · ${packPrice == null ? "—" : `$${packPrice.toFixed(2)}/pack`}` : "1 unit · same as unit"}</p>
+                                </div>
+                                <div className="rounded-xl border border-slate-200 bg-white p-3">
+                                  <p className="text-xs font-bold uppercase tracking-wider text-slate-400">Today</p>
+                                  <p className="mt-2 text-slate-700">Produced: <span className="font-semibold text-slate-950">{producedToday > 0 ? `${fmt(producedToday)} ${item.baseUnit}` : "—"}</span></p>
+                                  <p className="text-slate-700">Supplied: <span className="font-semibold text-slate-950">{suppliedToday > 0 ? `${fmt(suppliedToday)} ${item.baseUnit}` : "—"}</span></p>
+                                </div>
+                                <div className="rounded-xl border border-slate-200 bg-white p-3">
+                                  <p className="text-xs font-bold uppercase tracking-wider text-slate-400">Variance / Visibility</p>
+                                  <div className="mt-2 flex flex-wrap gap-2">{renderVarianceBadge(item)} {renderVisibilityBadge(item)}</div>
+                                </div>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        )}
+                      </>
+                    );
+                  }) : (
+                    <TableRow>
+                      <TableCell colSpan={catalogColSpan} className="py-12 text-center text-sm text-neutral-400">
+                        {search || filterCategory !== "All" || filterCommissary !== "All"
+                          ? "No finished goods match your filters."
+                          : "No finished goods yet. Create your first one to make it available for franchise locations to requisition."}
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
+
+          <div className="divide-y divide-slate-100 md:hidden">
+            {filtered.length > 0 ? filtered.map(item => {
+              const lc = computeLiveCost(item, recipes);
+              const packQty = item.packQty > 0 ? item.packQty : 1;
+              const packPrice = lc.conversionWarning ? null : lc.effectivePrice * packQty;
+              const producedToday = todayMetrics[item.id]?.producedToday ?? 0;
+              const suppliedToday = todayMetrics[item.id]?.suppliedToday ?? 0;
+              const expanded = expandedRows.has(item.id);
+              return (
+                <div key={item.id} className="space-y-3 p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-slate-950">{item.name}</p>
+                      <p className="mt-1 text-xs text-slate-400">{item.id}</p>
+                    </div>
+                    <div className="flex shrink-0 gap-1">
+                      <button onClick={() => toggleActive(item)} className="rounded-lg p-1.5 text-slate-400 hover:bg-emerald-50 hover:text-emerald-700">
+                        {item.isActive ? <ToggleRight className="h-4 w-4 text-emerald-700" /> : <ToggleLeft className="h-4 w-4" />}
+                      </button>
+                      <button onClick={() => openEdit(item)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700">
+                        <Edit2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Category</p>
+                      <p className="mt-1 text-slate-700">{item.category || "—"}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Unit</p>
+                      <p className="mt-1 text-slate-700">{item.baseUnit}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Selling Price</p>
+                      <p className="mt-1 font-bold text-emerald-700">{lc.conversionWarning ? "—" : `$${lc.effectivePrice.toFixed(4)}/${item.baseUnit}`}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">On Hand</p>
+                      <p className="mt-1 font-semibold text-slate-950">{item.instock} {item.baseUnit}</p>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <StockChip status={item.stockStatus} />
+                    <ActiveChip active={item.isActive} />
+                    {item.isRequisitionable
+                      ? <span className="text-xs font-medium text-success-600">Requisitionable</span>
+                      : <span className="text-xs text-neutral-400">Hidden from locations</span>}
+                  </div>
+                  <button
+                    onClick={() => toggleExpandedRow(item.id)}
+                    className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-700"
+                  >
+                    {expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                    {expanded ? "Hide Details" : "More Details"}
+                  </button>
+                  {expanded && (
+                    <div className="grid gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm">
+                      <p><span className="font-semibold text-slate-500">Commissary:</span> {item.sourceCommissary}</p>
+                      <p><span className="font-semibold text-slate-500">Making cost:</span> {lc.conversionWarning ? "Unit mismatch" : `$${lc.makingCost.toFixed(4)}/${item.baseUnit}`}</p>
+                      <p><span className="font-semibold text-slate-500">Pack:</span> {packQty > 1 ? `${packQty} ${item.baseUnit} · ${packPrice == null ? "—" : `$${packPrice.toFixed(2)}/pack`}` : "1 unit · same as unit"}</p>
+                      <p><span className="font-semibold text-slate-500">Today:</span> Produced {producedToday > 0 ? `${fmt(producedToday)} ${item.baseUnit}` : "—"} · Supplied {suppliedToday > 0 ? `${fmt(suppliedToday)} ${item.baseUnit}` : "—"}</p>
+                      <div className="flex flex-wrap gap-2">{renderVarianceBadge(item)} {renderVisibilityBadge(item)}</div>
+                    </div>
+                  )}
+                </div>
+              );
+            }) : (
+              <div className="p-8 text-center text-sm text-neutral-400">
+                {search || filterCategory !== "All" || filterCommissary !== "All"
+                  ? "No finished goods match your filters."
+                  : "No finished goods yet. Create your first one to make it available for franchise locations to requisition."}
+              </div>
+            )}
+          </div>
         </CardContent>
       </Card>
 
