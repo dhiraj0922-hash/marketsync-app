@@ -299,6 +299,9 @@ LANGUAGE plpgsql
 AS $$
 BEGIN
   IF public.is_hq_fulfillment_profile() THEN
+    -- updated_at is managed by Supabase moddatetime and changes automatically
+    -- on every UPDATE — it is not an application-writable column and must
+    -- not be blocked.
     IF NEW.id IS DISTINCT FROM OLD.id OR
        NEW.location IS DISTINCT FROM OLD.location OR
        NEW.requestedby IS DISTINCT FROM OLD.requestedby OR
@@ -309,7 +312,6 @@ BEGIN
        NEW.created_at IS DISTINCT FROM OLD.created_at OR
        NEW.location_id IS DISTINCT FROM OLD.location_id OR
        NEW.created_by IS DISTINCT FROM OLD.created_by OR
-       NEW.updated_at IS DISTINCT FROM OLD.updated_at OR
        NEW.total_amount IS DISTINCT FROM OLD.total_amount
     THEN
       RAISE EXCEPTION 'hq_fulfillment role is only allowed to update the status column on requisitions.';
@@ -417,24 +419,34 @@ CREATE OR REPLACE FUNCTION public.enforce_requisitions_fulfillment_column_guards
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
+DECLARE
+  v_col text;
 BEGIN
   IF public.is_hq_fulfillment_profile() THEN
-    -- Fields that hq_fulfillment must NEVER touch
-    IF NEW.id               IS DISTINCT FROM OLD.id               OR
-       NEW.location         IS DISTINCT FROM OLD.location         OR
-       NEW.requestedby      IS DISTINCT FROM OLD.requestedby      OR
-       NEW.date             IS DISTINCT FROM OLD.date             OR
-       NEW.items            IS DISTINCT FROM OLD.items            OR
-       NEW.notes            IS DISTINCT FROM OLD.notes            OR
-       NEW.lineitems        IS DISTINCT FROM OLD.lineitems        OR
-       NEW.created_at       IS DISTINCT FROM OLD.created_at       OR
-       NEW.location_id      IS DISTINCT FROM OLD.location_id      OR
-       NEW.created_by       IS DISTINCT FROM OLD.created_by       OR
-       NEW.updated_at       IS DISTINCT FROM OLD.updated_at       OR
-       NEW.total_amount     IS DISTINCT FROM OLD.total_amount
-    THEN
+    -- Fields that hq_fulfillment must NEVER touch.
+    -- updated_at is intentionally excluded from this blocklist:
+    -- Supabase's moddatetime extension stamps it automatically on every row
+    -- UPDATE. It is a system-managed column, not an application-writable
+    -- column, so blocking it would reject every legitimate write.
+    IF NEW.id               IS DISTINCT FROM OLD.id               THEN v_col := 'id';
+    ELSIF NEW.location      IS DISTINCT FROM OLD.location         THEN v_col := 'location';
+    ELSIF NEW.requestedby   IS DISTINCT FROM OLD.requestedby      THEN v_col := 'requestedby';
+    ELSIF NEW.date          IS DISTINCT FROM OLD.date             THEN v_col := 'date';
+    ELSIF NEW.items         IS DISTINCT FROM OLD.items            THEN v_col := 'items';
+    ELSIF NEW.notes         IS DISTINCT FROM OLD.notes            THEN v_col := 'notes';
+    ELSIF NEW.lineitems     IS DISTINCT FROM OLD.lineitems        THEN v_col := 'lineitems';
+    ELSIF NEW.created_at    IS DISTINCT FROM OLD.created_at       THEN v_col := 'created_at';
+    ELSIF NEW.location_id   IS DISTINCT FROM OLD.location_id      THEN v_col := 'location_id';
+    ELSIF NEW.created_by    IS DISTINCT FROM OLD.created_by       THEN v_col := 'created_by';
+    ELSIF NEW.total_amount  IS DISTINCT FROM OLD.total_amount     THEN v_col := 'total_amount';
+    END IF;
+
+    IF v_col IS NOT NULL THEN
       RAISE EXCEPTION
-        'hq_fulfillment: only status, approved_by, approved_at, rejected_by, rejected_at, rejection_reason may be updated on requisitions.';
+        'hq_fulfillment: unauthorized column change on requisitions: "%%". '
+        'Only status, approved_by, approved_at, rejected_by, rejected_at, '
+        'rejection_reason may be updated by this role.',
+        v_col;
     END IF;
   END IF;
   RETURN NEW;
