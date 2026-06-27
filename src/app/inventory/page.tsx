@@ -3,14 +3,14 @@
 import { useEffect, useState, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/components/AuthProvider";
-import { isHqAdmin, resolveLocationId } from "@/lib/roles";
+import { isHqAdmin, isHqOps, resolveLocationId } from "@/lib/roles";
 import { useActiveLocation } from "@/components/LocationContext";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Drawer } from "@/components/ui/drawer";
 import { Search, Plus, Upload, MoreHorizontal, ShoppingCart, History, Save, Trash2, ArrowDown, ArrowUp, AlertTriangle, X, Download, Loader2, Link2, ChevronDown, ChevronRight, GitMerge, MapPin, Copy } from "lucide-react";
-import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId, logMovement, deleteInventoryItem, deleteSaleItemByNameOrId, insertPurchaseOptions, loadPurchaseOptions, savePurchaseOptions, deletePurchaseOption, updateInventoryRowItemId, updateInventoryItemScoped, allocateInventoryToLocations, loadLocations, copyInventoryItemsToLocations, type CopyInventoryItemsToLocationsResult, deriveLockedBaseUnit, getAllowedBaseUnits, resolveStorageBaseUnit, getFamilyAllowedInnerUnits, calcBaseQtyPerPurchaseUnit, inferMeasurementFamily, setInventoryStockToTarget, loadRecipes, loadProductionMovements } from "@/lib/storage";
+import { loadInventory, saveInventory, loadInventoryActivity, saveInventoryActivity, loadOrders, saveOrders, loadCategories, addCategory, loadSuppliers, saveSuppliers, resolveSupplier, loadImportBatches, saveImportBatches, insertInventoryItem, resolveHqItemId, resolveSharedItemId, logMovement, deleteInventoryItem, deleteSaleItemByNameOrId, insertPurchaseOptions, loadPurchaseOptions, savePurchaseOptions, deletePurchaseOption, updateInventoryRowItemId, updateInventoryItemScoped, allocateInventoryToLocations, loadLocations, copyInventoryItemsToLocations, type CopyInventoryItemsToLocationsResult, deriveLockedBaseUnit, getAllowedBaseUnits, resolveStorageBaseUnit, getFamilyAllowedInnerUnits, calcBaseQtyPerPurchaseUnit, inferMeasurementFamily, setInventoryStockToTarget, loadRecipes, loadProductionMovements, loadInventoryItemAliases, upsertInventoryItemAlias, type InventoryItemAlias } from "@/lib/storage";
 import { convertQuantity } from "@/lib/units";
 import { supabase } from "@/lib/supabase";
 
@@ -82,6 +82,64 @@ const canonicalizeCategory = (value: any, categories: string[]) => {
 const getCategoryDisplay = (value: any) => {
   const text = String(value ?? "").trim();
   return text || "Uncategorized";
+};
+
+const cleanInventoryIdentity = (value: any) => String(value ?? "").trim();
+
+const getInventoryIdentityCandidates = (item: any) => {
+  const candidates = [
+    item?.id,
+    item?.itemId,
+    item?.item_id,
+    item?.catalogItemId,
+    item?.catalog_item_id,
+    item?.sku,
+  ].map(cleanInventoryIdentity).filter(Boolean);
+  return Array.from(new Set(candidates));
+};
+
+const getCanonicalInventoryIdentity = (item: any, aliases: InventoryItemAlias[]) => {
+  const ids = new Set(getInventoryIdentityCandidates(item));
+  const match = aliases.find(alias =>
+    ids.has(alias.canonicalInventoryItemId) || ids.has(alias.aliasInventoryItemId)
+  );
+  return match?.canonicalInventoryItemId ?? cleanInventoryIdentity(item?.id);
+};
+
+const resolveApprovedInventoryAliasIds = (
+  item: any,
+  aliases: InventoryItemAlias[],
+  inventoryRows: any[] = [],
+) => {
+  const resolved = new Set(getInventoryIdentityCandidates(item));
+  const canonicalId = getCanonicalInventoryIdentity(item, aliases);
+  if (canonicalId) resolved.add(canonicalId);
+
+  const selectedSharedItemId = cleanInventoryIdentity(item?.itemId ?? item?.item_id);
+  if (selectedSharedItemId) {
+    for (const row of inventoryRows) {
+      if (cleanInventoryIdentity(row?.itemId ?? row?.item_id) === selectedSharedItemId) {
+        getInventoryIdentityCandidates(row).forEach(id => resolved.add(id));
+      }
+    }
+  }
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const alias of aliases) {
+      const touchesGroup =
+        resolved.has(alias.canonicalInventoryItemId) ||
+        resolved.has(alias.aliasInventoryItemId);
+      if (!touchesGroup) continue;
+      const before = resolved.size;
+      resolved.add(alias.canonicalInventoryItemId);
+      resolved.add(alias.aliasInventoryItemId);
+      changed = changed || resolved.size !== before;
+    }
+  }
+
+  return Array.from(resolved).filter(Boolean);
 };
 
 function InventoryCategoryPicker({
@@ -531,10 +589,17 @@ export default function Inventory() {
   const [purchaseOptionsData, setPurchaseOptionsData] = useState<any[]>([]);
   const [recipesData, setRecipesData] = useState<any[]>([]);
   const [recipesLoading, setRecipesLoading] = useState(false);
+  const [recipesLoaded, setRecipesLoaded] = useState(false);
   const [usageSearch, setUsageSearch] = useState("");
   const [usageTypeFilter, setUsageTypeFilter] = useState("All");
   const [usageMode, setUsageMode] = useState<"all" | "direct">("all");
   const [usageSectionsOpen, setUsageSectionsOpen] = useState({ direct: true, indirect: true });
+  const [inventoryAliases, setInventoryAliases] = useState<InventoryItemAlias[]>([]);
+  const [aliasesLoading, setAliasesLoading] = useState(false);
+  const [aliasReviewOpen, setAliasReviewOpen] = useState(false);
+  const [manualAliasId, setManualAliasId] = useState("");
+  const [aliasNotes, setAliasNotes] = useState("");
+  const [aliasSaving, setAliasSaving] = useState(false);
   const [ordersData, setOrdersData] = useState<any[]>([]);
   const [productionMovementsData, setProductionMovementsData] = useState<any[]>([]);
   const [movementAuditRows, setMovementAuditRows] = useState<any[]>([]);
@@ -568,7 +633,7 @@ export default function Inventory() {
   }, [isDuplicateAuditOpen, recipesData.length]);
 
   useEffect(() => {
-    if (!isDrawerOpen || !selectedItem || recipesData.length > 0 || recipesLoading) return;
+    if (!isDrawerOpen || !selectedItem || recipesLoaded || recipesLoading) return;
     let cancelled = false;
     setRecipesLoading(true);
     loadRecipes()
@@ -577,16 +642,19 @@ export default function Inventory() {
       })
       .catch(e => console.error("[IngredientUsage] Failed to load recipes", e))
       .finally(() => {
-        if (!cancelled) setRecipesLoading(false);
+        if (!cancelled) {
+          setRecipesLoaded(true);
+          setRecipesLoading(false);
+        }
       });
     return () => { cancelled = true; };
-  }, [isDrawerOpen, selectedItem, recipesData.length, recipesLoading]);
+  }, [isDrawerOpen, selectedItem, recipesLoaded, recipesLoading]);
 
   useEffect(() => {
     async function fetchData() {
       setIsLoading(true);
       try {
-        const [inv, act, cats, batches, sups, allPurchOpts, locs] = await Promise.all([
+        const [inv, act, cats, batches, sups, allPurchOpts, locs, aliases] = await Promise.all([
           loadInventory(),
           loadInventoryActivity(),
           loadCategories('inventory'),
@@ -594,9 +662,11 @@ export default function Inventory() {
           loadSuppliers(),
           loadPurchaseOptions(),   // bulk-load all rows up-front for startup merge
           loadLocations(),         // needed for allocation location picker
+          loadInventoryItemAliases(),
         ]);
         setAllLocations(locs);
         setPurchaseOptionsData(Array.isArray(allPurchOpts) ? allPurchOpts : []);
+        setInventoryAliases(Array.isArray(aliases) ? aliases : []);
         // Scope to current user's location
         const userLocationId: string = resolveLocationId(user);
 
@@ -1803,6 +1873,14 @@ export default function Inventory() {
   const safeStock = (item: any): number => {
     const v = Number(item?.inStock ?? 0);
     return Number.isFinite(v) ? v : 0;
+  };
+
+  const formatStockQty = (value: number, unit?: string) => {
+    const formatted = Number(value || 0).toLocaleString("en-US", {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 2,
+    });
+    return `${formatted} ${String(unit || "").toUpperCase()}`.trim();
   };
 
   const isStockCorrupted = (item: any): boolean => {
@@ -3187,16 +3265,61 @@ export default function Inventory() {
     }
   };
 
-  const ingredientUsage = useMemo(() => {
-    if (!selectedItem) {
-      return { direct: [], indirect: [], circularWarnings: [] as string[], summary: { directRecipes: 0, preparations: 0, finishedGoods: 0, totalDownstream: 0 } };
+  const canViewIngredientAliases = isHqAdmin(user) || isHqOps(user);
+  const canManageIngredientAliases = isHqAdmin(user);
+  const selectedCanonicalInventoryId = useMemo(
+    () => selectedItem ? getCanonicalInventoryIdentity(selectedItem, inventoryAliases) : "",
+    [selectedItem, inventoryAliases]
+  );
+  const selectedIngredientAliasIds = useMemo(
+    () => selectedItem ? resolveApprovedInventoryAliasIds(selectedItem, inventoryAliases, inventoryData) : [],
+    [selectedItem, inventoryAliases, inventoryData]
+  );
+  const selectedBaseIngredientIds = useMemo(
+    () => selectedItem ? getInventoryIdentityCandidates(selectedItem) : [],
+    [selectedItem]
+  );
+
+  const handleAddInventoryAlias = async (aliasId: string) => {
+    if (!selectedItem || !canManageIngredientAliases) return;
+    const cleanAliasId = cleanInventoryIdentity(aliasId);
+    if (!cleanAliasId) {
+      alert("Enter an inventory ID to link.");
+      return;
+    }
+    if (selectedIngredientAliasIds.includes(cleanAliasId)) {
+      alert("That inventory ID is already linked to this canonical ingredient.");
+      return;
     }
 
-    const aliases = new Set(
-      [selectedItem.id, selectedItem.itemId, selectedItem.item_id, selectedItem.catalogItemId]
-        .map((id: any) => String(id ?? "").trim())
-        .filter(Boolean)
-    );
+    setAliasSaving(true);
+    try {
+      const result = await upsertInventoryItemAlias({
+        canonicalInventoryItemId: selectedCanonicalInventoryId || cleanInventoryIdentity(selectedItem.id),
+        aliasInventoryItemId: cleanAliasId,
+        notes: aliasNotes || `Linked from inventory drawer for ${selectedItem.name}`,
+      });
+      if (!result.success) {
+        alert(result.error?.message || "Could not save inventory alias.");
+        return;
+      }
+      setManualAliasId("");
+      setAliasNotes("");
+      setAliasesLoading(true);
+      const freshAliases = await loadInventoryItemAliases();
+      setInventoryAliases(freshAliases);
+    } finally {
+      setAliasesLoading(false);
+      setAliasSaving(false);
+    }
+  };
+
+  const ingredientUsage = useMemo(() => {
+    if (!selectedItem) {
+      return { direct: [], indirect: [], circularWarnings: [] as string[], suggestedAliasIds: [] as any[], summary: { directRecipes: 0, preparations: 0, finishedGoods: 0, totalDownstream: 0 } };
+    }
+
+    const aliases = new Set(selectedIngredientAliasIds);
     const recipeByOutputId = new Map<string, any>();
     const recipesByIngredientId = new Map<string, any[]>();
     const circularWarnings: string[] = [];
@@ -3218,29 +3341,117 @@ export default function Inventory() {
       return converted.ok ? converted.qty : qty;
     };
 
+    const getIngredientIds = (ing: any): Array<{ field: string; value: string }> => {
+      const entries = {
+        inventoryId: ing.inventoryId,
+        fgId: ing.fgId,
+        itemId: ing.itemId,
+        item_id: ing.item_id,
+        inventory_item_id: ing.inventory_item_id,
+        inventoryItemId: ing.inventoryItemId,
+      };
+      return Object.entries(entries)
+        .map(([field, value]) => ({ field, value: String(value ?? "").trim() }))
+        .filter(entry => entry.value);
+    };
+
+    const allIngredientLines = recipesData.flatMap((recipe: any) =>
+      (recipe.ingredients ?? []).map((ing: any) => ({ recipe, ing, ids: getIngredientIds(ing) }))
+    );
+    const linesWithIdentifiers = allIngredientLines.filter(line => line.ids.length > 0);
+    const linesMatchingSelected = linesWithIdentifiers.filter(line => line.ids.some((entry: { field: string; value: string }) => aliases.has(entry.value)));
+    const selectedNameTokens = String(selectedItem.name ?? "")
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((token: string) => token.length >= 4);
+    const nameLikeUnmatchedLines = allIngredientLines
+      .filter(line => {
+        const name = String(line.ing.name ?? "").toLowerCase();
+        const nameMatch = selectedNameTokens.length > 0 && selectedNameTokens.some((token: string) => name.includes(token));
+        const garlicMatch = String(selectedItem.name ?? "").toLowerCase().includes("garlic") && name.includes("garlic");
+        const idMatch = line.ids.some((entry: { field: string; value: string }) => aliases.has(entry.value));
+        return !idMatch && (nameMatch || garlicMatch);
+      });
+    const garlicLikeUnmatched = nameLikeUnmatchedLines
+      .slice(0, 12)
+      .map(line => ({
+        recipeId: line.recipe.id,
+        recipeName: line.recipe.name,
+        ingredientName: line.ing.name,
+        qty: line.ing.qty,
+        unit: line.ing.unit,
+        identifiers: line.ids,
+        rawIngredient: line.ing,
+      }));
+    const suggestedAliasIds = Array.from(new Map(
+      nameLikeUnmatchedLines.flatMap(line => line.ids)
+        .filter((entry: { field: string; value: string }) => entry.value && !aliases.has(entry.value))
+        .map((entry: { field: string; value: string }) => {
+          const inventoryRow = inventoryData.find((row: any) =>
+            getInventoryIdentityCandidates(row).includes(entry.value)
+          );
+          return [entry.value, {
+            id: entry.value,
+            field: entry.field,
+            inventoryRow: inventoryRow ?? null,
+            label: inventoryRow?.name ?? "Recipe-linked legacy ID",
+          }];
+        })
+    ).values());
+
+    if (process.env.NODE_ENV !== "production") {
+      console.log("[IngredientUsage Diagnostic]", {
+        selectedInventoryItem: {
+          id: selectedItem.id,
+          itemId: selectedItem.itemId,
+          item_id: selectedItem.item_id,
+          catalogItemId: selectedItem.catalogItemId,
+          name: selectedItem.name,
+        },
+        aliases: Array.from(aliases),
+        selectedBaseIds: selectedBaseIngredientIds,
+        selectedCanonicalInventoryId,
+        confirmedAliasRows: inventoryAliases.filter(alias => aliases.has(alias.canonicalInventoryItemId) || aliases.has(alias.aliasInventoryItemId)),
+        totalRecipesScanned: recipesData.length,
+        totalRecipeIngredientLines: allIngredientLines.length,
+        ingredientLinesWithAnyIdentifier: linesWithIdentifiers.length,
+        ingredientLinesMatchingSelectedItemId: linesMatchingSelected.length,
+        sampleMatchingLines: linesMatchingSelected.slice(0, 8).map(line => ({
+          recipeId: line.recipe.id,
+          recipeName: line.recipe.name,
+          ingredientName: line.ing.name,
+          identifiers: line.ids,
+        })),
+        sampleUnmatchedNameLikeIngredientRecords: garlicLikeUnmatched,
+        suggestedAliasIds,
+      });
+    }
+
     for (const recipe of recipesData) {
       const outputIds = [recipe.outputItemId, recipe.output_item_id, recipe.fgId, recipe.id]
         .map((id: any) => String(id ?? "").trim())
         .filter(Boolean);
       outputIds.forEach(id => recipeByOutputId.set(id, recipe));
       for (const ing of recipe.ingredients ?? []) {
-        const id = String(ing.inventoryId ?? ing.fgId ?? "").trim();
-        if (!id) continue;
-        const list = recipesByIngredientId.get(id) ?? [];
-        list.push(recipe);
-        recipesByIngredientId.set(id, list);
+        const ids = getIngredientIds(ing);
+        for (const { value: id } of ids) {
+          const list = recipesByIngredientId.get(id) ?? [];
+          list.push(recipe);
+          recipesByIngredientId.set(id, list);
+        }
       }
     }
 
     const direct: any[] = [];
     for (const recipe of recipesData) {
       for (const ing of recipe.ingredients ?? []) {
-        const ingredientId = String(ing.inventoryId ?? ing.fgId ?? "").trim();
-        if (!aliases.has(ingredientId)) continue;
+        const ids = getIngredientIds(ing);
+        if (!ids.some(entry => aliases.has(entry.value))) continue;
         const qty = Number(ing.qty ?? 0);
         const qtyBase = convertToItemBase(qty, ing.unit || selectedItem.unit || "");
         direct.push({
-          id: `${recipe.id}-${ingredientId}-${direct.length}`,
+          id: `${recipe.id}-${ids[0]?.value ?? "unknown"}-${direct.length}`,
           recipe,
           recipeName: recipe.name,
           type: classifyRecipe(recipe),
@@ -3267,7 +3478,7 @@ export default function Inventory() {
           circularWarnings.push(`Circular recipe dependency detected: ${[...path.map(p => p.name), parent.name].join(" → ")}`);
           continue;
         }
-        const parentLine = (parent.ingredients ?? []).find((ing: any) => String(ing.inventoryId ?? ing.fgId ?? "").trim() === outputId);
+        const parentLine = (parent.ingredients ?? []).find((ing: any) => getIngredientIds(ing).some(entry => entry.value === outputId));
         const prepQtyUsed = Number(parentLine?.qty ?? 0);
         const sourceYield = Number(sourceRecipe.yieldQty ?? 0);
         const ratio = sourceYield > 0 ? prepQtyUsed / sourceYield : 0;
@@ -3318,6 +3529,7 @@ export default function Inventory() {
       direct: filteredDirect,
       indirect: filteredIndirect,
       circularWarnings: Array.from(new Set(circularWarnings)),
+      suggestedAliasIds,
       summary: {
         directRecipes: direct.length,
         preparations: prepNames.size,
@@ -3325,7 +3537,7 @@ export default function Inventory() {
         totalDownstream: downstreamNames.size,
       },
     };
-  }, [selectedItem, recipesData, usageSearch, usageTypeFilter, usageMode]);
+  }, [selectedItem, selectedIngredientAliasIds, selectedBaseIngredientIds, selectedCanonicalInventoryId, inventoryAliases, inventoryData, recipesData, usageSearch, usageTypeFilter, usageMode]);
 
   if (isLoading) return (
     <div className="flex min-h-[40vh] items-center justify-center p-12 text-zinc-500">
@@ -3916,9 +4128,9 @@ export default function Inventory() {
                   {isStockCorrupted(selectedItem) ? (
                     <span className="text-base font-bold text-red-600">Invalid stock</span>
                   ) : (
-                    <span className={`text-3xl font-bold ${safeStock(selectedItem) < Number(selectedItem.parLevel || 0) ? 'text-danger-600' : 'text-neutral-900'}`}>{safeStock(selectedItem)}</span>
+                    <span className={`text-3xl font-bold ${safeStock(selectedItem) < Number(selectedItem.parLevel || 0) ? 'text-danger-600' : 'text-neutral-900'}`}>{formatStockQty(safeStock(selectedItem), selectedItem.baseUnit || selectedItem.unit)}</span>
                   )}
-                  <span className="text-sm text-neutral-500 font-medium mb-1">/ {selectedItem.parLevel} {selectedItem.unit}</span>
+                  <span className="text-sm text-neutral-500 font-medium mb-1">/ {formatStockQty(Number(selectedItem.parLevel || 0), selectedItem.baseUnit || selectedItem.unit)}</span>
                 </div>
               </div>
               <div className="bg-neutral-50 border border-neutral-200 rounded-xl p-4">
@@ -3940,7 +4152,7 @@ export default function Inventory() {
             <div>
               <h3 className="text-sm font-bold text-neutral-900 mb-3 uppercase tracking-wider flex items-center justify-between border-b border-neutral-100 pb-2">
                 <span className="flex items-center gap-2"><Link2 className="h-4 w-4 text-brand-600" /> Used In Recipes</span>
-                {recipesLoading && <span className="text-[10px] text-neutral-400">Loading recipe links…</span>}
+                {recipesLoading && !recipesLoaded && <span className="text-[10px] text-neutral-400">Loading recipe links…</span>}
               </h3>
               <div className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm space-y-4">
                 <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
@@ -3956,6 +4168,111 @@ export default function Inventory() {
                     </div>
                   ))}
                 </div>
+
+                {canViewIngredientAliases && (
+                  <div className="rounded-xl border border-blue-100 bg-blue-50/70 p-3 text-xs text-blue-950">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <p className="font-bold">Canonical ingredient identity</p>
+                        <p className="mt-0.5 text-blue-800">
+                          Selected row ID: <span className="font-mono">{selectedItem.id}</span>
+                        </p>
+                        {selectedIngredientAliasIds.length > selectedBaseIngredientIds.length && (
+                          <p className="mt-1 font-semibold text-blue-900">
+                            Recipe usage includes {selectedIngredientAliasIds.length} linked inventory records for this canonical ingredient.
+                          </p>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setAliasReviewOpen(prev => !prev)}
+                        className="rounded-lg border border-blue-200 bg-white px-3 py-1.5 text-xs font-bold text-blue-700 hover:bg-blue-100"
+                      >
+                        {aliasReviewOpen ? "Hide Alias Review" : "Review Possible Ingredient Duplicates"}
+                      </button>
+                    </div>
+
+                    {aliasReviewOpen && (
+                      <div className="mt-3 space-y-3 rounded-lg border border-blue-100 bg-white p-3">
+                        <div>
+                          <p className="font-bold text-neutral-900">Approved linked inventory IDs</p>
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {selectedIngredientAliasIds.map(id => (
+                              <span key={id} className="rounded-full border border-neutral-200 bg-neutral-50 px-2 py-1 font-mono text-[10px] text-neutral-700">
+                                {id}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+
+                        {ingredientUsage.suggestedAliasIds.length > 0 && (
+                          <div>
+                            <p className="font-bold text-neutral-900">Suggested recipe-linked IDs for HQ review</p>
+                            <p className="mt-0.5 text-[11px] text-neutral-500">
+                              These are name-like recipe links only. They do not affect usage tracking until HQ confirms them.
+                            </p>
+                            <div className="mt-2 space-y-2">
+                              {ingredientUsage.suggestedAliasIds.map((suggestion: any) => (
+                                <div key={suggestion.id} className="flex flex-col gap-2 rounded-lg border border-neutral-200 bg-neutral-50 p-2 sm:flex-row sm:items-center sm:justify-between">
+                                  <div>
+                                    <p className="font-mono text-[11px] font-bold text-neutral-900">{suggestion.id}</p>
+                                    <p className="text-[11px] text-neutral-500">
+                                      {suggestion.inventoryRow
+                                        ? `${suggestion.inventoryRow.name} • ${suggestion.inventoryRow.locationId ?? "No location"} • ${suggestion.inventoryRow.baseUnit ?? suggestion.inventoryRow.unit ?? "No unit"}`
+                                        : "No current inventory_items row loaded for this legacy recipe ID."}
+                                    </p>
+                                  </div>
+                                  {canManageIngredientAliases && (
+                                    <button
+                                      type="button"
+                                      disabled={aliasSaving}
+                                      onClick={() => handleAddInventoryAlias(suggestion.id)}
+                                      className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-blue-700 disabled:opacity-60"
+                                    >
+                                      Link ID
+                                    </button>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {canManageIngredientAliases ? (
+                          <div className="rounded-lg border border-neutral-200 p-3">
+                            <p className="font-bold text-neutral-900">Add approved alias manually</p>
+                            <div className="mt-2 grid gap-2 lg:grid-cols-[1fr_1fr_auto]">
+                              <input
+                                value={manualAliasId}
+                                onChange={e => setManualAliasId(e.target.value)}
+                                placeholder="Paste inventory ID to link"
+                                className="rounded-lg border border-neutral-200 px-3 py-2 text-xs text-neutral-900 outline-none focus:ring-1 focus:ring-blue-500"
+                              />
+                              <input
+                                value={aliasNotes}
+                                onChange={e => setAliasNotes(e.target.value)}
+                                placeholder="Notes, e.g. legacy recipe garlic ID"
+                                className="rounded-lg border border-neutral-200 px-3 py-2 text-xs text-neutral-900 outline-none focus:ring-1 focus:ring-blue-500"
+                              />
+                              <button
+                                type="button"
+                                disabled={aliasSaving || aliasesLoading}
+                                onClick={() => handleAddInventoryAlias(manualAliasId)}
+                                className="rounded-lg bg-neutral-950 px-3 py-2 text-xs font-bold text-white hover:bg-neutral-800 disabled:opacity-60"
+                              >
+                                {aliasSaving ? "Saving..." : "Confirm Alias"}
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <p className="rounded-lg bg-neutral-50 p-2 text-[11px] font-semibold text-neutral-500">
+                            HQ Ops can review aliases here. Only HQ Master/Admin can confirm new aliases.
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 <div className="grid gap-2 lg:grid-cols-[1fr_160px_180px]">
                   <div className="relative">

@@ -271,6 +271,24 @@ export function inferMeasurementFamily(baseUnit: string | null | undefined): Mea
 
 // 1. INVENTORY ITEMS 
 // ----------------------------------------------------------------------------
+export type InventoryItemAlias = {
+  id: string;
+  canonicalInventoryItemId: string;
+  aliasInventoryItemId: string;
+  notes: string | null;
+  createdBy: string | null;
+  createdAt: string | null;
+};
+
+const mapInventoryItemAliasToFrontend = (db: any): InventoryItemAlias => ({
+  id: String(db.id ?? ""),
+  canonicalInventoryItemId: String(db.canonical_inventory_item_id ?? ""),
+  aliasInventoryItemId: String(db.alias_inventory_item_id ?? ""),
+  notes: db.notes ?? null,
+  createdBy: db.created_by ?? null,
+  createdAt: db.created_at ?? null,
+});
+
 const mapInventoryToFrontend = (db: any) => ({
      id: db.id,
      itemId: db.item_id ?? db.id,     // shared identity; fall back to row id for legacy rows
@@ -410,6 +428,61 @@ export async function loadInventory(locationId?: string | null) {
   );
   console.log(`[loadInventory] fetched ${data.length} rows${locationId ? ` for location ${locationId}` : ''}`);
   return data.map(mapInventoryToFrontend);
+}
+
+export async function loadInventoryItemAliases(): Promise<InventoryItemAlias[]> {
+  const { data, error } = await supabase
+    .from("inventory_item_aliases")
+    .select("*")
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    const message = String(error.message ?? "");
+    const code = String((error as any).code ?? "");
+    if (code === "42P01" || message.toLowerCase().includes("does not exist")) {
+      console.warn("[loadInventoryItemAliases] inventory_item_aliases table is not available yet. Run migration_inventory_item_aliases.sql.");
+      return [];
+    }
+    console.error("[loadInventoryItemAliases] error", error);
+    return [];
+  }
+
+  return (data ?? []).map(mapInventoryItemAliasToFrontend);
+}
+
+export async function upsertInventoryItemAlias(params: {
+  canonicalInventoryItemId: string;
+  aliasInventoryItemId: string;
+  notes?: string | null;
+}): Promise<{ success: boolean; alias?: InventoryItemAlias; error?: any }> {
+  const canonicalId = String(params.canonicalInventoryItemId ?? "").trim();
+  const aliasId = String(params.aliasInventoryItemId ?? "").trim();
+
+  if (!canonicalId || !aliasId) {
+    return { success: false, error: { message: "Canonical and alias inventory IDs are required." } };
+  }
+  if (canonicalId === aliasId) {
+    return { success: false, error: { message: "Alias ID must be different from the canonical inventory item ID." } };
+  }
+
+  const { data: authData } = await supabase.auth.getUser();
+  const { data, error } = await supabase
+    .from("inventory_item_aliases")
+    .upsert({
+      canonical_inventory_item_id: canonicalId,
+      alias_inventory_item_id: aliasId,
+      notes: params.notes?.trim() || null,
+      created_by: authData?.user?.id ?? null,
+    }, { onConflict: "canonical_inventory_item_id,alias_inventory_item_id" })
+    .select("*")
+    .single();
+
+  if (error) {
+    console.error("[upsertInventoryItemAlias] error", error);
+    return { success: false, error };
+  }
+
+  return { success: true, alias: mapInventoryItemAliasToFrontend(data) };
 }
 
 export async function saveInventory(data: any[]) {
@@ -3011,7 +3084,7 @@ export async function getActiveDeliveryRuns(): Promise<{ id: string; runNumber: 
 export async function loadBackorders(locationId?: string): Promise<any[]> {
   let query = supabase
     .from('requisition_backorders')
-    .select('*, original_requisition_item:requisition_items(pack_qty_snapshot, finished_good_id)')
+    .select('id, location_id, original_requisition_id, original_requisition_item_id, item_id, item_name, requested_qty, fulfilled_qty, backorder_qty, remaining_qty, unit, unit_price, source_type, supplier_name, status, backorder_reason, notes, created_at, updated_at, fulfilled_at, original_requisition_item:requisition_items(pack_qty_snapshot, finished_good_id)')
     .order('created_at', { ascending: false });
   if (locationId) {
     query = query.eq('location_id', locationId);
@@ -3022,8 +3095,11 @@ export async function loadBackorders(locationId?: string): Promise<any[]> {
     return [];
   }
   return (data || []).map(row => {
-    const isFG = row.source_type === 'finished_good' || !!row.original_requisition_item?.finished_good_id;
-    const packQty = row.original_requisition_item?.pack_qty_snapshot != null ? Number(row.original_requisition_item.pack_qty_snapshot) : 1;
+    const originalRequisitionItem = Array.isArray((row as any).original_requisition_item)
+      ? (row as any).original_requisition_item[0]
+      : (row as any).original_requisition_item;
+    const isFG = row.source_type === 'finished_good' || !!originalRequisitionItem?.finished_good_id;
+    const packQty = originalRequisitionItem?.pack_qty_snapshot != null ? Number(originalRequisitionItem.pack_qty_snapshot) : 1;
     return {
       id: row.id,
       locationId: row.location_id,
@@ -3059,6 +3135,8 @@ export async function loadBackorders(locationId?: string): Promise<any[]> {
       fulfilledAt: row.fulfilled_at,
       fulfilled_at: row.fulfilled_at,
       notes: row.notes,
+      backorderReason: row.backorder_reason ?? null,
+      backorder_reason: row.backorder_reason ?? null,
       // Helper fields
       isFGMode: isFG,
       packQty,
@@ -3081,6 +3159,43 @@ export async function loadBackorderFulfillments(backorderId: string): Promise<an
     return [];
   }
   return data || [];
+}
+
+/**
+ * Update the backorder_reason on a single requisition_backorders row.
+ * Authorized roles: hq_admin, hq_master, hq_ops only.
+ * Calls the set_requisition_backorder_reason() SECURITY DEFINER RPC —
+ * which updates ONLY backorder_reason and updated_at.
+ * Does NOT use a direct .update() to avoid granting broad table UPDATE access.
+ */
+export const BACKORDER_REASON_VALUES = [
+  'out_of_stock',
+  'awaiting_production',
+  'awaiting_supplier_delivery',
+  'hq_supplier_setup_required',
+  'local_vendor_not_hq_fulfillable',
+  'manual_hold',
+] as const;
+
+export type BackorderReason = typeof BACKORDER_REASON_VALUES[number];
+
+export async function setBackorderReason(
+  backorderId: string,
+  reason: BackorderReason
+): Promise<{ success: boolean; error?: any }> {
+  console.log(`[Backorders] setBackorderReason id=${backorderId} reason=${reason}`);
+
+  const { data, error } = await supabase.rpc('set_requisition_backorder_reason', {
+    p_backorder_id: backorderId,
+    p_reason: reason,
+  });
+
+  if (error) {
+    console.error('[Backorders] setBackorderReason error:', error);
+    return { success: false, error };
+  }
+
+  return { success: true };
 }
 
 export async function createBackordersFromRequisition(requisitionId: string): Promise<{ success: boolean; error?: any }> {
@@ -3114,65 +3229,97 @@ export async function createBackordersFromRequisition(requisitionId: string): Pr
     const fulfilled = Number(item.quantity_fulfilled ?? 0);
     const backorderQty = requested - fulfilled;
 
-    if (backorderQty > 0) {
-      // Check if backorder already exists for this original_requisition_item_id
-      const { data: existing, error: existErr } = await supabase
+    if (backorderQty <= 0) {
+      // Line is now fully fulfilled. Close any existing open backorder record.
+      const { data: existingClosed } = await supabase
         .from('requisition_backorders')
-        .select('id')
+        .select('id, status')
         .eq('original_requisition_item_id', item.id)
         .maybeSingle();
 
-      if (existErr) {
-        console.error(`[Backorders] Error checking existing backorders for item ${item.id}:`, existErr);
-        continue;
-      }
-
-      // Determine item_id (which could be finished_good_id or item_id/legacy raw item id)
-      const itemId = item.finished_good_id || item.item_id;
-      const sourceType = item.finished_good_id ? 'finished_good' : 'raw_item';
-
-      if (existing) {
-        // Update existing backorder record if needed
-        console.log(`[Backorders] Backorder already exists for item ${item.id}, updating quantities...`);
-        const { error: updateErr } = await supabase
+      if (
+        existingClosed &&
+        existingClosed.status !== 'fulfilled' &&
+        existingClosed.status !== 'cancelled'
+      ) {
+        console.log(`[Backorders] Line ${item.id} fully fulfilled — closing backorder record ${existingClosed.id}`);
+        const { error: closeErr } = await supabase
           .from('requisition_backorders')
           .update({
-            requested_qty: requested,
             fulfilled_qty: fulfilled,
-            backorder_qty: backorderQty,
-            remaining_qty: backorderQty,
-            unit_price: Number(item.unit_price ?? 0),
+            backorder_qty: 0,
+            remaining_qty: 0,
+            status: 'fulfilled',
+            fulfilled_at: new Date().toISOString(),
           })
-          .eq('id', existing.id);
-
-        if (updateErr) {
-          console.error(`[Backorders] Error updating backorder for item ${item.id}:`, updateErr);
+          .eq('id', existingClosed.id);
+        if (closeErr) {
+          console.error(`[Backorders] Error closing backorder for item ${item.id}:`, closeErr);
         }
-      } else {
-        // Create new backorder record
-        console.log(`[Backorders] Creating new backorder for item ${item.id} (Qty: ${backorderQty})...`);
-        const { error: insertErr } = await supabase
-          .from('requisition_backorders')
-          .insert({
-            original_requisition_id: requisitionId,
-            original_requisition_item_id: item.id,
-            location_id: requisition.location_id,
-            item_id: itemId,
-            item_name: item.item_name_snapshot || 'Unknown Item',
-            requested_qty: requested,
-            fulfilled_qty: fulfilled,
-            backorder_qty: backorderQty,
-            remaining_qty: backorderQty,
-            unit: item.unit_snapshot,
-            unit_price: Number(item.unit_price ?? 0),
-            source_type: sourceType,
-            supplier_name: item.supplier_snapshot || null,
-            status: 'open',
-          });
+      }
+      continue;
+    }
 
-        if (insertErr) {
-          console.error(`[Backorders] Error inserting backorder for item ${item.id}:`, insertErr);
-        }
+    // backorderQty > 0: check for existing record and upsert.
+    const { data: existing, error: existErr } = await supabase
+      .from('requisition_backorders')
+      .select('id')
+      .eq('original_requisition_item_id', item.id)
+      .maybeSingle();
+
+    if (existErr) {
+      console.error(`[Backorders] Error checking existing backorders for item ${item.id}:`, existErr);
+      continue;
+    }
+
+    // Determine item_id (which could be finished_good_id or item_id/legacy raw item id)
+    const itemId = item.finished_good_id || item.item_id;
+    const sourceType = item.finished_good_id ? 'finished_good' : 'raw_item';
+
+    if (existing) {
+      // Update existing backorder record with correct status.
+      console.log(`[Backorders] Backorder already exists for item ${item.id}, updating quantities...`);
+      // Status: partially_fulfilled when some qty has been supplied, open otherwise.
+      const newStatus = fulfilled > 0 ? 'partially_fulfilled' : 'open';
+      const { error: updateErr } = await supabase
+        .from('requisition_backorders')
+        .update({
+          requested_qty: requested,
+          fulfilled_qty: fulfilled,
+          backorder_qty: backorderQty,
+          remaining_qty: backorderQty,
+          unit_price: Number(item.unit_price ?? 0),
+          status: newStatus,
+        })
+        .eq('id', existing.id);
+
+      if (updateErr) {
+        console.error(`[Backorders] Error updating backorder for item ${item.id}:`, updateErr);
+      }
+    } else {
+      // Create new backorder record
+      console.log(`[Backorders] Creating new backorder for item ${item.id} (Qty: ${backorderQty})...`);
+      const { error: insertErr } = await supabase
+        .from('requisition_backorders')
+        .insert({
+          original_requisition_id: requisitionId,
+          original_requisition_item_id: item.id,
+          location_id: requisition.location_id,
+          item_id: itemId,
+          item_name: item.item_name_snapshot || 'Unknown Item',
+          requested_qty: requested,
+          fulfilled_qty: fulfilled,
+          backorder_qty: backorderQty,
+          remaining_qty: backorderQty,
+          unit: item.unit_snapshot,
+          unit_price: Number(item.unit_price ?? 0),
+          source_type: sourceType,
+          supplier_name: item.supplier_snapshot || null,
+          status: 'open',
+        });
+
+      if (insertErr) {
+        console.error(`[Backorders] Error inserting backorder for item ${item.id}:`, insertErr);
       }
     }
   }
