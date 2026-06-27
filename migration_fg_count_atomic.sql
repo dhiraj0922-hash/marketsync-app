@@ -106,4 +106,11 @@ BEGIN
 
   RETURN v_result;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Grant execute to authenticated users.
+-- The function body's own logic controls who can call it effectively
+-- (the client verifyHqRole() guard runs before the RPC call).
+GRANT EXECUTE ON FUNCTION public.save_fg_count_line_atomic(
+  TEXT, DATE, TEXT, UUID, TEXT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC
+) TO authenticated;

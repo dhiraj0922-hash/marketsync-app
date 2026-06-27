@@ -8508,20 +8508,38 @@ export async function saveFinishedGoodsCount(session: any, lines: any[]): Promis
 }
 
 // ── Role Authorization Helper (Safeguard 7) ──────────────────────────────────
+// Allowed HQ roles for count operations:
+//   hq_master / hq_admin / hq_admin (legacy spellings) — full HQ admins
+//   hq_fulfillment                                     — operational HQ role;
+//     explicitly permitted to perform Finished Goods Count per business rules.
+//     Must NOT be able to edit master data (recipes, pricing, activation) —
+//     those paths are gated separately in their own page/storage functions.
 async function verifyHqRole(): Promise<void> {
   const { data: authData } = await supabase.auth.getUser();
   const user = authData?.user;
   if (!user) throw new Error("No active auth session.");
-  
+
   const { data: profile } = await supabase
     .from('user_profiles')
     .select('role')
     .eq('user_id', user.id)
     .single();
-    
+
   const role = (profile?.role ?? '').toLowerCase().trim();
-  const isHq = role === 'hq_master' || role === 'hq_admin' || role === 'hq admin' || role === 'admin';
-  if (!isHq) throw new Error("Unauthorized: HQ role required.");
+  const isHq =
+    role === 'hq_master'      ||
+    role === 'hq_admin'       ||
+    role === 'hq admin'       ||  // legacy spacing variant
+    role === 'admin'          ||  // legacy catch-all
+    role === 'hq_fulfillment';    // operational HQ role — FG count allowed
+  if (!isHq) {
+    throw new Error(
+      `Unauthorized: HQ role required for this operation. ` +
+      `Current role: "${role || '(none)'}". ` +
+      `Allowed: hq_master, hq_admin, hq_fulfillment. ` +
+      `[source: verifyHqRole in storage.ts]`
+    );
+  }
 }
 
 // ── Set stock target directly (Safeguard 3) ──────────────────────────────────
