@@ -161,6 +161,7 @@ export function canAccessPath(user: { role?: string | null } | null | undefined,
   if (isLocationManager(user)) {
     return ![
       "/approvals",
+      "/requisitions/fulfillment",
       "/location-catalog",
       "/hq-sale-items",
       "/fg-count",

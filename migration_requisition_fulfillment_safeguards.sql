@@ -78,8 +78,8 @@ BEGIN
   WHERE user_id = p_user_id
     AND is_active = true
   LIMIT 1;
-  IF v_user_role NOT IN ('hq_admin', 'hq_master', 'hq_ops') THEN
-    RAISE EXCEPTION 'Permission denied: User % does not have an authorized HQ role.', p_user_id;
+  IF v_user_role NOT IN ('hq_admin', 'hq_master', 'hq_ops', 'hq_fulfillment') THEN
+    RAISE EXCEPTION 'Permission denied: User % does not have an authorized HQ role (got: %).', p_user_id, COALESCE(v_user_role, '(no profile found)');
   END IF;
 
   -- B. Concurrency & Idempotency Locking

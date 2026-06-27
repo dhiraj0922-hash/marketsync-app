@@ -7,7 +7,9 @@ import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/components/AuthProvider";
 import { getFulfillmentSummary, saveFulfillmentAllocations, completeFulfillmentMovement, createDeliveryTicketFromRequisition, approveRequisition, rejectRequisition, getActiveDeliveryRuns, assignDeliveryTicketToRun, removeTicketFromDeliveryRun } from "@/lib/storage";
 import { isHqFulfillment, isHqMaster, isHqOps } from "@/lib/roles";
-import { ChevronDown, ChevronRight, Search, Save, Check, RefreshCw, AlertTriangle, Play, Sparkles, Truck, PackageCheck, CheckCircle2, XSquare, Loader2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Search, Save, Check, RefreshCw, AlertTriangle, Play, Sparkles, Truck, PackageCheck, CheckCircle2, XSquare, Loader2, Printer, FileText, X } from "lucide-react";
+
+type PrintScope = "visible" | "locations" | "requisitions" | "items";
 
 export default function FulfillmentPage() {
   const { user } = useAuth();
@@ -23,6 +25,22 @@ export default function FulfillmentPage() {
   const [search, setSearch] = useState("");
   const [locationFilter, setLocationFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [printModalOpen, setPrintModalOpen] = useState(false);
+  const [printScope, setPrintScope] = useState<PrintScope>("visible");
+  const [printSelectedLocations, setPrintSelectedLocations] = useState<string[]>([]);
+  const [printSelectedRequisitions, setPrintSelectedRequisitions] = useState<string[]>([]);
+  const [printSelectedItems, setPrintSelectedItems] = useState<string[]>([]);
+  const [printOptions, setPrintOptions] = useState({
+    includeBreakdown: true,
+    includeRequisitionNumber: true,
+    includeBackorders: true,
+    includeNotes: true,
+    includePickedQty: true,
+    includeCheckedBy: true,
+    pageBreakPerLocation: false,
+    onlyAllocated: false,
+    includeRequested: true,
+  });
 
   // Track modified rows locally
   // key: line_id, value: { allocatedQty: number, backorderQty: number, fulfillmentNote: string, dirty: boolean }
@@ -93,6 +111,25 @@ export default function FulfillmentPage() {
     return Array.from(locSet).sort();
   }, [data]);
 
+  const requisitionOptions = useMemo(() => {
+    const map = new Map<string, { id: string; label: string; locationName: string }>();
+    for (const group of data) {
+      for (const item of group.items) {
+        if (!item.requisitionId) continue;
+        map.set(item.requisitionId, {
+          id: item.requisitionId,
+          label: item.requisitionNumber || item.requisitionId,
+          locationName: item.locationName || "Unknown Location",
+        });
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label));
+  }, [data]);
+
+  const itemOptions = useMemo(() => {
+    return data.map(group => group.itemName).filter(Boolean).sort((a, b) => a.localeCompare(b));
+  }, [data]);
+
   // Filtered Grouped Items
   const filteredData = useMemo(() => {
     return data.map(group => {
@@ -134,6 +171,51 @@ export default function FulfillmentPage() {
       ...prev,
       [itemName]: !prev[itemName]
     }));
+  };
+
+  const togglePrintOption = (key: keyof typeof printOptions) => {
+    setPrintOptions(prev => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const toggleListValue = (value: string, setter: (next: string[]) => void, current: string[]) => {
+    setter(current.includes(value) ? current.filter(v => v !== value) : [...current, value]);
+  };
+
+  const buildPrintUrl = (mode: "view" | "print" = "view") => {
+    const params = new URLSearchParams();
+    params.set("scope", printScope);
+    if (mode === "print") params.set("mode", "print");
+    if (printScope === "visible") {
+      if (search.trim()) params.set("search", search.trim());
+      if (locationFilter !== "all") params.set("location", locationFilter);
+      if (statusFilter !== "all") params.set("status", statusFilter);
+    }
+    if (printScope === "locations" && printSelectedLocations.length > 0) params.set("locations", printSelectedLocations.join(","));
+    if (printScope === "requisitions" && printSelectedRequisitions.length > 0) params.set("requisitions", printSelectedRequisitions.join(","));
+    if (printScope === "items" && printSelectedItems.length > 0) params.set("items", printSelectedItems.join(","));
+    Object.entries(printOptions).forEach(([key, value]) => {
+      params.set(key, value ? "1" : "0");
+    });
+    return `/requisitions/fulfillment/print?${params.toString()}`;
+  };
+
+  const openPickListPrint = (mode: "view" | "print") => {
+    if (printScope === "locations" && printSelectedLocations.length === 0) {
+      setToast("Select at least one location for the pick list.");
+      return;
+    }
+    if (printScope === "requisitions" && printSelectedRequisitions.length === 0) {
+      setToast("Select at least one requisition for the pick list.");
+      return;
+    }
+    if (printScope === "items" && printSelectedItems.length === 0) {
+      setToast("Select at least one item for the pick list.");
+      return;
+    }
+    const url = buildPrintUrl(mode);
+    console.log("[Fulfillment Pick List Print]", { mode, printScope, url });
+    const printWindow = window.open(url, "_blank", "noopener,noreferrer");
+    if (!printWindow) setToast("Browser blocked the print window. Allow pop-ups and try again.");
   };
 
   const handleFieldChange = (itemId: string, field: "allocatedQty" | "backorderQty" | "fulfillmentNote", val: any) => {
@@ -347,7 +429,7 @@ export default function FulfillmentPage() {
           <h2 className="text-2xl font-bold tracking-tight">Requisition Fulfillment</h2>
           <p className="text-neutral-500">Grouped operational view to allocate items to location requisitions.</p>
         </div>
-        <div className="flex items-center gap-2 w-full sm:w-auto">
+        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
           <button 
             onClick={loadData}
             disabled={loading}
@@ -355,6 +437,14 @@ export default function FulfillmentPage() {
           >
             <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
             Refresh
+          </button>
+          <button
+            onClick={() => setPrintModalOpen(true)}
+            disabled={loading}
+            className="flex items-center justify-center gap-2 px-3 py-2 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 transition-colors shadow-sm"
+          >
+            <Printer className="h-4 w-4" />
+            Print Pick List
           </button>
           <button 
             onClick={handleSave}
@@ -745,6 +835,155 @@ export default function FulfillmentPage() {
         </div>
       )}
     </div>
+
+    {/* ── Print Pick List Modal ────────────────────────────────────────────── */}
+    {printModalOpen && (
+      <div className="fixed inset-0 z-[190] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+        <div className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+          <div className="flex items-start justify-between gap-4 border-b border-neutral-200 px-6 py-4">
+            <div>
+              <h3 className="text-lg font-bold text-neutral-950">Print Pick List</h3>
+              <p className="mt-1 text-sm text-neutral-500">Generate read-only warehouse paperwork. This does not save allocations or change stock.</p>
+            </div>
+            <button onClick={() => setPrintModalOpen(false)} className="rounded-lg p-2 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700">
+              <X className="h-5 w-5" />
+            </button>
+          </div>
+
+          <div className="grid gap-5 overflow-y-auto px-6 py-5 lg:grid-cols-[280px_1fr]">
+            <div className="space-y-4">
+              <div>
+                <p className="mb-2 text-xs font-bold uppercase tracking-wider text-neutral-500">Print Scope</p>
+                <div className="space-y-2">
+                  {([
+                    ["visible", "All currently visible filtered items"],
+                    ["locations", "Selected locations only"],
+                    ["requisitions", "Selected requisitions only"],
+                    ["items", "Selected items only"],
+                  ] as const).map(([value, label]) => (
+                    <label key={value} className="flex cursor-pointer items-start gap-2 rounded-lg border border-neutral-200 p-3 text-sm hover:bg-neutral-50">
+                      <input type="radio" checked={printScope === value} onChange={() => setPrintScope(value)} className="mt-1" />
+                      <span className="font-medium text-neutral-800">{label}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <p className="mb-2 text-xs font-bold uppercase tracking-wider text-neutral-500">Options</p>
+                <div className="space-y-2 rounded-xl border border-neutral-200 p-3">
+                  {([
+                    ["includeBreakdown", "Include location breakdown"],
+                    ["includeRequisitionNumber", "Include requisition number"],
+                    ["includeBackorders", "Include backorders"],
+                    ["includeNotes", "Include fulfillment notes"],
+                    ["includePickedQty", "Include blank Picked Qty"],
+                    ["includeCheckedBy", "Include blank Checked By"],
+                    ["pageBreakPerLocation", "Page break per location"],
+                    ["onlyAllocated", "Include only allocated quantities"],
+                    ["includeRequested", "Include requested quantities"],
+                  ] as const).map(([key, label]) => (
+                    <label key={key} className="flex cursor-pointer items-center gap-2 text-sm text-neutral-700">
+                      <input type="checkbox" checked={printOptions[key]} onChange={() => togglePrintOption(key)} />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+                <p className="font-bold">Recommended setup</p>
+                <p className="mt-1">Group by item, include location breakdown, allocated/backordered quantities, and blank Picked Qty / Checked By columns.</p>
+              </div>
+
+              {printScope === "visible" && (
+                <div className="rounded-xl border border-neutral-200 p-4">
+                  <p className="text-sm font-bold text-neutral-900">Current visible filter</p>
+                  <div className="mt-3 grid gap-2 text-sm text-neutral-600 sm:grid-cols-3">
+                    <div><span className="font-semibold text-neutral-500">Search:</span> {search || "All items"}</div>
+                    <div><span className="font-semibold text-neutral-500">Location:</span> {locationFilter === "all" ? "All locations" : locationFilter}</div>
+                    <div><span className="font-semibold text-neutral-500">Status:</span> {statusFilter === "all" ? "All statuses" : statusFilter}</div>
+                  </div>
+                  <p className="mt-3 text-xs text-neutral-500">{filteredData.length} grouped item{filteredData.length === 1 ? "" : "s"} currently visible.</p>
+                </div>
+              )}
+
+              {printScope === "locations" && (
+                <div className="rounded-xl border border-neutral-200 p-4">
+                  <div className="mb-3 flex items-center justify-between">
+                    <p className="text-sm font-bold text-neutral-900">Locations</p>
+                    <div className="flex gap-2 text-xs font-semibold">
+                      <button onClick={() => setPrintSelectedLocations(locations)} className="text-emerald-700 hover:underline">Select all</button>
+                      <button onClick={() => setPrintSelectedLocations([])} className="text-neutral-500 hover:underline">Clear</button>
+                    </div>
+                  </div>
+                  <div className="grid max-h-72 gap-2 overflow-y-auto sm:grid-cols-2">
+                    {locations.map(loc => (
+                      <label key={loc} className="flex cursor-pointer items-center gap-2 rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50">
+                        <input type="checkbox" checked={printSelectedLocations.includes(loc)} onChange={() => toggleListValue(loc, setPrintSelectedLocations, printSelectedLocations)} />
+                        <span className="truncate">{loc}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {printScope === "requisitions" && (
+                <div className="rounded-xl border border-neutral-200 p-4">
+                  <div className="mb-3 flex items-center justify-between">
+                    <p className="text-sm font-bold text-neutral-900">Requisitions</p>
+                    <div className="flex gap-2 text-xs font-semibold">
+                      <button onClick={() => setPrintSelectedRequisitions(requisitionOptions.map(r => r.id))} className="text-emerald-700 hover:underline">Select all</button>
+                      <button onClick={() => setPrintSelectedRequisitions([])} className="text-neutral-500 hover:underline">Clear</button>
+                    </div>
+                  </div>
+                  <div className="grid max-h-72 gap-2 overflow-y-auto sm:grid-cols-2">
+                    {requisitionOptions.map(req => (
+                      <label key={req.id} className="flex cursor-pointer items-center gap-2 rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50">
+                        <input type="checkbox" checked={printSelectedRequisitions.includes(req.id)} onChange={() => toggleListValue(req.id, setPrintSelectedRequisitions, printSelectedRequisitions)} />
+                        <span className="min-w-0"><span className="block truncate font-medium">{req.label}</span><span className="block truncate text-xs text-neutral-500">{req.locationName}</span></span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {printScope === "items" && (
+                <div className="rounded-xl border border-neutral-200 p-4">
+                  <div className="mb-3 flex items-center justify-between">
+                    <p className="text-sm font-bold text-neutral-900">Items</p>
+                    <div className="flex gap-2 text-xs font-semibold">
+                      <button onClick={() => setPrintSelectedItems(itemOptions)} className="text-emerald-700 hover:underline">Select all</button>
+                      <button onClick={() => setPrintSelectedItems([])} className="text-neutral-500 hover:underline">Clear</button>
+                    </div>
+                  </div>
+                  <div className="grid max-h-72 gap-2 overflow-y-auto sm:grid-cols-2">
+                    {itemOptions.map(itemName => (
+                      <label key={itemName} className="flex cursor-pointer items-center gap-2 rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50">
+                        <input type="checkbox" checked={printSelectedItems.includes(itemName)} onChange={() => toggleListValue(itemName, setPrintSelectedItems, printSelectedItems)} />
+                        <span className="truncate">{itemName}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-2 border-t border-neutral-200 px-6 py-4 sm:flex-row sm:items-center sm:justify-end">
+            <button onClick={() => setPrintModalOpen(false)} className="rounded-lg border border-neutral-200 bg-white px-4 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50">Cancel</button>
+            <button onClick={() => openPickListPrint("view")} className="inline-flex items-center justify-center gap-2 rounded-lg border border-emerald-200 bg-white px-4 py-2 text-sm font-semibold text-emerald-700 hover:bg-emerald-50">
+              <FileText className="h-4 w-4" /> Preview Print List
+            </button>
+            <button onClick={() => openPickListPrint("print")} className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800">
+              <Printer className="h-4 w-4" /> Print / Save as PDF
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
 
     {/* ── Rejection Modal ─────────────────────────────────────────────────── */}
     {rejectModalReqId && (

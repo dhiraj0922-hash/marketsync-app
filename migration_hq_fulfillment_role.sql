@@ -383,32 +383,48 @@ DECLARE
   v_col text;
 BEGIN
   IF public.is_hq_fulfillment_profile() THEN
-    -- updated_at is auto-stamped by Supabase moddatetime on every UPDATE.
-    -- It must not be blocked or every hq_fulfillment write will be rejected.
-    -- Allowed columns: allocated_qty, backorder_qty, quantity_fulfilled,
-    --   fulfillment_note, fulfilled_by, fulfilled_at, updated_at (system-managed).
-    IF    NEW.id                          IS DISTINCT FROM OLD.id                          THEN v_col := 'id';
-    ELSIF NEW.requisition_id              IS DISTINCT FROM OLD.requisition_id              THEN v_col := 'requisition_id';
-    ELSIF NEW.item_id                     IS DISTINCT FROM OLD.item_id                     THEN v_col := 'item_id';
-    ELSIF NEW.finished_good_id            IS DISTINCT FROM OLD.finished_good_id            THEN v_col := 'finished_good_id';
-    ELSIF NEW.catalog_item_id             IS DISTINCT FROM OLD.catalog_item_id             THEN v_col := 'catalog_item_id';
-    ELSIF NEW.source_type                 IS DISTINCT FROM OLD.source_type                 THEN v_col := 'source_type';
-    ELSIF NEW.supplier_snapshot           IS DISTINCT FROM OLD.supplier_snapshot           THEN v_col := 'supplier_snapshot';
-    ELSIF NEW.pack_qty_snapshot           IS DISTINCT FROM OLD.pack_qty_snapshot           THEN v_col := 'pack_qty_snapshot';
-    ELSIF NEW.item_name_snapshot          IS DISTINCT FROM OLD.item_name_snapshot          THEN v_col := 'item_name_snapshot';
-    ELSIF NEW.unit_snapshot               IS DISTINCT FROM OLD.unit_snapshot               THEN v_col := 'unit_snapshot';
-    ELSIF NEW.source_commissary_snapshot  IS DISTINCT FROM OLD.source_commissary_snapshot  THEN v_col := 'source_commissary_snapshot';
-    ELSIF NEW.quantity_requested          IS DISTINCT FROM OLD.quantity_requested          THEN v_col := 'quantity_requested';
-    ELSIF NEW.unit_price                  IS DISTINCT FROM OLD.unit_price                  THEN v_col := 'unit_price';
-    ELSIF NEW.line_total                  IS DISTINCT FROM OLD.line_total                  THEN v_col := 'line_total';
-    ELSIF NEW.created_at                  IS DISTINCT FROM OLD.created_at                  THEN v_col := 'created_at';
+    -- ── BLOCKED columns ─────────────────────────────────────────────────────
+    -- Identity, source, pricing, and snapshot columns that hq_fulfillment must
+    -- NEVER change. The ELSIF chain names each one so that the exception message
+    -- identifies the exact unauthorized column.
+    --
+    -- ── ALLOWED columns (not listed below, pass through freely) ─────────────
+    --   allocated_qty          — set by saveFulfillmentAllocations
+    --   backorder_qty          — set by saveFulfillmentAllocations
+    --   quantity_fulfilled     — set by writeFulfilledAndRecalc / finalize RPC
+    --   fulfillment_note       — set by saveFulfillmentAllocations
+    --   fulfilled_by           — set by saveFulfillmentAllocations / finalize RPC
+    --   fulfilled_at           — set by saveFulfillmentAllocations / finalize RPC
+    --   line_total             — set by finalize_requisition_fulfillment_v3 as
+    --                            (fulfilled_qty × unit_price); NOT a price edit;
+    --                            unit_price itself remains protected below.
+    --   fulfilled_value        — audit copy of line_total; set by finalize RPC.
+    --   available_qty_at_finalization — audit snapshot; set by finalize RPC.
+    --   stock_movement_reference      — movement ref string; set by finalize RPC.
+    --   updated_at             — auto-stamped by Supabase moddatetime; not blocked.
+    IF    NEW.id                         IS DISTINCT FROM OLD.id                         THEN v_col := 'id';
+    ELSIF NEW.requisition_id             IS DISTINCT FROM OLD.requisition_id             THEN v_col := 'requisition_id';
+    ELSIF NEW.item_id                    IS DISTINCT FROM OLD.item_id                    THEN v_col := 'item_id';
+    ELSIF NEW.finished_good_id           IS DISTINCT FROM OLD.finished_good_id           THEN v_col := 'finished_good_id';
+    ELSIF NEW.catalog_item_id            IS DISTINCT FROM OLD.catalog_item_id            THEN v_col := 'catalog_item_id';
+    ELSIF NEW.source_type                IS DISTINCT FROM OLD.source_type                THEN v_col := 'source_type';
+    ELSIF NEW.supplier_snapshot          IS DISTINCT FROM OLD.supplier_snapshot          THEN v_col := 'supplier_snapshot';
+    ELSIF NEW.pack_qty_snapshot          IS DISTINCT FROM OLD.pack_qty_snapshot          THEN v_col := 'pack_qty_snapshot';
+    ELSIF NEW.item_name_snapshot         IS DISTINCT FROM OLD.item_name_snapshot         THEN v_col := 'item_name_snapshot';
+    ELSIF NEW.unit_snapshot              IS DISTINCT FROM OLD.unit_snapshot              THEN v_col := 'unit_snapshot';
+    ELSIF NEW.source_commissary_snapshot IS DISTINCT FROM OLD.source_commissary_snapshot THEN v_col := 'source_commissary_snapshot';
+    ELSIF NEW.quantity_requested         IS DISTINCT FROM OLD.quantity_requested         THEN v_col := 'quantity_requested';
+    ELSIF NEW.unit_price                 IS DISTINCT FROM OLD.unit_price                 THEN v_col := 'unit_price';
+    ELSIF NEW.created_at                 IS DISTINCT FROM OLD.created_at                 THEN v_col := 'created_at';
     END IF;
 
     IF v_col IS NOT NULL THEN
       RAISE EXCEPTION
         'hq_fulfillment: unauthorized column change on requisition_items: "%%". '
-        'Only allocated_qty, backorder_qty, quantity_fulfilled, fulfillment_note, '
-        'fulfilled_by, fulfilled_at may be updated by this role.',
+        'Only allocated_qty, backorder_qty, quantity_fulfilled, line_total, '
+        'fulfillment_note, fulfilled_by, fulfilled_at, fulfilled_value, '
+        'available_qty_at_finalization, stock_movement_reference may be updated by this role. '
+        'Protected: unit_price, quantity_requested, source_type, snapshots, item identity.',
         v_col;
     END IF;
   END IF;
