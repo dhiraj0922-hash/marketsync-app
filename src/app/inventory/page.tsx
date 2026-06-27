@@ -530,6 +530,11 @@ export default function Inventory() {
   const [localCustomCategories, setLocalCustomCategories] = useState<string[]>([]);
   const [purchaseOptionsData, setPurchaseOptionsData] = useState<any[]>([]);
   const [recipesData, setRecipesData] = useState<any[]>([]);
+  const [recipesLoading, setRecipesLoading] = useState(false);
+  const [usageSearch, setUsageSearch] = useState("");
+  const [usageTypeFilter, setUsageTypeFilter] = useState("All");
+  const [usageMode, setUsageMode] = useState<"all" | "direct">("all");
+  const [usageSectionsOpen, setUsageSectionsOpen] = useState({ direct: true, indirect: true });
   const [ordersData, setOrdersData] = useState<any[]>([]);
   const [productionMovementsData, setProductionMovementsData] = useState<any[]>([]);
   const [movementAuditRows, setMovementAuditRows] = useState<any[]>([]);
@@ -561,6 +566,21 @@ export default function Inventory() {
       loadAuditData();
     }
   }, [isDuplicateAuditOpen, recipesData.length]);
+
+  useEffect(() => {
+    if (!isDrawerOpen || !selectedItem || recipesData.length > 0 || recipesLoading) return;
+    let cancelled = false;
+    setRecipesLoading(true);
+    loadRecipes()
+      .then(recipes => {
+        if (!cancelled) setRecipesData(Array.isArray(recipes) ? recipes : []);
+      })
+      .catch(e => console.error("[IngredientUsage] Failed to load recipes", e))
+      .finally(() => {
+        if (!cancelled) setRecipesLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [isDrawerOpen, selectedItem, recipesData.length, recipesLoading]);
 
   useEffect(() => {
     async function fetchData() {
@@ -3167,6 +3187,146 @@ export default function Inventory() {
     }
   };
 
+  const ingredientUsage = useMemo(() => {
+    if (!selectedItem) {
+      return { direct: [], indirect: [], circularWarnings: [] as string[], summary: { directRecipes: 0, preparations: 0, finishedGoods: 0, totalDownstream: 0 } };
+    }
+
+    const aliases = new Set(
+      [selectedItem.id, selectedItem.itemId, selectedItem.item_id, selectedItem.catalogItemId]
+        .map((id: any) => String(id ?? "").trim())
+        .filter(Boolean)
+    );
+    const recipeByOutputId = new Map<string, any>();
+    const recipesByIngredientId = new Map<string, any[]>();
+    const circularWarnings: string[] = [];
+    const maxDepth = 6;
+
+    const classifyRecipe = (recipe: any) => {
+      const type = String(recipe.outputItemType ?? recipe.output_item_type ?? recipe.category ?? "").toLowerCase();
+      const name = String(recipe.name ?? "").toLowerCase();
+      const category = String(recipe.category ?? "").toLowerCase();
+      if (type.includes("prep") || category.includes("prep") || name.includes("base")) return "Preparation";
+      if (type.includes("menu") || category.includes("menu")) return "Menu Item";
+      if (type.includes("finished") || category.includes("finished")) return "Finished Good";
+      return "Recipe";
+    };
+
+    const convertToItemBase = (qty: number, unit: string) => {
+      const baseUnit = selectedItem.baseUnit || selectedItem.unit || unit;
+      const converted = convertQuantity(qty, unit, baseUnit);
+      return converted.ok ? converted.qty : qty;
+    };
+
+    for (const recipe of recipesData) {
+      const outputIds = [recipe.outputItemId, recipe.output_item_id, recipe.fgId, recipe.id]
+        .map((id: any) => String(id ?? "").trim())
+        .filter(Boolean);
+      outputIds.forEach(id => recipeByOutputId.set(id, recipe));
+      for (const ing of recipe.ingredients ?? []) {
+        const id = String(ing.inventoryId ?? ing.fgId ?? "").trim();
+        if (!id) continue;
+        const list = recipesByIngredientId.get(id) ?? [];
+        list.push(recipe);
+        recipesByIngredientId.set(id, list);
+      }
+    }
+
+    const direct: any[] = [];
+    for (const recipe of recipesData) {
+      for (const ing of recipe.ingredients ?? []) {
+        const ingredientId = String(ing.inventoryId ?? ing.fgId ?? "").trim();
+        if (!aliases.has(ingredientId)) continue;
+        const qty = Number(ing.qty ?? 0);
+        const qtyBase = convertToItemBase(qty, ing.unit || selectedItem.unit || "");
+        direct.push({
+          id: `${recipe.id}-${ingredientId}-${direct.length}`,
+          recipe,
+          recipeName: recipe.name,
+          type: classifyRecipe(recipe),
+          qty,
+          unit: ing.unit || selectedItem.unit || "",
+          recipeYield: `${recipe.yieldQty ?? "—"} ${recipe.yieldUnit ?? ""}`.trim(),
+          costContribution: qtyBase * Number(selectedItem.cost ?? 0),
+          outputItemId: recipe.outputItemId ?? recipe.output_item_id ?? null,
+        });
+      }
+    }
+
+    const indirect: any[] = [];
+    const walkDownstream = (sourceRecipe: any, ingredientQtyPerSourceYield: number, path: any[], depth: number, visited: Set<string>) => {
+      if (depth > maxDepth) {
+        circularWarnings.push(`Depth limit reached while tracing ${sourceRecipe.name}.`);
+        return;
+      }
+      const outputId = String(sourceRecipe.outputItemId ?? sourceRecipe.output_item_id ?? "").trim();
+      if (!outputId) return;
+      const parents = recipesByIngredientId.get(outputId) ?? [];
+      for (const parent of parents) {
+        if (visited.has(String(parent.id))) {
+          circularWarnings.push(`Circular recipe dependency detected: ${[...path.map(p => p.name), parent.name].join(" → ")}`);
+          continue;
+        }
+        const parentLine = (parent.ingredients ?? []).find((ing: any) => String(ing.inventoryId ?? ing.fgId ?? "").trim() === outputId);
+        const prepQtyUsed = Number(parentLine?.qty ?? 0);
+        const sourceYield = Number(sourceRecipe.yieldQty ?? 0);
+        const ratio = sourceYield > 0 ? prepQtyUsed / sourceYield : 0;
+        const estimatedQty = ingredientQtyPerSourceYield * ratio;
+        indirect.push({
+          id: `${sourceRecipe.id}-${parent.id}-${depth}-${indirect.length}`,
+          ingredientName: selectedItem.name,
+          throughPreparation: sourceRecipe.name,
+          downstreamName: parent.name,
+          finalType: classifyRecipe(parent),
+          estimatedQty,
+          unit: selectedItem.baseUnit || selectedItem.unit || "",
+          costContribution: estimatedQty * Number(selectedItem.cost ?? 0),
+          recipe: parent,
+          path: [...path, parent].map(p => p.name).join(" → "),
+        });
+        walkDownstream(parent, estimatedQty, [...path, parent], depth + 1, new Set([...visited, String(parent.id)]));
+      }
+    };
+
+    for (const row of direct) {
+      if (row.outputItemId) {
+        const baseQty = convertToItemBase(row.qty, row.unit);
+        walkDownstream(row.recipe, baseQty, [row.recipe], 1, new Set([String(row.recipe.id)]));
+      }
+    }
+
+    const filterUsage = (row: any, fields: string[]) => {
+      const query = usageSearch.trim().toLowerCase();
+      const type = row.type || row.finalType;
+      const matchSearch = !query || fields.some(field => String(field ?? "").toLowerCase().includes(query));
+      const matchType = usageTypeFilter === "All" || type === usageTypeFilter;
+      return matchSearch && matchType;
+    };
+
+    const filteredDirect = direct.filter(row => filterUsage(row, [row.recipeName, row.type]));
+    const filteredIndirect = usageMode === "direct"
+      ? []
+      : indirect.filter(row => filterUsage(row, [row.throughPreparation, row.downstreamName, row.finalType, row.path]));
+    const prepNames = new Set(direct.filter(row => row.type === "Preparation").map(row => row.recipeName));
+    const downstreamNames = new Set(indirect.map(row => row.downstreamName));
+    const fgNames = new Set([
+      ...direct.filter(row => row.type === "Finished Good" || row.type === "Menu Item").map(row => row.recipeName),
+      ...indirect.filter(row => row.finalType === "Finished Good" || row.finalType === "Menu Item").map(row => row.downstreamName),
+    ]);
+
+    return {
+      direct: filteredDirect,
+      indirect: filteredIndirect,
+      circularWarnings: Array.from(new Set(circularWarnings)),
+      summary: {
+        directRecipes: direct.length,
+        preparations: prepNames.size,
+        finishedGoods: fgNames.size,
+        totalDownstream: downstreamNames.size,
+      },
+    };
+  }, [selectedItem, recipesData, usageSearch, usageTypeFilter, usageMode]);
+
   if (isLoading) return (
     <div className="flex min-h-[40vh] items-center justify-center p-12 text-zinc-500">
       <Loader2 className="mr-2 h-5 w-5 animate-spin" />
@@ -3773,6 +3933,159 @@ export default function Inventory() {
                 </div>
 	              </div>
 	            </div>
+
+            {/* ────────────────────────────────────────────────
+                 USED IN RECIPES TRACKER
+            ──────────────────────────────────────────────── */}
+            <div>
+              <h3 className="text-sm font-bold text-neutral-900 mb-3 uppercase tracking-wider flex items-center justify-between border-b border-neutral-100 pb-2">
+                <span className="flex items-center gap-2"><Link2 className="h-4 w-4 text-brand-600" /> Used In Recipes</span>
+                {recipesLoading && <span className="text-[10px] text-neutral-400">Loading recipe links…</span>}
+              </h3>
+              <div className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm space-y-4">
+                <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+                  {[
+                    ["Direct Recipes", ingredientUsage.summary.directRecipes],
+                    ["Preparations", ingredientUsage.summary.preparations],
+                    ["Finished Goods / Menu Items", ingredientUsage.summary.finishedGoods],
+                    ["Total Downstream Items", ingredientUsage.summary.totalDownstream],
+                  ].map(([label, value]) => (
+                    <div key={String(label)} className="rounded-lg border border-neutral-200 bg-neutral-50 p-3">
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-neutral-500">{label}</p>
+                      <p className="mt-1 text-xl font-black text-neutral-950">{value}</p>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="grid gap-2 lg:grid-cols-[1fr_160px_180px]">
+                  <div className="relative">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-400" />
+                    <input
+                      type="text"
+                      value={usageSearch}
+                      onChange={e => setUsageSearch(e.target.value)}
+                      placeholder="Search recipe, preparation, or menu item..."
+                      className="w-full rounded-lg border border-neutral-200 bg-white py-2 pl-9 pr-3 text-sm outline-none focus:ring-1 focus:ring-brand-500"
+                    />
+                  </div>
+                  <select
+                    value={usageTypeFilter}
+                    onChange={e => setUsageTypeFilter(e.target.value)}
+                    className="rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-700 outline-none focus:ring-1 focus:ring-brand-500"
+                  >
+                    {["All", "Preparation", "Finished Good", "Menu Item", "Recipe"].map(type => (
+                      <option key={type} value={type}>{type}</option>
+                    ))}
+                  </select>
+                  <div className="inline-flex rounded-lg border border-neutral-200 bg-neutral-50 p-1">
+                    <button
+                      onClick={() => setUsageMode("direct")}
+                      className={`flex-1 rounded-md px-3 py-1.5 text-xs font-bold ${usageMode === "direct" ? "bg-white text-brand-700 shadow-sm" : "text-neutral-500"}`}
+                    >
+                      Direct Only
+                    </button>
+                    <button
+                      onClick={() => setUsageMode("all")}
+                      className={`flex-1 rounded-md px-3 py-1.5 text-xs font-bold ${usageMode === "all" ? "bg-white text-brand-700 shadow-sm" : "text-neutral-500"}`}
+                    >
+                      Include Indirect
+                    </button>
+                  </div>
+                </div>
+
+                {ingredientUsage.circularWarnings.length > 0 && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs font-semibold text-amber-800">
+                    {ingredientUsage.circularWarnings.map(warning => <p key={warning}>⚠ {warning}</p>)}
+                  </div>
+                )}
+
+                {!recipesLoading && ingredientUsage.summary.directRecipes === 0 && ingredientUsage.summary.totalDownstream === 0 ? (
+                  <div className="rounded-xl border border-dashed border-neutral-300 bg-neutral-50 p-6 text-center">
+                    <p className="text-sm font-semibold text-neutral-900">This ingredient is not currently linked to any recipe.</p>
+                    <button
+                      onClick={() => router.push(`/recipes?prefill=${encodeURIComponent(selectedItem.name)}`)}
+                      className="mt-3 rounded-lg bg-brand-600 px-4 py-2 text-sm font-bold text-white hover:bg-brand-700"
+                    >
+                      Add to Recipe
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="rounded-xl border border-neutral-200 overflow-hidden">
+                      <button
+                        onClick={() => setUsageSectionsOpen(prev => ({ ...prev, direct: !prev.direct }))}
+                        className="flex w-full items-center justify-between bg-neutral-50 px-4 py-3 text-left text-sm font-bold text-neutral-900"
+                      >
+                        Direct Usage
+                        {usageSectionsOpen.direct ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                      </button>
+                      {usageSectionsOpen.direct && (
+                        <div className="overflow-x-auto">
+                          <table className="w-full min-w-[760px] text-xs">
+                            <thead className="bg-white text-left uppercase tracking-wider text-neutral-500">
+                              <tr><th className="px-3 py-2">Recipe / Preparation Name</th><th>Type</th><th>Quantity Used</th><th>Unit</th><th>Recipe Yield</th><th>Cost Contribution</th><th className="px-3 text-right">Action</th></tr>
+                            </thead>
+                            <tbody>
+                              {ingredientUsage.direct.length > 0 ? ingredientUsage.direct.map((row: any) => (
+                                <tr key={row.id} className="border-t border-neutral-100">
+                                  <td className="px-3 py-2 font-semibold text-neutral-900">{row.recipeName}</td>
+                                  <td>{row.type}</td>
+                                  <td>{row.qty}</td>
+                                  <td>{row.unit}</td>
+                                  <td>{row.recipeYield}</td>
+                                  <td>${Number(row.costContribution || 0).toFixed(2)}</td>
+                                  <td className="px-3 text-right">
+                                    <button onClick={() => router.push(`/recipes?recipeId=${encodeURIComponent(row.recipe.id)}`)} className="rounded border border-brand-200 px-2 py-1 font-semibold text-brand-700 hover:bg-brand-50">View Recipe</button>
+                                  </td>
+                                </tr>
+                              )) : (
+                                <tr><td colSpan={7} className="px-3 py-5 text-center text-neutral-400">No direct usage matches the current filters.</td></tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="rounded-xl border border-neutral-200 overflow-hidden">
+                      <button
+                        onClick={() => setUsageSectionsOpen(prev => ({ ...prev, indirect: !prev.indirect }))}
+                        className="flex w-full items-center justify-between bg-neutral-50 px-4 py-3 text-left text-sm font-bold text-neutral-900"
+                      >
+                        Indirect Usage Through Preparations
+                        {usageSectionsOpen.indirect ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                      </button>
+                      {usageSectionsOpen.indirect && (
+                        <div className="overflow-x-auto">
+                          <table className="w-full min-w-[920px] text-xs">
+                            <thead className="bg-white text-left uppercase tracking-wider text-neutral-500">
+                              <tr><th className="px-3 py-2">Ingredient</th><th>Used Through Preparation</th><th>Downstream Recipe / Menu Item</th><th>Final Type</th><th>Estimated Ingredient Qty</th><th>Estimated Cost</th><th className="px-3 text-right">Action</th></tr>
+                            </thead>
+                            <tbody>
+                              {ingredientUsage.indirect.length > 0 ? ingredientUsage.indirect.map((row: any) => (
+                                <tr key={row.id} className="border-t border-neutral-100">
+                                  <td className="px-3 py-2 font-semibold text-neutral-900">{row.ingredientName}</td>
+                                  <td>{row.throughPreparation}</td>
+                                  <td><span className="font-semibold text-neutral-800">{row.downstreamName}</span><p className="mt-0.5 text-[10px] text-neutral-400">{row.path}</p></td>
+                                  <td>{row.finalType}</td>
+                                  <td>{Number(row.estimatedQty || 0).toFixed(4)} {row.unit}</td>
+                                  <td>${Number(row.costContribution || 0).toFixed(2)}</td>
+                                  <td className="px-3 text-right">
+                                    <button onClick={() => router.push(`/recipes?recipeId=${encodeURIComponent(row.recipe.id)}`)} className="rounded border border-brand-200 px-2 py-1 font-semibold text-brand-700 hover:bg-brand-50">View Recipe</button>
+                                  </td>
+                                </tr>
+                              )) : (
+                                <tr><td colSpan={7} className="px-3 py-5 text-center text-neutral-400">No indirect usage matches the current filters.</td></tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
 
             {/* ─────────────────────────────────────────────────
                  SECTION 1: SET FINAL STOCK COUNT (PRIMARY)
