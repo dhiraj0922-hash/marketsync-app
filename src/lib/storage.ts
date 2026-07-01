@@ -1,4 +1,5 @@
 import { supabase } from "@/lib/supabase";
+import { getCurrentUserId } from "@/lib/auth";
 import {
   normalizeLocationStatus,
   isActiveLocation,
@@ -4752,6 +4753,150 @@ export async function sendHqRequisitionNotification(
   }
 
   return { success: true };
+}
+
+export type RequisitionDraftLineInput = {
+  item_id?: string | null;
+  finished_good_id?: string | null;
+  catalog_item_id?: string | null;
+  source_type: 'hq_supplied' | 'local_vendor';
+  supplier_snapshot?: string | null;
+  pack_qty_snapshot?: number | null;
+  item_name_snapshot?: string | null;
+  unit_snapshot?: string | null;
+  source_commissary_snapshot?: string | null;
+  quantity_requested: number;
+  unit_price: number;
+  line_total?: number;
+};
+
+export type RequisitionDraftRpcResult = {
+  requisitionId: string;
+  status: string;
+  items: number;
+  totalAmount: number;
+};
+
+function normalizeDraftRpcResult(data: any): RequisitionDraftRpcResult {
+  const payload = Array.isArray(data) ? data[0] : data;
+  return {
+    requisitionId: String(payload?.requisition_id ?? payload?.requisitionId ?? ''),
+    status: String(payload?.status ?? ''),
+    items: Number(payload?.items ?? 0),
+    totalAmount: Number(payload?.total_amount ?? payload?.totalAmount ?? 0),
+  };
+}
+
+function mapDraftLineForRpc(line: RequisitionDraftLineInput) {
+  const sourceType = line.source_type === 'local_vendor' ? 'local_vendor' : 'hq_supplied';
+  return {
+    item_id: sourceType === 'hq_supplied' ? (line.finished_good_id ? null : (line.item_id ?? null)) : null,
+    finished_good_id: sourceType === 'hq_supplied' ? (line.finished_good_id ?? null) : null,
+    catalog_item_id: sourceType === 'local_vendor' ? (line.catalog_item_id ?? null) : null,
+    source_type: sourceType,
+    supplier_snapshot: line.supplier_snapshot ?? null,
+    pack_qty_snapshot: line.pack_qty_snapshot ?? 1,
+    item_name_snapshot: line.item_name_snapshot ?? null,
+    unit_snapshot: line.unit_snapshot ?? null,
+    source_commissary_snapshot: sourceType === 'local_vendor'
+      ? null
+      : (line.source_commissary_snapshot ?? 'Commissary HQ'),
+    quantity_requested: Number(line.quantity_requested ?? 0),
+    unit_price: Number(line.unit_price ?? 0),
+  };
+}
+
+export async function saveRequisitionDraft(
+  locationId: string,
+  notes: string,
+  lineItems: RequisitionDraftLineInput[]
+): Promise<{ success: boolean; data?: RequisitionDraftRpcResult; error?: any }> {
+  if (!locationId) {
+    return { success: false, error: { message: 'Location is required.' } };
+  }
+  if (!Array.isArray(lineItems) || lineItems.length === 0) {
+    return { success: false, error: { message: 'Add at least one item before saving a draft.' } };
+  }
+
+  const payload = lineItems.map(mapDraftLineForRpc);
+  const { data, error } = await supabase.rpc('save_requisition_draft', {
+    p_location_id: locationId,
+    p_notes: notes || '',
+    p_line_items: payload,
+  });
+
+  if (error) {
+    console.error('[saveRequisitionDraft] RPC failed', error);
+    return { success: false, error };
+  }
+
+  return { success: true, data: normalizeDraftRpcResult(data) };
+}
+
+export async function submitRequisitionDraft(
+  requisitionId: string,
+  locationId: string
+): Promise<{ success: boolean; data?: RequisitionDraftRpcResult; error?: any }> {
+  if (!requisitionId || !locationId) {
+    return { success: false, error: { message: 'Draft requisition and location are required.' } };
+  }
+
+  const { data, error } = await supabase.rpc('submit_requisition_draft', {
+    p_requisition_id: requisitionId,
+    p_location_id: locationId,
+  });
+
+  if (error) {
+    console.error('[submitRequisitionDraft] RPC failed', error);
+    return { success: false, error };
+  }
+
+  return { success: true, data: normalizeDraftRpcResult(data) };
+}
+
+export async function loadActiveRequisitionDraft(
+  locationId: string
+): Promise<{ success: boolean; data?: { requisition: any; items: any[] }; error?: any }> {
+  if (!locationId) {
+    return { success: false, error: { message: 'Location is required.' } };
+  }
+
+  const userId = await getCurrentUserId();
+  if (!userId) {
+    return { success: false, error: { message: 'Not authenticated.' } };
+  }
+
+  const { data: req, error: reqError } = await supabase
+    .from('requisitions')
+    .select('*')
+    .eq('location_id', locationId)
+    .eq('created_by', userId)
+    .eq('status', 'draft')
+    .order('updated_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (reqError) {
+    console.error('[loadActiveRequisitionDraft] requisition fetch failed', reqError);
+    return { success: false, error: reqError };
+  }
+
+  if (!req?.id) {
+    return { success: true, data: undefined };
+  }
+
+  const itemsRes = await loadRequisitionItems(req.id);
+  if (!itemsRes.success) {
+    return { success: false, error: itemsRes.error };
+  }
+
+  return {
+    success: true,
+    data: {
+      requisition: mapRequisitionToFrontend(req),
+      items: itemsRes.data ?? [],
+    },
+  };
 }
 
 
