@@ -2813,6 +2813,11 @@ const mapRequisitionToFrontend = (db: any) => ({
     rejectedBy:       db.rejected_by       ?? null,
     rejectedAt:       db.rejected_at       ?? null,
     rejectionReason:  db.rejection_reason  ?? null,
+    // ── Fulfillment completion audit (added by migration_requisition_fulfilled_at.sql)
+    // fulfilled_at is written by completeFulfillmentMovement() when status → 'fulfilled'.
+    // It is backfilled from MAX(requisition_items.fulfilled_at) for pre-migration rows.
+    fulfilledAt:      db.fulfilled_at      ?? null,
+    fulfilledBy:      db.fulfilled_by      ?? null,
 });
 
 const mapRequisitionToDB = (req: any) => ({
@@ -2869,6 +2874,7 @@ export async function updateRequisitionStatus(
     rejectedBy?:       string | null;
     rejectedAt?:       string | null;
     rejectionReason?:  string | null;
+    fulfilledBy?:      string | null;
   }
 ): Promise<{ success: boolean; error?: any }> {
   const cleanStatus = status.toLowerCase();
@@ -2880,6 +2886,12 @@ export async function updateRequisitionStatus(
     if (auditPayload.rejectedBy  !== undefined) patch.rejected_by       = auditPayload.rejectedBy;
     if (auditPayload.rejectedAt  !== undefined) patch.rejected_at       = auditPayload.rejectedAt;
     if (auditPayload.rejectionReason !== undefined) patch.rejection_reason = auditPayload.rejectionReason;
+    if (auditPayload.fulfilledBy !== undefined) patch.fulfilled_by      = auditPayload.fulfilledBy;
+  }
+  // Write fulfilled_at whenever status transitions to 'fulfilled' or 'partially_fulfilled'.
+  // This is the canonical completion timestamp used by the Completed Fulfillment report.
+  if (cleanStatus === 'fulfilled' || cleanStatus === 'partially_fulfilled') {
+    patch.fulfilled_at = new Date().toISOString();
   }
 
   const { error } = await supabase
@@ -8842,10 +8854,15 @@ export async function saveGratuitySettings(
 // ─── HQ Fulfillment Role Data Helpers ──────────────────────────────────────────
 
 export async function getFulfillmentSummary(): Promise<any[]> {
+  // OPEN statuses only — fulfilled requisitions belong in the Completed report,
+  // not the Open Queue / Pick Summary / Allocation Details tabs.
+  // 'fulfilled' is intentionally excluded here.
+  const OPEN_STATUSES = ['submitted', 'approved', 'partial', 'backordered'];
+
   const { data: reqs, error: reqsError } = await supabase
     .from('requisitions')
     .select('id, location, status, date, location_id')
-    .in('status', ['submitted', 'approved', 'partial', 'backordered', 'fulfilled']);
+    .in('status', OPEN_STATUSES);
     
   if (reqsError || !reqs || reqs.length === 0) return [];
   
@@ -8927,6 +8944,109 @@ export async function getFulfillmentItemBreakdown(itemName: string): Promise<any
   const summary = await getFulfillmentSummary();
   const group = summary.find(g => g.itemName === itemName);
   return group ? group.items : [];
+}
+
+// ----------------------------------------------------------------------------
+// COMPLETED FULFILLMENT REPORT
+// ----------------------------------------------------------------------------
+//
+// getFulfilledRequisitions() is the data source for the "Completed" tab on
+// the Fulfillment page.  It MUST:
+//   - Filter by fulfilled_at (NOT by req.date).
+//   - Include status = 'fulfilled' and 'partially_fulfilled'.
+//   - Return delivery ticket number and run number if generated.
+//   - Never appear in the Open Queue / Pick List views.
+//
+// fulfilled_at is written by updateRequisitionStatus() whenever status → fulfilled.
+// For pre-migration rows it was backfilled from MAX(requisition_items.fulfilled_at).
+//
+// Date range semantics: [fromIso, toIso] are YYYY-MM-DD strings (UTC day).
+// A null for either bound means "no bound in that direction".
+
+export type FulfilledReqFilter = {
+  fromIso?: string | null;   // inclusive
+  toIso?:   string | null;   // inclusive
+};
+
+export async function getFulfilledRequisitions(filter?: FulfilledReqFilter): Promise<any[]> {
+  let query = supabase
+    .from('requisitions')
+    .select('id, location, location_id, status, date, fulfilled_at, fulfilled_by, requestedby, items, total_amount')
+    .in('status', ['fulfilled', 'partially_fulfilled'])
+    .order('fulfilled_at', { ascending: false });
+
+  // Apply date bounds on fulfilled_at (a real timestamptz, not the text submission date)
+  if (filter?.fromIso) {
+    query = query.gte('fulfilled_at', filter.fromIso + 'T00:00:00.000Z');
+  }
+  if (filter?.toIso) {
+    query = query.lte('fulfilled_at', filter.toIso + 'T23:59:59.999Z');
+  }
+
+  const { data: reqs, error } = await query;
+  if (error || !reqs || reqs.length === 0) return [];
+
+  const reqIds = reqs.map(r => r.id);
+
+  // Fetch items + tickets in parallel
+  const [{ data: items }, { data: tickets }] = await Promise.all([
+    supabase
+      .from('requisition_items')
+      .select('id, requisition_id, item_name_snapshot, quantity_requested, allocated_qty, backorder_qty, unit_snapshot, fulfilled_at, fulfilled_by, pack_qty_snapshot, finished_good_id')
+      .in('requisition_id', reqIds),
+    supabase
+      .from('delivery_tickets')
+      .select('id, ticket_number, requisition_id, delivery_run_id, status')
+      .in('requisition_id', reqIds),
+  ]);
+
+  // Fetch run numbers for any delivery_run_ids present
+  const runIds = Array.from(new Set((tickets || []).map((t: any) => t.delivery_run_id).filter(Boolean)));
+  let runMap: Record<string, string> = {};
+  if (runIds.length > 0) {
+    const { data: runs } = await supabase
+      .from('delivery_runs')
+      .select('id, run_number')
+      .in('id', runIds);
+    for (const r of runs || []) runMap[r.id] = r.run_number;
+  }
+
+  return reqs.map(req => {
+    const reqItems  = (items  || []).filter((i: any) => i.requisition_id === req.id);
+    const ticket    = (tickets || []).find( (t: any) => t.requisition_id === req.id) ?? null;
+    return {
+      id:                  req.id,
+      requisitionNumber:   req.id,
+      locationName:        req.location   ?? 'Unknown Location',
+      locationId:          req.location_id,
+      status:              req.status,
+      submittedDate:       req.date,          // submission date (TEXT) — labelled correctly in UI
+      fulfilledAt:         req.fulfilled_at,  // real fulfillment timestamp
+      fulfilledBy:         req.fulfilled_by ?? req.requestedby ?? null,
+      itemCount:           reqItems.length,
+      totalAmount:         req.total_amount != null ? Number(req.total_amount) : 0,
+      allocatedQty:        reqItems.reduce((s: number, i: any) => s + Number(i.allocated_qty ?? 0), 0),
+      backorderQty:        reqItems.reduce((s: number, i: any) => s + Number(i.backorder_qty  ?? 0), 0),
+      // Delivery ticket
+      deliveryTicketId:    ticket?.id           ?? null,
+      deliveryTicketNumber: ticket?.ticket_number ?? null,
+      deliveryTicketStatus: ticket?.status        ?? null,
+      deliveryRunId:       ticket?.delivery_run_id ?? null,
+      deliveryRunNumber:   ticket?.delivery_run_id ? (runMap[ticket.delivery_run_id] ?? null) : null,
+      // Line items for the expanded detail view
+      items: reqItems.map((i: any) => ({
+        id:                i.id,
+        itemName:          i.item_name_snapshot ?? 'Unknown Item',
+        quantityRequested: Number(i.quantity_requested ?? 0),
+        allocatedQty:      Number(i.allocated_qty      ?? 0),
+        backorderQty:      Number(i.backorder_qty       ?? 0),
+        unit:              i.unit_snapshot ?? '',
+        packQty:           i.pack_qty_snapshot != null ? Number(i.pack_qty_snapshot) : null,
+        isFGMode:          !!i.finished_good_id,
+        fulfilledAt:       i.fulfilled_at,
+      })),
+    };
+  });
 }
 
 export async function saveFulfillmentAllocations(allocations: {

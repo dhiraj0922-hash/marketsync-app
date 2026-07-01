@@ -5,14 +5,15 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/components/AuthProvider";
-import { getFulfillmentSummary, saveFulfillmentAllocations, completeFulfillmentMovement, createDeliveryTicketFromRequisition, approveRequisition, rejectRequisition, getActiveDeliveryRuns, assignDeliveryTicketToRun, removeTicketFromDeliveryRun, getDeliveryTicketById } from "@/lib/storage";
+import { getFulfillmentSummary, getFulfilledRequisitions, saveFulfillmentAllocations, completeFulfillmentMovement, createDeliveryTicketFromRequisition, approveRequisition, rejectRequisition, getActiveDeliveryRuns, assignDeliveryTicketToRun, removeTicketFromDeliveryRun, getDeliveryTicketById } from "@/lib/storage";
 import { isHqFulfillment, isHqMaster, isHqOps } from "@/lib/roles";
-import { ChevronDown, ChevronRight, Search, Save, Check, RefreshCw, AlertTriangle, Play, Sparkles, Truck, PackageCheck, CheckCircle2, XSquare, Loader2, Printer, FileText, X, ExternalLink, List, AlignJustify, AlertOctagon, Calendar, CalendarRange, ChevronLeft, ChevronRight as ChevronRightIcon, Info } from "lucide-react";
+import { ChevronDown, ChevronRight, Search, Save, Check, RefreshCw, AlertTriangle, Play, Sparkles, Truck, PackageCheck, CheckCircle2, XSquare, Loader2, Printer, FileText, X, ExternalLink, List, AlignJustify, AlertOctagon, Calendar, CalendarRange, ChevronLeft, ChevronRight as ChevronRightIcon, Info, History, Clock } from "lucide-react";
 import { DeliveryTicketDrawer } from "@/components/DeliveryTicketDrawer";
 
 type PrintScope = "visible" | "locations" | "requisitions" | "items";
-type FulfillmentTab = "summary" | "allocation" | "backorders" | "print";
+type FulfillmentTab = "summary" | "allocation" | "backorders" | "completed" | "print";
 type DateFilterMode = "today" | "tomorrow" | "this_week" | "custom" | "range" | "all";
+type CompletedDateMode = "today" | "yesterday" | "this_week" | "custom" | "range" | "all_time";
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
 // Requisitions store `date` as the submission date (locale or ISO string).
@@ -175,6 +176,31 @@ export default function FulfillmentPage() {
   const [activeRuns, setActiveRuns] = useState<{ id: string; runNumber: string; label: string; status: string }[]>([]);
   const [runAssigning, setRunAssigning] = useState<string | null>(null); // ticketId being reassigned
 
+  // ── Completed Fulfillment Report state ──────────────────────────────────────
+  // Filtered by fulfilled_at (real completion timestamp), NOT by req.date.
+  const [completedData, setCompletedData] = useState<any[]>([]);
+  const [completedLoading, setCompletedLoading] = useState(false);
+  const [completedDateMode, setCompletedDateMode] = useState<CompletedDateMode>("today");
+  const [completedCustomDate, setCompletedCustomDate] = useState(todayIso());
+  const [completedRangeFrom, setCompletedRangeFrom] = useState(todayIso());
+  const [completedRangeTo, setCompletedRangeTo]   = useState(todayIso());
+  const [expandedCompleted, setExpandedCompleted] = useState<Record<string, boolean>>({});
+
+  /** Resolved [fromIso, toIso] for the Completed tab's date filter. */
+  const completedDateRange = useMemo((): [string | null, string | null] => {
+    const t   = todayIso();
+    const yes = (() => { const d = new Date(); d.setDate(d.getDate() - 1); return toIso(d); })();
+    const mon = (() => { const d = new Date(); d.setDate(d.getDate() - d.getDay() + (d.getDay() === 0 ? -6 : 1)); return toIso(d); })();
+    switch (completedDateMode) {
+      case "today":     return [t, t];
+      case "yesterday": return [yes, yes];
+      case "this_week": return [mon, t];
+      case "custom":    return completedCustomDate ? [completedCustomDate, completedCustomDate] : [t, t];
+      case "range":     return [completedRangeFrom || t, completedRangeTo || t];
+      case "all_time":  return [null, null];
+    }
+  }, [completedDateMode, completedCustomDate, completedRangeFrom, completedRangeTo]);
+
   const [rejectModalReqId, setRejectModalReqId] = useState<string | null>(null);
   const [rejectionReason, setRejectionReason] = useState("");
   const [rejectActionLoading, setRejectActionLoading] = useState(false);
@@ -283,6 +309,21 @@ export default function FulfillmentPage() {
       return () => clearTimeout(t);
     }
   }, [toast]);
+
+  // Load completed (fulfilled) requisitions whenever the completed date filter changes.
+  // Uses fulfilled_at — NOT req.date — so fulfilled requisitions are always visible
+  // regardless of when they were submitted.
+  useEffect(() => {
+    let cancelled = false;
+    setCompletedLoading(true);
+    const [from, to] = completedDateRange;
+    getFulfilledRequisitions({ fromIso: from ?? undefined, toIso: to ?? undefined })
+      .then(rows => { if (!cancelled) setCompletedData(rows); })
+      .catch(() => { if (!cancelled) setCompletedData([]); })
+      .finally(() => { if (!cancelled) setCompletedLoading(false); });
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [completedDateRange]);
 
   // Guard access
   const isAllowed = isHqMaster(user) || isHqOps(user) || isHqFulfillment(user);
@@ -785,11 +826,12 @@ export default function FulfillmentPage() {
       {/* ── Tab strip ── */}
       {(() => {
         const backorderCount = filteredData.reduce((s: number, g: any) => s + g.items.filter((it: any) => Number(it.backorderQty ?? 0) > 0).length, 0);
-        const tabs: { id: FulfillmentTab; label: string; icon: React.ReactNode; badge?: number }[] = [
-          { id: "summary",    label: "Pick Summary",       icon: <List className="h-3.5 w-3.5" /> },
-          { id: "allocation", label: "Allocation Details", icon: <AlignJustify className="h-3.5 w-3.5" /> },
-          { id: "backorders", label: "Backorders",         icon: <AlertOctagon className="h-3.5 w-3.5" />, badge: backorderCount },
-          { id: "print",      label: "Print Pick List",   icon: <Printer className="h-3.5 w-3.5" /> },
+        const tabs: { id: FulfillmentTab; label: string; icon: React.ReactNode; badge?: number; badgeColor?: string }[] = [
+          { id: "summary",    label: "Open Queue",          icon: <List className="h-3.5 w-3.5" /> },
+          { id: "allocation", label: "Allocation Details",  icon: <AlignJustify className="h-3.5 w-3.5" /> },
+          { id: "backorders", label: "Backorders",          icon: <AlertOctagon className="h-3.5 w-3.5" />, badge: backorderCount },
+          { id: "completed",  label: "Completed",           icon: <History className="h-3.5 w-3.5" />, badge: completedData.length > 0 ? completedData.length : undefined, badgeColor: "bg-emerald-100 text-emerald-700" },
+          { id: "print",      label: "Print Pick List",     icon: <Printer className="h-3.5 w-3.5" /> },
         ];
         return (
           <div className="flex items-center gap-1 border-b border-neutral-200 overflow-x-auto">
@@ -809,7 +851,7 @@ export default function FulfillmentPage() {
                 {tab.icon}
                 {tab.label}
                 {tab.badge != null && tab.badge > 0 && (
-                  <span className="ml-0.5 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-700">
+                  <span className={`ml-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-bold ${tab.badgeColor ?? "bg-amber-100 text-amber-700"}`}>
                     {tab.badge}
                   </span>
                 )}
@@ -963,6 +1005,238 @@ export default function FulfillmentPage() {
               </Card>
             );
           })()}
+        </div>
+      ) : activeTab === "completed" ? (
+        /* ── COMPLETED FULFILLMENT REPORT ── */
+        <div className="space-y-4">
+          {/* Date filter bar */}
+          <Card className="shadow-sm border-neutral-200">
+            <CardContent className="flex flex-wrap items-center gap-2 px-4 py-3">
+              <div className="flex items-center gap-1.5 mr-1">
+                <Clock className="h-4 w-4 text-emerald-600" />
+                <span className="text-xs font-bold text-neutral-600 uppercase tracking-wide">Fulfilled Date</span>
+              </div>
+              {(["today", "yesterday", "this_week", "custom", "range", "all_time"] as CompletedDateMode[]).map(m => {
+                const labels: Record<CompletedDateMode, string> = {
+                  today: "Today", yesterday: "Yesterday", this_week: "This Week",
+                  custom: "Custom Date", range: "Date Range", all_time: "All Time",
+                };
+                return (
+                  <button
+                    key={m}
+                    onClick={() => setCompletedDateMode(m)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                      completedDateMode === m
+                        ? "bg-emerald-600 text-white shadow-sm"
+                        : "bg-neutral-100 text-neutral-600 hover:bg-neutral-200"
+                    }`}
+                  >
+                    {labels[m]}
+                  </button>
+                );
+              })}
+              {completedDateMode === "custom" && (
+                <input
+                  type="date"
+                  value={completedCustomDate}
+                  onChange={e => setCompletedCustomDate(e.target.value)}
+                  className="ml-1 px-2.5 py-1.5 text-xs border border-neutral-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                />
+              )}
+              {completedDateMode === "range" && (
+                <div className="flex items-center gap-1.5 ml-1">
+                  <input type="date" value={completedRangeFrom} onChange={e => setCompletedRangeFrom(e.target.value)}
+                    className="px-2.5 py-1.5 text-xs border border-neutral-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-emerald-500" />
+                  <span className="text-neutral-400 text-xs">–</span>
+                  <input type="date" value={completedRangeTo} onChange={e => setCompletedRangeTo(e.target.value)}
+                    className="px-2.5 py-1.5 text-xs border border-neutral-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-emerald-500" />
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Stats bar */}
+          {!completedLoading && completedData.length > 0 && (
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-center">
+                <div className="text-2xl font-black text-emerald-700">{completedData.length}</div>
+                <div className="text-[10px] font-bold text-emerald-600 uppercase tracking-wide mt-0.5">Fulfilled</div>
+              </div>
+              <div className="bg-neutral-50 border border-neutral-200 rounded-xl p-3 text-center">
+                <div className="text-2xl font-black text-neutral-700">
+                  {new Set(completedData.map(r => r.locationId ?? r.locationName)).size}
+                </div>
+                <div className="text-[10px] font-bold text-neutral-500 uppercase tracking-wide mt-0.5">Locations</div>
+              </div>
+              <div className="bg-neutral-50 border border-neutral-200 rounded-xl p-3 text-center">
+                <div className="text-2xl font-black text-neutral-700">
+                  {completedData.filter(r => r.deliveryTicketId).length}
+                </div>
+                <div className="text-[10px] font-bold text-neutral-500 uppercase tracking-wide mt-0.5">With Tickets</div>
+              </div>
+              <div className="bg-neutral-50 border border-neutral-200 rounded-xl p-3 text-center">
+                <div className="text-2xl font-black text-neutral-700">
+                  {completedData.filter(r => r.backorderQty > 0).length}
+                </div>
+                <div className="text-[10px] font-bold text-neutral-500 uppercase tracking-wide mt-0.5">Had Backorders</div>
+              </div>
+            </div>
+          )}
+
+          {/* Completed list */}
+          {completedLoading ? (
+            <div className="flex items-center justify-center py-16 gap-3">
+              <Loader2 className="h-5 w-5 animate-spin text-emerald-600" />
+              <span className="text-sm font-semibold text-neutral-500">Loading completed requisitions…</span>
+            </div>
+          ) : completedData.length === 0 ? (
+            <Card className="p-12 text-center border-dashed border-neutral-300">
+              <History className="h-10 w-10 text-neutral-300 mx-auto mb-3" />
+              <p className="text-sm font-bold text-neutral-700">No fulfilled requisitions</p>
+              <p className="text-xs text-neutral-400 mt-1">
+                {completedDateMode === "today"
+                  ? "No requisitions were fulfilled today."
+                  : completedDateMode === "yesterday"
+                  ? "No requisitions were fulfilled yesterday."
+                  : "No fulfilled requisitions in this date range."}
+              </p>
+              <p className="text-xs text-neutral-400 mt-2 italic">
+                Note: filtering by fulfilled date, not submission date.
+              </p>
+            </Card>
+          ) : (
+            <Card className="overflow-hidden border-emerald-200 shadow-sm">
+              <CardHeader className="bg-emerald-50 py-3 px-5 border-b border-emerald-100">
+                <CardTitle className="text-sm font-bold text-emerald-900 flex items-center gap-2">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                  {completedData.length} fulfilled requisition{completedData.length !== 1 ? "s" : ""}
+                  <span className="text-xs font-normal text-emerald-600 ml-1">— sorted by fulfilled date, newest first</span>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="p-0">
+                <Table>
+                  <TableHeader className="bg-emerald-50/40 text-xs text-neutral-500 uppercase tracking-wider">
+                    <TableRow>
+                      <TableHead className="px-5 py-2.5 w-[40px]"></TableHead>
+                      <TableHead className="px-5 py-2.5">Requisition #</TableHead>
+                      <TableHead className="py-2.5">Location</TableHead>
+                      <TableHead className="py-2.5">Fulfilled At</TableHead>
+                      <TableHead className="py-2.5 hidden sm:table-cell">Fulfilled By</TableHead>
+                      <TableHead className="py-2.5 text-center hidden sm:table-cell">Items</TableHead>
+                      <TableHead className="py-2.5 hidden md:table-cell">Delivery Ticket</TableHead>
+                      <TableHead className="py-2.5 hidden md:table-cell">Run #</TableHead>
+                      <TableHead className="py-2.5 text-center">Status</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {completedData.map(req => {
+                      const isExpanded = !!expandedCompleted[req.id];
+                      const fulfilledDate = req.fulfilledAt
+                        ? new Date(req.fulfilledAt).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit" })
+                        : "—";
+                      const hasBackorder = req.backorderQty > 0;
+                      return (
+                        <>
+                          <TableRow
+                            key={req.id}
+                            className="hover:bg-emerald-50/30 cursor-pointer"
+                            onClick={() => setExpandedCompleted(prev => ({ ...prev, [req.id]: !prev[req.id] }))}
+                          >
+                            <TableCell className="px-5 py-3">
+                              {isExpanded ? <ChevronDown className="h-4 w-4 text-emerald-600" /> : <ChevronRight className="h-4 w-4 text-neutral-400" />}
+                            </TableCell>
+                            <TableCell className="px-5 py-3 font-mono text-xs font-semibold text-neutral-700">
+                              {req.requisitionNumber}
+                            </TableCell>
+                            <TableCell className="py-3 text-sm font-medium">{req.locationName}</TableCell>
+                            <TableCell className="py-3 text-sm">
+                              <div className="font-semibold text-emerald-700">{fulfilledDate}</div>
+                              {req.submittedDate && (
+                                <div className="text-[10px] text-neutral-400 mt-0.5">Submitted: {req.submittedDate}</div>
+                              )}
+                            </TableCell>
+                            <TableCell className="py-3 text-sm text-neutral-600 hidden sm:table-cell">
+                              {req.fulfilledBy ?? <span className="text-neutral-300 italic text-xs">—</span>}
+                            </TableCell>
+                            <TableCell className="py-3 text-center hidden sm:table-cell">
+                              <span className="text-sm font-semibold">{req.itemCount}</span>
+                            </TableCell>
+                            <TableCell className="py-3 hidden md:table-cell">
+                              {req.deliveryTicketId ? (
+                                <button
+                                  className="inline-flex items-center gap-1 text-xs font-semibold text-blue-700 bg-blue-50 border border-blue-200 rounded px-2 py-0.5 hover:bg-blue-100 transition-colors"
+                                  onClick={e => { e.stopPropagation(); handleOpenDeliveryTicket(req.deliveryTicketId, req.deliveryTicketNumber); }}
+                                >
+                                  <FileText className="h-3 w-3" />
+                                  {req.deliveryTicketNumber ?? req.deliveryTicketId.slice(0, 8)}
+                                </button>
+                              ) : <span className="text-neutral-300 text-xs italic">None</span>}
+                            </TableCell>
+                            <TableCell className="py-3 hidden md:table-cell">
+                              {req.deliveryRunNumber
+                                ? <span className="text-xs font-semibold text-neutral-700 bg-neutral-100 border border-neutral-200 rounded px-2 py-0.5">{req.deliveryRunNumber}</span>
+                                : <span className="text-neutral-300 text-xs italic">—</span>}
+                            </TableCell>
+                            <TableCell className="py-3 text-center">
+                              <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                                req.status === "fulfilled"
+                                  ? "bg-emerald-100 text-emerald-700"
+                                  : "bg-amber-100 text-amber-700"
+                              }`}>
+                                {req.status === "fulfilled" ? "Fulfilled" : "Partial"}
+                                {hasBackorder && " + BO"}
+                              </span>
+                            </TableCell>
+                          </TableRow>
+
+                          {/* Expanded line items */}
+                          {isExpanded && (
+                            <TableRow key={`${req.id}-expanded`} className="bg-neutral-50/60">
+                              <TableCell colSpan={9} className="px-10 py-3">
+                                <div className="text-xs font-bold text-neutral-500 uppercase tracking-wide mb-2">Line Items</div>
+                                <div className="space-y-1.5">
+                                  {req.items.map((li: any, idx: number) => {
+                                    const pq = li.packQty && li.packQty > 0 ? li.packQty : null;
+                                    const reqLabel = li.isFGMode && pq
+                                      ? `${li.quantityRequested} pack${li.quantityRequested !== 1 ? "s" : ""} (${li.quantityRequested * pq} ${li.unit || "ea"})`
+                                      : `${li.quantityRequested} ${li.unit || "ea"}`;
+                                    const allocLabel = li.isFGMode && pq
+                                      ? `${li.allocatedQty} pack${li.allocatedQty !== 1 ? "s" : ""} (${li.allocatedQty * pq} ${li.unit || "ea"})`
+                                      : `${li.allocatedQty} ${li.unit || "ea"}`;
+                                    return (
+                                      <div key={idx} className="flex items-center justify-between text-sm py-1 border-b border-neutral-200 border-dashed last:border-0">
+                                        <span className="font-medium text-neutral-800 min-w-0 flex-1 truncate">{li.itemName}</span>
+                                        <div className="flex items-center gap-4 ml-4 shrink-0">
+                                          <div className="text-right">
+                                            <div className="text-[10px] text-neutral-400">Requested</div>
+                                            <div className="font-semibold text-neutral-700">{reqLabel}</div>
+                                          </div>
+                                          <div className="text-right">
+                                            <div className="text-[10px] text-neutral-400">Allocated</div>
+                                            <div className="font-semibold text-emerald-700">{allocLabel}</div>
+                                          </div>
+                                          {li.backorderQty > 0 && (
+                                            <div className="text-right">
+                                              <div className="text-[10px] text-neutral-400">Backorder</div>
+                                              <div className="font-semibold text-amber-700">{li.backorderQty} {li.unit || "ea"}</div>
+                                            </div>
+                                          )}
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </TableCell>
+                            </TableRow>
+                          )}
+                        </>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+          )}
         </div>
       ) : (
         /* ── PICK SUMMARY tab (default) + ALLOCATION DETAILS tab ── */
