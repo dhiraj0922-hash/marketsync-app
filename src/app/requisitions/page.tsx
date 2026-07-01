@@ -59,13 +59,14 @@ import {
   createDeliveryTicketFromRequisition,
   finalizeRequisitionFulfillment,
   getDeliveryTicketForRequisition,
+  getDeliveryTicketById,
   saveRequisitionEdits,
   type SaleItem,
   type OutletCatalogItem,
 } from "@/lib/storage";
+import { DeliveryTicketDrawer } from "@/components/DeliveryTicketDrawer";
 import {
   getCurrentUserProfile,
-  getCurrentUserId,
   clearProfileCache,
   type UserProfile,
 } from "@/lib/auth";
@@ -1543,6 +1544,14 @@ function HQAdminView({
   // Cache line items per req id so table rows show real values once a req is opened
   const [reqItemsCache, setReqItemsCache] = useState<Map<string, any[]>>(new Map());
 
+  // ── Delivery Ticket Drawer ──────────────────────────────────────────────────────────
+  // Used when hq_fulfillment (or any role) clicks "View Delivery Ticket".
+  // Non-fulfillment roles navigate to /deliveries instead (existing behavior).
+  const [dtDrawerTicket, setDtDrawerTicket] = useState<any | null>(null);
+  const [dtLoading, setDtLoading] = useState(false);
+
+  const isHqFulfillmentUser = isHqFulfillment(profile);
+
   // ── Rejection modal state ─────────────────────────────────────────────────
   const [rejectModalReqId, setRejectModalReqId] = useState<string | null>(null);
   const [rejectionReason, setRejectionReason] = useState("");
@@ -2002,9 +2011,38 @@ function HQAdminView({
   const handleDeliveryTicketAction = async () => {
     if (!selectedReq) return;
     if (deliveryTicketForReq) {
+      // hq_fulfillment: open full ticket drawer inline — they can't access /deliveries
+      if (isHqFulfillmentUser) {
+        console.log("[fulfillment-ticket-open]", {
+          deliveryTicketId: deliveryTicketForReq.id,
+          deliveryTicketNumber: deliveryTicketForReq.ticketNumber,
+          href: typeof window !== "undefined" ? window.location.href : "",
+        });
+        setDtLoading(true);
+        try {
+          // Always fetch the full ticket (with items + run) for the drawer
+          const res = await getDeliveryTicketById(deliveryTicketForReq.id);
+          console.log("[fulfillment-ticket-deeplink]", {
+            ticketId: deliveryTicketForReq.id,
+            loadedTicketId: res.data?.id,
+            loadedTicketNumber: res.data?.ticketNumber,
+          });
+          if (res.success && res.data) {
+            setDtDrawerTicket(res.data);
+          } else {
+            alert(`Could not load delivery ticket: ${res.error?.message ?? "Unknown error"}`);
+          }
+        } finally {
+          setDtLoading(false);
+        }
+        return;
+      }
+      // All other roles: navigate to /deliveries (existing behavior)
       router.push("/deliveries");
       return;
     }
+    // Ticket does not exist yet — generate it (hq_fulfillment cannot reach this branch
+    // since the button is hidden for them when no ticket exists)
     setDeliveryTicketLoading(true);
     const res = await createDeliveryTicketFromRequisition(selectedReq.id);
     setDeliveryTicketLoading(false);
@@ -2453,14 +2491,16 @@ function HQAdminView({
                     </span>
                   </div>
                   <div className="flex items-center gap-3">
-                    {["approved", "fulfilled"].includes((selectedReq?.status ?? "").toLowerCase()) && (
+                    {/* Ticket button: hq_fulfillment only sees it when a ticket exists. */}
+                    {["approved", "fulfilled"].includes((selectedReq?.status ?? "").toLowerCase()) &&
+                     (deliveryTicketForReq || !isHqFulfillmentUser) && (
                       <button
                         onClick={handleDeliveryTicketAction}
-                        disabled={deliveryTicketLoading}
+                        disabled={deliveryTicketLoading || dtLoading}
                         className="px-4 py-2 text-sm font-medium bg-white border border-brand-200 text-brand-700 rounded-lg hover:bg-brand-50 transition-colors shadow-sm flex items-center gap-2 disabled:opacity-50"
                       >
                         <Truck className="h-4 w-4" />
-                        {deliveryTicketLoading
+                        {(deliveryTicketLoading || dtLoading)
                           ? "Checking Ticket..."
                           : deliveryTicketForReq
                             ? "View Delivery Ticket"
@@ -3532,6 +3572,25 @@ function HQAdminView({
         </div>
       )}
     </DarkPageShell>
+
+    {/* ── Delivery Ticket Drawer ──────────────────────────────────────────────
+       Opened by hq_fulfillment clicking "View Delivery Ticket". Other roles
+       navigate to /deliveries and use the full deliveries page instead. */}
+    <DeliveryTicketDrawer
+      ticket={dtDrawerTicket}
+      onClose={() => setDtDrawerTicket(null)}
+      onRefresh={async () => {
+        if (dtDrawerTicket?.id) {
+          const res = await getDeliveryTicketById(dtDrawerTicket.id);
+          if (res.success && res.data) setDtDrawerTicket(res.data);
+        }
+      }}
+      user={profile ? { id: profile.id, email: "", name: profile.fullName ?? "", role: profile.role ?? null, locationId: profile.locationId ?? null } : null}
+      canEditAdmin={isHqMaster(profile)}
+      canActOnTicket={isHqMaster(profile) || isHqOps(profile)}
+      onToast={() => { /* requisitions page has no toast banner — could add one in future */ }}
+    />
+    </>
   );
 }
 
