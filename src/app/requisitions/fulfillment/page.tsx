@@ -614,18 +614,26 @@ export default function FulfillmentPage() {
         </Card>
       ) : activeTab === "backorders" ? (
         /* ── BACKORDERS TAB ── */
+        /* Safeguard 8: Item, Location, Requisition, Backordered Qty, Note, Follow-up */
+        /* Safeguard 8: do not show empty backorder section when no backorders exist */
         <div className="space-y-2">
           {(() => {
             const boRows = filteredData.flatMap(g =>
               g.items
                 .filter((it: any) => Number(it.backorderQty ?? 0) > 0)
-                .map((it: any) => ({ ...it, itemName: g.itemName, isFGMode: g.isFGMode, packQty: g.packQty }))
+                .map((it: any) => ({
+                  ...it,
+                  itemName: g.itemName,
+                  isFGMode: it.isFGMode ?? g.isFGMode,
+                  packQty:  it.packQty  ?? g.packQty,
+                  unit:     it.unit     ?? g.unit,
+                }))
             );
             if (boRows.length === 0) return (
               <Card className="p-8 text-center border-dashed border-neutral-300">
                 <Check className="h-8 w-8 text-emerald-400 mx-auto mb-2" />
                 <p className="text-sm font-semibold text-neutral-900">No Backorders</p>
-                <p className="text-xs text-neutral-500 mt-1">All allocated quantities match requested quantities.</p>
+                <p className="text-xs text-neutral-500 mt-1">All allocated quantities are fully covered.</p>
               </Card>
             );
             return (
@@ -641,37 +649,36 @@ export default function FulfillmentPage() {
                       <TableRow>
                         <TableHead className="px-5 py-2.5">Item</TableHead>
                         <TableHead className="py-2.5">Location</TableHead>
-                        <TableHead className="py-2.5">Req #</TableHead>
-                        <TableHead className="py-2.5 text-center">Requested</TableHead>
-                        <TableHead className="py-2.5 text-center">Allocated</TableHead>
-                        <TableHead className="py-2.5 text-center">Backordered</TableHead>
-                        <TableHead className="py-2.5">Note</TableHead>
+                        <TableHead className="py-2.5">Requisition</TableHead>
+                        <TableHead className="py-2.5 text-center">Backordered Qty</TableHead>
+                        <TableHead className="py-2.5">Fulfillment Note</TableHead>
+                        <TableHead className="py-2.5">Follow-up Status</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {boRows.map((row: any) => (
-                        <TableRow key={`bo-${row.id}`} className="bg-amber-50/20 hover:bg-amber-50">
-                          <TableCell className="px-5 py-3 font-semibold text-sm">{row.itemName}</TableCell>
-                          <TableCell className="py-3 text-sm">{row.locationName}</TableCell>
-                          <TableCell className="py-3 font-mono text-xs">{row.requisitionNumber || row.requisitionId}</TableCell>
-                          <TableCell className="py-3 text-center text-sm">
-                            {row.isFGMode
-                              ? `${row.quantityRequested} pack${row.quantityRequested !== 1 ? "s" : ""}`
-                              : `${row.quantityRequested} ${row.unit || "ea"}`}
-                          </TableCell>
-                          <TableCell className="py-3 text-center text-sm font-semibold text-brand-600">
-                            {row.isFGMode
-                              ? `${row.allocatedQty} pack${row.allocatedQty !== 1 ? "s" : ""}`
-                              : `${row.allocatedQty} ${row.unit || "ea"}`}
-                          </TableCell>
-                          <TableCell className="py-3 text-center text-sm font-bold text-amber-700">
-                            {row.isFGMode
-                              ? `${row.backorderQty} pack${row.backorderQty !== 1 ? "s" : ""}`
-                              : `${row.backorderQty} ${row.unit || "ea"}`}
-                          </TableCell>
-                          <TableCell className="py-3 text-xs text-neutral-500">{row.fulfillmentNote || "—"}</TableCell>
-                        </TableRow>
-                      ))}
+                      {boRows.map((row: any) => {
+                        const pq = row.packQty != null && Number(row.packQty) > 0
+                          ? Number(row.packQty) : null;
+                        const boQtyLabel = row.isFGMode
+                          ? (pq
+                            ? `${row.backorderQty} pack${row.backorderQty !== 1 ? "s" : ""} (${row.backorderQty * pq} ${row.unit || "ea"})`
+                            : `${row.backorderQty} packs`)
+                          : `${row.backorderQty} ${row.unit || "ea"}`;
+                        return (
+                          <TableRow key={`bo-${row.id}`} className="bg-amber-50/20 hover:bg-amber-50">
+                            <TableCell className="px-5 py-3 font-semibold text-sm">{row.itemName}</TableCell>
+                            <TableCell className="py-3 text-sm">{row.locationName}</TableCell>
+                            <TableCell className="py-3 font-mono text-xs">{row.requisitionNumber || row.requisitionId}</TableCell>
+                            <TableCell className="py-3 text-center text-sm font-bold text-amber-700">{boQtyLabel}</TableCell>
+                            <TableCell className="py-3 text-xs text-neutral-500">{row.fulfillmentNote || <span className="text-neutral-300 italic">—</span>}</TableCell>
+                            <TableCell className="py-3 text-xs">
+                              <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-700">
+                                Pending
+                              </span>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
                     </TableBody>
                   </Table>
                 </CardContent>
@@ -702,7 +709,10 @@ export default function FulfillmentPage() {
                       <CardDescription className="text-xs mt-0.5">
                         {group.isFGMode ? (
                           <>
-                            Pack Size: {group.packQty} {group.unit || "ea"} · Total Required: <span className="font-bold text-neutral-900">{group.totalRequested} pack{group.totalRequested !== 1 ? 's' : ''} ({group.totalRequested * group.packQty} {group.unit || "ea"})</span>
+                            {group.packQty != null && Number(group.packQty) > 0
+                              ? <>Pack Size: {group.packQty} {group.unit || "ea"} · Total Pull: <span className="font-bold text-neutral-900">{group.totalRequested} pack{group.totalRequested !== 1 ? 's' : ''}</span> = <span className="font-bold text-neutral-900">{group.totalRequested * Number(group.packQty)} {group.unit || "ea"}</span></>
+                              : <span className="text-amber-700 font-semibold">Pack configuration missing — confirm before picking</span>
+                            }
                           </>
                         ) : (
                           <>

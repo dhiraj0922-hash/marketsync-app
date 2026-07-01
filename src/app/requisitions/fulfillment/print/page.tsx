@@ -9,17 +9,6 @@ import { getFulfillmentSummary } from "@/lib/storage";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type FulfillmentGroup = {
-  itemName: string;
-  unit: string;
-  isFGMode: boolean;
-  packQty: number;
-  totalRequested: number;
-  totalAllocated: number;
-  totalBackorder: number;
-  items: FulfillmentRow[];
-};
-
 type FulfillmentRow = {
   id: string;
   requisitionId: string;
@@ -33,111 +22,139 @@ type FulfillmentRow = {
   backorderQty: number;
   fulfillmentNote: string;
   isFGMode: boolean;
-  packQty: number;
-  unit: string;
+  packQty: number | null;
+  unit: string | null;
+  sourceType: string | null;
+};
+
+type FulfillmentGroup = {
+  itemName: string;
+  unit: string | null;
+  isFGMode: boolean;
+  packQty: number | null;
+  totalRequested: number;
+  totalAllocated: number;
+  totalBackorder: number;
+  items: FulfillmentRow[];
 };
 
 // ─── URL param helpers ────────────────────────────────────────────────────────
 
-const asBool = (value: string | null, fallback: boolean) => {
-  if (value == null) return fallback;
-  return value === "1" || value === "true";
-};
+const asBool = (v: string | null, fallback: boolean) =>
+  v == null ? fallback : v === "1" || v === "true";
 
-const splitParam = (value: string | null) =>
-  String(value ?? "")
+const splitParam = (v: string | null) =>
+  String(v ?? "")
     .split(",")
-    .map((v) => decodeURIComponent(v).trim())
+    .map((s) => decodeURIComponent(s).trim())
     .filter(Boolean);
 
-// ─── Pack display helpers ─────────────────────────────────────────────────────
+// ─── Pack quantity helpers ────────────────────────────────────────────────────
 //
-// Quantity semantics (mirrors storage.ts):
-//   isFGMode = true  → quantityRequested / allocatedQty are PACK COUNTS
+// Safeguard 2 / 3 / 4:
+//
+//   isFGMode = true  → totalRequested / allocatedQty are PACK COUNTS
 //                      base qty = packCount × packQty
-//   isFGMode = false → quantities are already BASE UNITS
+//                      packQty must be > 0 to compute base quantity
 //
-// These helpers are the single source of truth for how we display
-// pick quantities throughout the document.
+//   isFGMode = false → quantities are already BASE UNITS
+//                      "Loose" — no pack math
+//
+//   packQty null / 0 → configuration missing; never invent pack math
 
-function packSizeLabel(group: FulfillmentGroup): string {
-  if (!group.isFGMode) return group.unit || "ea";
-  if (group.packQty > 1) return `${group.packQty} ${group.unit || "ea"} / pack`;
-  return `${group.unit || "ea"} / ea`;
+function isPackValid(g: { isFGMode: boolean; packQty: number | null }): boolean {
+  return g.isFGMode && g.packQty != null && Number(g.packQty) > 0;
 }
 
-function pullLabel(group: FulfillmentGroup): string {
-  if (!group.isFGMode) return fmtBase(group.totalAllocated, group.unit);
-  const packs = group.totalAllocated;
-  return packs === 0 ? "0 packs" : `${packs} pack${packs !== 1 ? "s" : ""}`;
+function fmtNum(n: number): string {
+  return Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/\.?0+$/, "");
 }
 
-function totalStagedLabel(group: FulfillmentGroup): string {
-  if (!group.isFGMode) return fmtBase(group.totalAllocated, group.unit);
-  return fmtBase(group.totalAllocated * (group.packQty || 1), group.unit);
+function fmtBase(qty: number, unit: string | null): string {
+  return unit ? `${fmtNum(qty)} ${unit}` : fmtNum(qty);
 }
 
-function rowPullLabel(row: FulfillmentRow): string {
-  if (!row.isFGMode) return fmtBase(row.allocatedQty, row.unit);
-  const packs = row.allocatedQty;
-  return packs === 0 ? "0 packs" : `${packs} pack${packs !== 1 ? "s" : ""}`;
+/** Returns the warehouse-facing "Pull Qty" string for a GROUP. */
+function groupPullLabel(g: FulfillmentGroup): string {
+  if (!g.isFGMode) {
+    // Loose / raw: pull = total allocated in base units
+    return fmtBase(g.totalAllocated, g.unit);
+  }
+  if (!isPackValid(g)) {
+    return "—";
+  }
+  const packs = g.totalAllocated;
+  return `${packs} pack${packs !== 1 ? "s" : ""}`;
 }
 
-function rowBaseLabel(row: FulfillmentRow): string {
-  if (!row.isFGMode) return fmtBase(row.allocatedQty, row.unit);
-  return fmtBase(row.allocatedQty * (row.packQty || 1), row.unit);
+/** Returns the "Total to Stage" string for a GROUP. */
+function groupTotalStaged(g: FulfillmentGroup): string {
+  if (!g.isFGMode) {
+    return fmtBase(g.totalAllocated, g.unit);
+  }
+  if (!isPackValid(g)) {
+    return "—";
+  }
+  return fmtBase(g.totalAllocated * Number(g.packQty), g.unit);
 }
 
+/** Pack size label (e.g. "16 oz / pack"). */
+function packSizeLabel(g: FulfillmentGroup): string {
+  if (!g.isFGMode) return "Loose";
+  if (!isPackValid(g)) return "—";
+  return `${fmtNum(Number(g.packQty))} ${g.unit || "ea"} / pack`;
+}
+
+/** Per-row requested label. */
 function rowRequestedLabel(row: FulfillmentRow): string {
   if (!row.isFGMode) return fmtBase(row.quantityRequested, row.unit);
+  if (!isPackValid(row)) return `${fmtNum(row.quantityRequested)} packs (pack config missing)`;
   const packs = row.quantityRequested;
-  const base = packs * (row.packQty || 1);
+  const base = packs * Number(row.packQty);
   return `${packs} pack${packs !== 1 ? "s" : ""} (${fmtBase(base, row.unit)})`;
 }
 
+/** Per-row allocated label. */
+function rowAllocLabel(row: FulfillmentRow): string {
+  if (!row.isFGMode) return fmtBase(row.allocatedQty, row.unit);
+  if (!isPackValid(row)) return `${fmtNum(row.allocatedQty)} packs`;
+  const packs = row.allocatedQty;
+  return `${packs} pack${packs !== 1 ? "s" : ""} (${fmtBase(packs * Number(row.packQty), row.unit)})`;
+}
+
+/** Per-row backorder label. */
 function rowBackorderLabel(row: FulfillmentRow): string {
   if (row.backorderQty === 0) return "—";
   if (!row.isFGMode) return fmtBase(row.backorderQty, row.unit);
+  if (!isPackValid(row)) return `${fmtNum(row.backorderQty)} packs`;
   const packs = row.backorderQty;
-  const base = packs * (row.packQty || 1);
-  return `${packs} pack${packs !== 1 ? "s" : ""} (${fmtBase(base, row.unit)})`;
+  return `${packs} pack${packs !== 1 ? "s" : ""} (${fmtBase(packs * Number(row.packQty), row.unit)})`;
 }
 
-function fmtBase(qty: number, unit?: string | null): string {
-  const n = Number.isInteger(qty) ? String(qty) : qty.toFixed(2).replace(/\.?0+$/, "");
-  return unit ? `${n} ${unit}` : n;
-}
-
-// ─── Storage zone assignment ──────────────────────────────────────────────────
+// ─── Grouping by source/type — Safeguard 5 ───────────────────────────────────
 //
-// Items are grouped by a storage zone heuristic based on item name keywords.
-// This is a display-only classification and does not touch inventory logic.
+// We must NOT infer storage location from item name.
+// Real fields available on each group:
+//   - isFGMode    (boolean) — FG vs raw inventory
+//   - sourceType  (string | null) — 'hq_supplied' | 'local_vendor' | null
+//   - unit         (string | null) — the base unit
+//
+// Groups available in the data — the first item's sourceType drives the section.
 
-const ZONE_RULES: [RegExp, string][] = [
-  [/freezer|frozen|ice cream|gelato|popsicle|sorbet/i, "Freezer"],
-  [/chick|chicken|fish|lamb|beef|pork|mutton|seafood|prawn|shrimp|crab|tuna|salmon/i, "Cold Storage — Proteins"],
-  [/milk|dairy|cheese|cream|yogurt|butter|ghee/i, "Cold Storage — Dairy"],
-  [/sauce|ketchup|chutney|pickle|vinegar|mustard|mayo|dressing|condiment/i, "Sauces & Condiments"],
-  [/masala|spice|chili|chilli|pepper|cumin|turmeric|coriander|herb|seasoning/i, "Dry — Spices & Seasonings"],
-  [/rice|flour|grain|lentil|dal|legume|pulse|bean|chickpea|wheat|oats/i, "Dry — Grains & Pulses"],
-  [/oil|ghee|shortening|fat/i, "Dry — Oils & Fats"],
-  [/sugar|salt|baking|powder|starch|yeast/i, "Dry — Baking & Staples"],
-  [/batter|dough|bread|bun|roti|naan|paratha|wrap/i, "Prepared — Breads & Batters"],
-  [/ready|cooked|prepared|meal|biryani|curry|stew/i, "Prepared — Ready Foods"],
-  [/juice|drink|beverage|water|soda|syrup/i, "Beverages"],
-  [/box|bag|container|wrap|foil|packaging|label|sticker|napkin|tissue|glove/i, "Packaging & Supplies"],
-];
-
-function getStorageZone(itemName: string): string {
-  for (const [pattern, zone] of ZONE_RULES) {
-    if (pattern.test(itemName)) return zone;
-  }
-  return "General Storage";
+function getSection(g: FulfillmentGroup): string {
+  if (g.isFGMode) return "HQ Finished Goods (Packs)";
+  const st = (g.items[0]?.sourceType ?? "").toLowerCase().trim();
+  if (st === "hq_supplied") return "HQ-Supplied Raw Inventory";
+  if (st === "local_vendor") return "Local Vendor Items";
+  return "General Inventory";
 }
 
 // ─── Filter logic (mirrors fulfillment screen) ────────────────────────────────
 
-function filterSummary(data: FulfillmentGroup[], params: URLSearchParams): FulfillmentGroup[] {
+function filterSummary(
+  data: FulfillmentGroup[],
+  params: URLSearchParams
+): FulfillmentGroup[] {
   const scope = params.get("scope") || "visible";
   const search = String(params.get("search") ?? "").trim().toLowerCase();
   const location = params.get("location") || "all";
@@ -159,8 +176,13 @@ function filterSummary(data: FulfillmentGroup[], params: URLSearchParams): Fulfi
           if (location !== "all" && item.locationName !== location) return false;
           if (status !== "all" && item.requisitionStatus !== status) return false;
         }
-        if (scope === "locations" && !selectedLocations.has(item.locationName)) return false;
-        if (scope === "requisitions" && !selectedRequisitions.has(item.requisitionId)) return false;
+        if (scope === "locations" && !selectedLocations.has(item.locationName))
+          return false;
+        if (
+          scope === "requisitions" &&
+          !selectedRequisitions.has(item.requisitionId)
+        )
+          return false;
         return true;
       });
 
@@ -207,8 +229,10 @@ export default function FulfillmentPickListPrintPage() {
       }
     }
     load();
-    return () => { cancelled = true; };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allowed, authLoading]);
 
   useEffect(() => {
@@ -222,35 +246,52 @@ export default function FulfillmentPickListPrintPage() {
   // ── Derived data ────────────────────────────────────────────────────────────
 
   const flatRows: FulfillmentRow[] = useMemo(
-    () => data.flatMap((g) => g.items.map((it) => ({ ...it, isFGMode: it.isFGMode ?? g.isFGMode, packQty: it.packQty ?? g.packQty, unit: it.unit ?? g.unit }))),
+    () =>
+      data.flatMap((g) =>
+        g.items.map((it) => ({
+          ...it,
+          isFGMode: it.isFGMode ?? g.isFGMode,
+          packQty: it.packQty ?? g.packQty,
+          unit: it.unit ?? g.unit,
+        }))
+      ),
     [data]
   );
 
   const locationNames = useMemo(
-    () => Array.from(new Set(flatRows.map((r) => r.locationName).filter(Boolean))).sort(),
+    () =>
+      Array.from(new Set(flatRows.map((r) => r.locationName).filter(Boolean))).sort(),
     [flatRows]
   );
 
   const requisitionNums = useMemo(
-    () => Array.from(new Set(flatRows.map((r) => r.requisitionNumber || r.requisitionId).filter(Boolean))).sort(),
+    () =>
+      Array.from(
+        new Set(
+          flatRows.map((r) => r.requisitionNumber || r.requisitionId).filter(Boolean)
+        )
+      ).sort(),
     [flatRows]
   );
 
-  // Groups organised by storage zone for pick summary
-  const zoneGroups = useMemo(() => {
+  // Sections grouped by real source/type field (Safeguard 5)
+  const sectionGroups = useMemo(() => {
     const map = new Map<string, FulfillmentGroup[]>();
     for (const g of data) {
-      const zone = getStorageZone(g.itemName);
-      if (!map.has(zone)) map.set(zone, []);
-      map.get(zone)!.push(g);
+      const section = getSection(g);
+      if (!map.has(section)) map.set(section, []);
+      map.get(section)!.push(g);
     }
-    // Sort zones: Freezer first, General last
-    const zoneOrder = ["Freezer", "Cold Storage — Proteins", "Cold Storage — Dairy"];
+    // Fixed canonical order
+    const order = [
+      "HQ Finished Goods (Packs)",
+      "HQ-Supplied Raw Inventory",
+      "Local Vendor Items",
+      "General Inventory",
+    ];
     return Array.from(map.entries()).sort(([a], [b]) => {
-      const ai = zoneOrder.indexOf(a);
-      const bi = zoneOrder.indexOf(b);
-      if (a === "General Storage") return 1;
-      if (b === "General Storage") return -1;
+      const ai = order.indexOf(a);
+      const bi = order.indexOf(b);
       if (ai >= 0 && bi >= 0) return ai - bi;
       if (ai >= 0) return -1;
       if (bi >= 0) return 1;
@@ -263,9 +304,11 @@ export default function FulfillmentPickListPrintPage() {
     [flatRows]
   );
 
-  const totalAlloc = data.reduce((s, g) => s + g.totalAllocated, 0);
-  const totalBO    = data.reduce((s, g) => s + g.totalBackorder, 0);
-  const totalReq   = data.reduce((s, g) => s + g.totalRequested, 0);
+  // Item count and location/requisition counts only — no cross-unit totals (Safeguard 1)
+  const totalItems     = data.length;
+  const totalLocations = locationNames.length;
+  const totalReqs      = requisitionNums.length;
+  const totalBO        = backorderRows.length; // line count, not qty sum
 
   // ── Guard states ────────────────────────────────────────────────────────────
 
@@ -293,8 +336,6 @@ export default function FulfillmentPickListPrintPage() {
     );
   }
 
-  // ── Render ─────────────────────────────────────────────────────────────────
-
   return (
     <>
       <style>{`
@@ -306,6 +347,8 @@ export default function FulfillmentPickListPrintPage() {
           color: #111827;
           background: #f1f5f9;
         }
+
+        /* ── Screen toolbar ── */
         .pl-toolbar {
           max-width: 9in;
           margin: 0 auto 12px;
@@ -352,6 +395,8 @@ export default function FulfillmentPickListPrintPage() {
           border-radius: 12px;
           box-shadow: 0 4px 24px rgba(15,23,42,0.10);
         }
+
+        /* ── Page break helpers ── */
         .pl-section-break {
           break-before: page;
           page-break-before: always;
@@ -366,6 +411,8 @@ export default function FulfillmentPickListPrintPage() {
           border-bottom: 2.5px solid #111827;
           padding-bottom: 14px;
           margin-bottom: 16px;
+          break-inside: avoid;
+          page-break-inside: avoid;
         }
         .pl-brand {
           font-size: 10px;
@@ -385,8 +432,9 @@ export default function FulfillmentPickListPrintPage() {
           font-size: 11px;
           color: #6b7280;
           margin-top: 3px;
-          line-height: 1.6;
+          line-height: 1.7;
         }
+        .pl-doc-sub strong { color: #111827; }
         .pl-doc-meta {
           text-align: right;
           font-size: 11px;
@@ -395,12 +443,15 @@ export default function FulfillmentPickListPrintPage() {
         }
         .pl-doc-meta strong { color: #111827; font-size: 13px; }
 
-        /* ── Stats row ── */
+        /* ── Count stats (items / locations / requisitions / backorder lines)
+         *   Safeguard 1: no cross-unit quantity sums in header stats.
+         *   We show only item counts and line counts — never summed base qty.
+         */
         .pl-stats {
           display: grid;
-          grid-template-columns: repeat(6, minmax(0, 1fr));
+          grid-template-columns: repeat(4, minmax(0, 1fr));
           gap: 8px;
-          margin-bottom: 18px;
+          margin-bottom: 20px;
         }
         .pl-stat {
           border: 1px solid #e5e7eb;
@@ -416,7 +467,7 @@ export default function FulfillmentPickListPrintPage() {
           margin-bottom: 2px;
         }
         .pl-stat-val {
-          font-size: 14px;
+          font-size: 16px;
           font-weight: 900;
           color: #111827;
         }
@@ -425,13 +476,15 @@ export default function FulfillmentPickListPrintPage() {
           color: #9ca3af;
           margin-top: 1px;
         }
+        .pl-stat-bo .pl-stat-val  { color: #b45309; }
+        .pl-stat-ok .pl-stat-val  { color: #166534; }
 
-        /* ── Zone group headers ── */
-        .pl-zone-header {
+        /* ── Section header (replaces "zone" — uses real source field) ── */
+        .pl-section-hdr {
           background: #f0fdf4;
           border: 1px solid #86efac;
           border-radius: 8px 8px 0 0;
-          padding: 8px 12px;
+          padding: 7px 12px;
           margin-top: 18px;
           display: flex;
           align-items: center;
@@ -440,37 +493,32 @@ export default function FulfillmentPickListPrintPage() {
           page-break-inside: avoid;
           break-after: avoid;
           page-break-after: avoid;
+          -webkit-print-color-adjust: exact;
+          print-color-adjust: exact;
         }
-        .pl-zone-title {
-          font-size: 11px;
+        .pl-section-hdr-title {
+          font-size: 10px;
           font-weight: 900;
           text-transform: uppercase;
           letter-spacing: 0.1em;
           color: #166534;
         }
-        .pl-zone-count {
+        .pl-section-hdr-count {
           font-size: 10px;
           color: #4b5563;
           margin-left: auto;
         }
 
-        /* ── Tables ────────────────────────────────────────────────────────────
-         * Critical print rules:
-         *   thead { display: table-header-group } → repeats on every page
-         *   tr { break-inside: avoid }            → rows don't split
-         */
+        /* ── Main pick table ── */
         .pl-table {
           width: 100%;
           border-collapse: collapse;
           font-size: 11px;
           table-layout: auto;
         }
-        .pl-table thead {
-          display: table-header-group;
-        }
-        .pl-table tfoot {
-          display: table-footer-group;
-        }
+        /* CRITICAL: thead repeats on every printed page */
+        .pl-table thead { display: table-header-group; }
+        .pl-table tfoot { display: table-footer-group; }
         .pl-table thead th {
           background: #f8fafc;
           border: 1px solid #d1d5db;
@@ -495,6 +543,7 @@ export default function FulfillmentPickListPrintPage() {
           padding: 9px 8px;
           vertical-align: top;
         }
+        /* CRITICAL: rows never split across a page break */
         .pl-table tbody tr {
           break-inside: avoid;
           page-break-inside: avoid;
@@ -502,16 +551,15 @@ export default function FulfillmentPickListPrintPage() {
         .pl-table tbody tr:nth-child(even) { background: #f9fafb; }
         .pl-table tbody tr:hover { background: #f0fdf4; }
 
-        /* ── Pick summary specific columns ── */
+        /* ── Column widths ── */
         .col-check  { width: 30px; text-align: center; font-size: 16px; }
-        .col-zone   { width: 100px; }
-        .col-pack   { width: 110px; }
-        .col-pull   { width: 90px; font-weight: 700; }
-        .col-total  { width: 90px; }
+        .col-pack   { width: 120px; }
+        .col-pull   { width: 100px; }
+        .col-total  { width: 100px; }
         .col-signed { width: 80px; }
-        .col-notes  { min-width: 80px; }
+        .col-notes  { min-width: 70px; }
 
-        /* ── Pull quantity highlight ── */
+        /* ── Pull quantity emphasis ── */
         .pull-val {
           font-weight: 900;
           font-size: 13px;
@@ -522,14 +570,29 @@ export default function FulfillmentPickListPrintPage() {
           color: #6b7280;
           margin-top: 1px;
         }
+
+        /* ── Missing pack config warning (Safeguard 4) ── */
+        .pack-missing {
+          display: inline-block;
+          font-size: 9px;
+          font-weight: 700;
+          color: #b45309;
+          background: #fffbeb;
+          border: 1px solid #fbbf24;
+          border-radius: 4px;
+          padding: 1px 5px;
+          margin-top: 3px;
+        }
+
+        /* ── Backorder inline warning ── */
         .bo-warn {
           font-size: 10px;
           font-weight: 700;
           color: #b45309;
         }
 
-        /* ── Item section headers (allocation sheets) ── */
-        .item-sheet-header {
+        /* ── Allocation sheet item header ── */
+        .item-hdr {
           display: flex;
           align-items: flex-start;
           justify-content: space-between;
@@ -544,44 +607,26 @@ export default function FulfillmentPickListPrintPage() {
           break-after: avoid;
           page-break-after: avoid;
         }
-        .item-sheet-name {
-          font-size: 14px;
-          font-weight: 900;
-          color: #111827;
-        }
-        .item-sheet-meta {
-          font-size: 10px;
-          color: #6b7280;
-          margin-top: 3px;
-          line-height: 1.5;
-        }
-        .item-sheet-totals {
-          display: flex;
-          gap: 16px;
-          text-align: right;
-          font-size: 11px;
-        }
-        .item-sheet-total-val {
-          font-size: 14px;
-          font-weight: 900;
-          color: #111827;
-        }
+        .item-hdr-name { font-size: 14px; font-weight: 900; color: #111827; }
+        .item-hdr-meta { font-size: 10px; color: #6b7280; margin-top: 3px; line-height: 1.5; }
+        .item-hdr-totals { display: flex; gap: 16px; text-align: right; font-size: 11px; }
+        .item-hdr-tv { font-size: 14px; font-weight: 900; color: #111827; }
 
-        /* ── Backorder table ── */
+        /* ── Backorder rows ── */
         .bo-row td { background: #fffbeb !important; }
 
-        /* ── Section titles ── */
+        /* ── Section title ── */
         .pl-section-title {
           font-size: 16px;
           font-weight: 900;
-          letter-spacing: -0.01em;
           color: #111827;
-          margin: 0 0 12px;
+          margin: 0 0 10px;
           padding-bottom: 6px;
           border-bottom: 1.5px solid #e5e7eb;
         }
+        .pl-section-title-bo { color: #b45309; }
 
-        /* ── Sign-off row ── */
+        /* ── Sign-off grid ── */
         .pl-signoff {
           display: grid;
           grid-template-columns: 1fr 1fr 1fr;
@@ -590,46 +635,35 @@ export default function FulfillmentPickListPrintPage() {
           break-inside: avoid;
           page-break-inside: avoid;
         }
-        .pl-signoff-line {
-          border-bottom: 1px solid #111827;
-          height: 30px;
-          margin-top: 14px;
-        }
-        .pl-signoff-label {
-          margin-top: 4px;
-          font-size: 9px;
-          font-weight: 800;
-          color: #4b5563;
-          text-transform: uppercase;
-          letter-spacing: 0.08em;
-        }
+        .pl-signoff-line { border-bottom: 1px solid #111827; height: 30px; margin-top: 14px; }
+        .pl-signoff-label { margin-top: 4px; font-size: 9px; font-weight: 800; color: #4b5563; text-transform: uppercase; letter-spacing: 0.08em; }
 
         /* ── Appendix ── */
+        .pl-appendix-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+        .pl-appendix-subhdr {
+          font-size: 10px; font-weight: 900; text-transform: uppercase;
+          letter-spacing: 0.08em; color: #374151; margin-bottom: 8px;
+          border-bottom: 1px solid #e5e7eb; padding-bottom: 4px;
+        }
         .pl-appendix-list {
-          font-size: 10px;
-          color: #374151;
-          line-height: 1.8;
-          column-count: 3;
-          column-gap: 16px;
+          font-size: 10px; color: #374151; line-height: 1.8;
+          padding-left: 0; list-style: none;
         }
 
         /* ── Screen-only footer ── */
         .pl-screen-footer {
-          font-size: 10px;
-          color: #9ca3af;
-          display: flex;
-          justify-content: space-between;
-          margin-top: 16px;
-          padding-top: 8px;
+          font-size: 10px; color: #9ca3af;
+          display: flex; justify-content: space-between;
+          margin-top: 16px; padding-top: 8px;
           border-top: 1px solid #e5e7eb;
         }
 
         /* ═══════════════════════════════════════════════════════════════════
-         * @media print — full multi-page output
+         * @media print — multi-page output
          *
-         * Root cause of "1 page" truncation: any ancestor with
-         * min-height:100vh or overflow:hidden clips the print viewport.
-         * We must reset all of them here.
+         * All ancestors that could have height:100vh or overflow:hidden
+         * must be reset to height:auto + overflow:visible in print.
+         * This is the fix for the "1 page" truncation bug.
          */
         @media print {
           html, body {
@@ -659,54 +693,36 @@ export default function FulfillmentPickListPrintPage() {
           }
           .pl-toolbar { display: none !important; }
           .pl-card {
-            max-width: none;
-            margin: 0 0 0 0;
-            padding: 0;
-            box-shadow: none;
-            border-radius: 0;
+            max-width: none; margin: 0; padding: 0;
+            box-shadow: none; border-radius: 0;
           }
-          .pl-card + .pl-card { margin-top: 0; }
-          .pl-table thead {
-            display: table-header-group !important;
-          }
-          .pl-table tfoot {
-            display: table-footer-group !important;
-          }
+          .pl-table thead { display: table-header-group !important; }
+          .pl-table tfoot { display: table-footer-group !important; }
           .pl-table tbody tr {
             break-inside: avoid !important;
             page-break-inside: avoid !important;
           }
           .pl-table tbody tr:hover { background: transparent !important; }
-          .pl-table thead th {
+          .pl-table thead th,
+          .pl-section-hdr,
+          .bo-row td {
             -webkit-print-color-adjust: exact;
             print-color-adjust: exact;
           }
           .pl-screen-footer { display: none !important; }
-          .pl-zone-header {
-            -webkit-print-color-adjust: exact;
-            print-color-adjust: exact;
-          }
-          .bo-row td {
-            -webkit-print-color-adjust: exact;
-            print-color-adjust: exact;
-            background: #fffbeb !important;
-          }
         }
 
-        @page {
-          size: letter portrait;
-          margin: 12mm 14mm;
-        }
+        @page { size: letter portrait; margin: 12mm 14mm; }
       `}</style>
 
       <div
         className="pl-shell"
         style={{ minHeight: "100vh", paddingTop: 24, paddingBottom: 48 }}
       >
-        {/* ── Screen toolbar ── */}
+        {/* Screen toolbar */}
         <div className="pl-toolbar">
           <div className="pl-pdf-hint">
-            💡 To save as PDF: File → Print → Destination → Save as PDF
+            💡 File → Print → Destination → Save as PDF
           </div>
           <button
             className="pl-btn pl-btn-primary"
@@ -720,31 +736,46 @@ export default function FulfillmentPickListPrintPage() {
           </button>
         </div>
 
-        {/* ════════════════════════════════════════════════════════════════════
-         * SECTION 1 — PICK SUMMARY
-         * The warehouse-facing pick list. One row per item, grouped by zone.
-         * Picker answers: what, how many packs, total qty.
+        {/* ══════════════════════════════════════════════════════════════════
+         * PAGE 1 — HQ FULFILLMENT PICK SUMMARY
+         *
+         * Safeguard 1: Stats show COUNTS (items, locations, requisitions,
+         *   backorder LINES) — not summed quantities across different units.
+         * Safeguard 5: Items grouped by real source/type field, not inferred
+         *   from item name.
+         * Safeguard 9: This is the first page. Appendix is last.
          */}
         <div className="pl-card">
-          {/* Document header */}
+          {/* Header */}
           <header className="pl-doc-header">
             <div>
               <div className="pl-brand">Stock Dharma · Warehouse Operations</div>
               <h1 className="pl-doc-title">HQ FULFILLMENT PICK LIST</h1>
+              {/* Safeguard 1 / 9: no comma-separated ID list here */}
               <div className="pl-doc-sub">
                 Prepared by:{" "}
                 <strong>{user?.name || user?.email || "HQ Staff"}</strong>
               </div>
               <div className="pl-doc-sub">
-                {/* No giant comma-separated ID list here.
-                    The full source register is in the Appendix. */}
-                Locations: <strong>{locationNames.length}</strong>
+                <strong>{totalItems}</strong> item{totalItems !== 1 ? "s" : ""}
                 {"  ·  "}
-                Requisitions: <strong>{requisitionNums.length}</strong>
+                <strong>{totalLocations}</strong> location{totalLocations !== 1 ? "s" : ""}
                 {"  ·  "}
-                Items: <strong>{data.length}</strong>
+                <strong>{totalReqs}</strong> requisition{totalReqs !== 1 ? "s" : ""}
                 {"  ·  "}
-                See allocation sheets on later pages.
+                Allocation sheets on following pages.
+                {totalBO > 0 && (
+                  <>
+                    {"  ·  "}
+                    <span style={{ color: "#b45309", fontWeight: 700 }}>
+                      ⚠ {totalBO} backorder line{totalBO !== 1 ? "s" : ""}
+                    </span>
+                  </>
+                )}
+              </div>
+              <div className="pl-doc-sub" style={{ color: "#9ca3af", fontSize: 10 }}>
+                Quantities shown per item in their own unit.
+                Pack counts and base quantities are not mixed or summed.
               </div>
             </div>
             <div className="pl-doc-meta">
@@ -755,43 +786,30 @@ export default function FulfillmentPickListPrintPage() {
             </div>
           </header>
 
-          {/* Stats row */}
+          {/* Stats — counts only, no cross-unit sums (Safeguard 1) */}
           <div className="pl-stats">
             <div className="pl-stat">
-              <div className="pl-stat-label">Items</div>
-              <div className="pl-stat-val">{data.length}</div>
+              <div className="pl-stat-label">Line Items</div>
+              <div className="pl-stat-val">{totalItems}</div>
             </div>
             <div className="pl-stat">
               <div className="pl-stat-label">Locations</div>
-              <div className="pl-stat-val">{locationNames.length}</div>
+              <div className="pl-stat-val">{totalLocations}</div>
             </div>
             <div className="pl-stat">
               <div className="pl-stat-label">Requisitions</div>
-              <div className="pl-stat-val">{requisitionNums.length}</div>
+              <div className="pl-stat-val">{totalReqs}</div>
             </div>
-            <div className="pl-stat">
-              <div className="pl-stat-label">Total Requested</div>
-              <div className="pl-stat-val">{totalReq.toLocaleString()}</div>
-              <div className="pl-stat-sub">units / packs</div>
-            </div>
-            <div className="pl-stat">
-              <div className="pl-stat-label">Total Allocated</div>
-              <div className="pl-stat-val" style={{ color: "#166534" }}>
-                {totalAlloc.toLocaleString()}
-              </div>
-            </div>
-            <div className="pl-stat">
-              <div className="pl-stat-label">Backordered</div>
-              <div
-                className="pl-stat-val"
-                style={{ color: totalBO > 0 ? "#b45309" : "#166534" }}
-              >
-                {totalBO.toLocaleString()}
+            <div className={`pl-stat ${totalBO > 0 ? "pl-stat-bo" : "pl-stat-ok"}`}>
+              <div className="pl-stat-label">Backorder Lines</div>
+              <div className="pl-stat-val">{totalBO}</div>
+              <div className="pl-stat-sub">
+                {totalBO === 0 ? "All lines allocated" : "require follow-up"}
               </div>
             </div>
           </div>
 
-          {/* Pick summary table — grouped by storage zone */}
+          {/* Pick summary table, grouped by source/type section */}
           {data.length === 0 ? (
             <div
               style={{
@@ -807,20 +825,22 @@ export default function FulfillmentPickListPrintPage() {
             </div>
           ) : (
             <>
-              {zoneGroups.map(([zone, groups]) => (
-                <div key={zone}>
-                  <div className="pl-zone-header">
-                    <span className="pl-zone-title">{zone}</span>
-                    <span className="pl-zone-count">
+              {sectionGroups.map(([section, groups]) => (
+                <div key={section}>
+                  {/* Section header uses real source/type, not item-name inference */}
+                  <div className="pl-section-hdr">
+                    <span className="pl-section-hdr-title">{section}</span>
+                    <span className="pl-section-hdr-count">
                       {groups.length} item{groups.length !== 1 ? "s" : ""}
                     </span>
                   </div>
-                  <table className="pl-table" style={{ marginBottom: 0, borderTopLeftRadius: 0, borderTopRightRadius: 0 }}>
+                  <table className="pl-table">
                     <thead>
                       <tr>
                         <th className="col-check th-green">✓</th>
                         <th className="th-green">Item Name</th>
                         <th className="col-pack th-green">Pack / Unit</th>
+                        {/* Safeguard 2: Pull Qty = packs for FG, base for loose */}
                         <th className="col-pull th-green">Pull Qty</th>
                         <th className="col-total th-green">Total to Stage</th>
                         <th className="col-signed th-green">Checked By</th>
@@ -828,52 +848,93 @@ export default function FulfillmentPickListPrintPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {groups.map((group, idx) => {
+                      {groups.map((group) => {
+                        const packMissing =
+                          group.isFGMode &&
+                          (group.packQty == null || Number(group.packQty) === 0);
                         const hasBO = group.totalBackorder > 0;
                         return (
                           <tr key={group.itemName}>
-                            <td className="col-check" style={{ fontSize: 18 }}>□</td>
+                            <td className="col-check" style={{ fontSize: 18 }}>
+                              □
+                            </td>
                             <td>
                               <div style={{ fontWeight: 700, fontSize: 12 }}>
                                 {group.itemName}
                               </div>
                               <div style={{ fontSize: 9, color: "#6b7280", marginTop: 1 }}>
-                                {group.items.length} location{group.items.length !== 1 ? "s" : ""}
+                                {group.items.length} location
+                                {group.items.length !== 1 ? "s" : ""}
                               </div>
-                              {hasBO && (
-                                <div className="bo-warn">
-                                  ⚠ {rowBackorderLabel({
+                              {/* Safeguard 4 */}
+                              {packMissing && (
+                                <span className="pack-missing">
+                                  Pack configuration missing — confirm before picking
+                                </span>
+                              )}
+                              {/* Backorder inline notice */}
+                              {hasBO && !packMissing && (
+                                <div className="bo-warn" style={{ marginTop: 2 }}>
+                                  ⚠{" "}
+                                  {rowBackorderLabel({
                                     ...group.items[0],
                                     backorderQty: group.totalBackorder,
+                                    allocatedQty: 0,
+                                    quantityRequested: 0,
                                     isFGMode: group.isFGMode,
                                     packQty: group.packQty,
                                     unit: group.unit,
-                                    allocatedQty: 0,
-                                    quantityRequested: 0,
-                                    id: "", requisitionId: "", requisitionNumber: "",
-                                    requisitionDate: "", requisitionStatus: "",
-                                    locationName: "", locationId: "", fulfillmentNote: "",
-                                  })} backordered
+                                    id: "",
+                                    requisitionId: "",
+                                    requisitionNumber: "",
+                                    requisitionDate: "",
+                                    requisitionStatus: "",
+                                    locationName: "",
+                                    locationId: "",
+                                    fulfillmentNote: "",
+                                    sourceType: null,
+                                  })}{" "}
+                                  backordered
                                 </div>
                               )}
                             </td>
                             <td className="col-pack">
-                              <span style={{ fontSize: 11, color: "#374151" }}>
-                                {packSizeLabel(group)}
-                              </span>
+                              {packMissing ? (
+                                <span style={{ color: "#9ca3af", fontSize: 10 }}>—</span>
+                              ) : (
+                                <span style={{ fontSize: 11, color: "#374151" }}>
+                                  {packSizeLabel(group)}
+                                </span>
+                              )}
                             </td>
                             <td className="col-pull">
-                              <div className="pull-val">{pullLabel(group)}</div>
-                              {group.isFGMode && group.packQty > 1 && (
-                                <div className="pull-base">
-                                  = {fmtBase(group.totalAllocated * group.packQty, group.unit)}
-                                </div>
+                              {packMissing ? (
+                                <span style={{ color: "#b45309", fontSize: 10, fontWeight: 700 }}>
+                                  Confirm
+                                </span>
+                              ) : (
+                                <>
+                                  <div className="pull-val">{groupPullLabel(group)}</div>
+                                  {/* Show base qty below pack count for FG items */}
+                                  {group.isFGMode && isPackValid(group) && (
+                                    <div className="pull-base">
+                                      = {fmtBase(
+                                        group.totalAllocated * Number(group.packQty),
+                                        group.unit
+                                      )}
+                                    </div>
+                                  )}
+                                </>
                               )}
                             </td>
                             <td className="col-total">
-                              <span style={{ fontWeight: 600, fontSize: 12 }}>
-                                {totalStagedLabel(group)}
-                              </span>
+                              {packMissing ? (
+                                <span style={{ color: "#9ca3af" }}>—</span>
+                              ) : (
+                                <span style={{ fontWeight: 600, fontSize: 12 }}>
+                                  {groupTotalStaged(group)}
+                                </span>
+                              )}
                             </td>
                             <td className="col-signed" />
                             <td className="col-notes" />
@@ -903,15 +964,17 @@ export default function FulfillmentPickListPrintPage() {
           </div>
         </div>
 
-        {/* ════════════════════════════════════════════════════════════════════
-         * SECTION 2 — ITEM ALLOCATION / DISTRIBUTION SHEETS
-         * One card per item. Shows per-location allocation breakdown.
-         * Page break before first item, then each subsequent item starts
-         * immediately below (no forced break per item to save paper).
+        {/* ══════════════════════════════════════════════════════════════════
+         * PAGE 2+ — ITEM ALLOCATION / DISTRIBUTION SHEETS
+         *
+         * Safeguard 7: allocation detail moved here, separated from summary.
+         * Safeguard 9: comes after pick summary, before backorders.
          */}
         {data.length > 0 && (
           <div className="pl-card pl-section-break">
-            <h2 className="pl-section-title">Item Allocation &amp; Distribution Sheets</h2>
+            <h2 className="pl-section-title">
+              Item Allocation &amp; Distribution Sheets
+            </h2>
             <p
               style={{
                 fontSize: 11,
@@ -920,126 +983,178 @@ export default function FulfillmentPickListPrintPage() {
                 marginTop: -6,
               }}
             >
-              Per-location allocation detail for each item. Use these sheets to
-              pack and label orders by destination.
+              Per-location allocation detail. Use these sheets to pack and label
+              orders by destination. Pack math is only shown where a valid pack
+              configuration exists.
             </p>
 
-            {data.map((group, gi) => (
-              <div
-                key={group.itemName}
-                style={{ marginBottom: 24, breakInside: "avoid", pageBreakInside: "avoid" }}
-              >
-                {/* Item card header */}
-                <div className="item-sheet-header">
-                  <div>
-                    <div className="item-sheet-name">{group.itemName}</div>
-                    <div className="item-sheet-meta">
-                      Pack: <strong>{packSizeLabel(group)}</strong>
-                      {"  ·  "}
-                      Pull: <strong>{pullLabel(group)}</strong>
-                      {"  ·  "}
-                      Total staged: <strong>{totalStagedLabel(group)}</strong>
-                    </div>
-                  </div>
-                  <div className="item-sheet-totals">
+            {data.map((group) => {
+              const packMissing =
+                group.isFGMode &&
+                (group.packQty == null || Number(group.packQty) === 0);
+              return (
+                <div
+                  key={group.itemName}
+                  style={{
+                    marginBottom: 24,
+                    breakInside: "avoid",
+                    pageBreakInside: "avoid",
+                  }}
+                >
+                  {/* Item card header */}
+                  <div className="item-hdr">
                     <div>
-                      <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, textTransform: "uppercase" }}>Allocated</div>
-                      <div className="item-sheet-total-val" style={{ color: "#166534" }}>
-                        {pullLabel(group)}
+                      <div className="item-hdr-name">{group.itemName}</div>
+                      <div className="item-hdr-meta">
+                        {packMissing ? (
+                          <span className="pack-missing">
+                            Pack configuration missing — confirm before picking
+                          </span>
+                        ) : (
+                          <>
+                            Pack: <strong>{packSizeLabel(group)}</strong>
+                            {"  ·  "}
+                            Pull: <strong>{groupPullLabel(group)}</strong>
+                            {"  ·  "}
+                            Stage: <strong>{groupTotalStaged(group)}</strong>
+                          </>
+                        )}
                       </div>
                     </div>
-                    <div>
-                      <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, textTransform: "uppercase" }}>Backordered</div>
-                      <div
-                        className="item-sheet-total-val"
-                        style={{ color: group.totalBackorder > 0 ? "#b45309" : "#9ca3af" }}
-                      >
-                        {group.totalBackorder > 0
-                          ? rowBackorderLabel({
-                              backorderQty: group.totalBackorder,
-                              isFGMode: group.isFGMode,
-                              packQty: group.packQty,
-                              unit: group.unit,
-                              allocatedQty: 0,
-                              quantityRequested: 0,
-                              id: "", requisitionId: "", requisitionNumber: "",
-                              requisitionDate: "", requisitionStatus: "",
-                              locationName: "", locationId: "", fulfillmentNote: "",
-                            })
-                          : "None"}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Per-location allocation table */}
-                <table className="pl-table">
-                  <thead>
-                    <tr>
-                      <th>Location</th>
-                      <th>Req #</th>
-                      <th>Requested</th>
-                      <th>Allocated</th>
-                      <th>Backordered</th>
-                      <th style={{ width: 60, textAlign: "center" }}>Packed ✓</th>
-                      <th>Fulfillment Note</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {group.items.map((item) => (
-                      <tr key={item.id} className={item.backorderQty > 0 ? "bo-row" : ""}>
-                        <td>
-                          <div style={{ fontWeight: 700, fontSize: 11 }}>
-                            {item.locationName}
+                    {!packMissing && (
+                      <div className="item-hdr-totals">
+                        <div>
+                          <div
+                            style={{
+                              fontSize: 9,
+                              color: "#6b7280",
+                              fontWeight: 700,
+                              textTransform: "uppercase",
+                            }}
+                          >
+                            Allocated
                           </div>
-                          <div style={{ fontSize: 9, color: "#6b7280" }}>
-                            {item.requisitionDate || ""}
+                          <div className="item-hdr-tv" style={{ color: "#166534" }}>
+                            {groupPullLabel(group)}
                           </div>
-                        </td>
-                        <td style={{ fontFamily: "monospace", fontSize: 10 }}>
-                          {item.requisitionNumber || item.requisitionId}
-                        </td>
-                        <td>{rowRequestedLabel(item)}</td>
-                        <td>
-                          <strong>{rowPullLabel(item)}</strong>
-                          {item.isFGMode && item.packQty > 1 && (
-                            <div style={{ fontSize: 9, color: "#6b7280" }}>
-                              {rowBaseLabel(item)}
+                        </div>
+                        {group.totalBackorder > 0 && (
+                          <div>
+                            <div
+                              style={{
+                                fontSize: 9,
+                                color: "#b45309",
+                                fontWeight: 700,
+                                textTransform: "uppercase",
+                              }}
+                            >
+                              Backordered
                             </div>
-                          )}
-                        </td>
-                        <td>
-                          {item.backorderQty > 0 ? (
-                            <span className="bo-warn">{rowBackorderLabel(item)}</span>
-                          ) : (
-                            <span style={{ color: "#9ca3af" }}>—</span>
-                          )}
-                        </td>
-                        <td style={{ textAlign: "center", fontSize: 18 }}>□</td>
-                        <td style={{ fontSize: 10, color: "#374151" }}>
-                          {item.fulfillmentNote || ""}
-                        </td>
+                            <div className="item-hdr-tv" style={{ color: "#b45309" }}>
+                              {rowBackorderLabel({
+                                backorderQty: group.totalBackorder,
+                                isFGMode: group.isFGMode,
+                                packQty: group.packQty,
+                                unit: group.unit,
+                                allocatedQty: 0,
+                                quantityRequested: 0,
+                                id: "",
+                                requisitionId: "",
+                                requisitionNumber: "",
+                                requisitionDate: "",
+                                requisitionStatus: "",
+                                locationName: "",
+                                locationId: "",
+                                fulfillmentNote: "",
+                                sourceType: null,
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  <table className="pl-table">
+                    <thead>
+                      <tr>
+                        <th>Location</th>
+                        <th>Req #</th>
+                        <th>Requested</th>
+                        <th>Allocated</th>
+                        <th>Backordered</th>
+                        <th style={{ width: 60, textAlign: "center" }}>
+                          Packed ✓
+                        </th>
+                        <th>Fulfillment Note</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ))}
+                    </thead>
+                    <tbody>
+                      {group.items.map((item) => (
+                        <tr
+                          key={item.id}
+                          className={item.backorderQty > 0 ? "bo-row" : ""}
+                        >
+                          <td>
+                            <div style={{ fontWeight: 700, fontSize: 11 }}>
+                              {item.locationName}
+                            </div>
+                            <div style={{ fontSize: 9, color: "#6b7280" }}>
+                              {item.requisitionDate || ""}
+                            </div>
+                          </td>
+                          <td style={{ fontFamily: "monospace", fontSize: 10 }}>
+                            {item.requisitionNumber || item.requisitionId}
+                          </td>
+                          <td>{rowRequestedLabel(item)}</td>
+                          <td>
+                            <strong>{rowAllocLabel(item)}</strong>
+                          </td>
+                          <td>
+                            {item.backorderQty > 0 ? (
+                              <span className="bo-warn">
+                                {rowBackorderLabel(item)}
+                              </span>
+                            ) : (
+                              <span style={{ color: "#9ca3af" }}>—</span>
+                            )}
+                          </td>
+                          <td style={{ textAlign: "center", fontSize: 18 }}>
+                            □
+                          </td>
+                          <td style={{ fontSize: 10, color: "#374151" }}>
+                            {item.fulfillmentNote || ""}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              );
+            })}
           </div>
         )}
 
-        {/* ════════════════════════════════════════════════════════════════════
-         * SECTION 3 — BACKORDERS & EXCEPTIONS
-         * Only rendered when backorders exist. Page-break before.
+        {/* ══════════════════════════════════════════════════════════════════
+         * BACKORDERS — only rendered when backorders exist (Safeguard 8)
+         * Safeguard 9: after allocation sheets, before source register.
          */}
         {backorderRows.length > 0 && (
           <div className="pl-card pl-section-break">
-            <h2 className="pl-section-title" style={{ color: "#b45309" }}>
+            <h2 className="pl-section-title pl-section-title-bo">
               ⚠ Backorders &amp; Exceptions
             </h2>
-            <p style={{ fontSize: 11, color: "#6b7280", marginBottom: 14, marginTop: -6 }}>
-              {backorderRows.length} line{backorderRows.length !== 1 ? "s" : ""}{" "}
-              with outstanding backorders. Follow up with the location or supplier.
+            <p
+              style={{
+                fontSize: 11,
+                color: "#6b7280",
+                marginBottom: 14,
+                marginTop: -6,
+              }}
+            >
+              {backorderRows.length} line
+              {backorderRows.length !== 1 ? "s" : ""} with outstanding
+              backorders. Follow up before dispatch.
             </p>
 
             <table className="pl-table">
@@ -1048,113 +1163,101 @@ export default function FulfillmentPickListPrintPage() {
                   <th>Item</th>
                   <th>Location</th>
                   <th>Req #</th>
-                  <th>Requested</th>
-                  <th>Allocated</th>
-                  <th>Backordered</th>
-                  <th>Reason / Note</th>
-                  <th>Action / Follow-up</th>
+                  <th>Backordered Qty</th>
+                  <th>Fulfillment Note</th>
+                  {/* Safeguard 8: Follow-up Status column */}
+                  <th>Follow-up Status</th>
                 </tr>
               </thead>
               <tbody>
-                {backorderRows.map((row) => (
-                  <tr key={`bo-${row.id}`} className="bo-row">
-                    <td style={{ fontWeight: 700 }}>
-                      {/* Find group to get isFGMode / packQty */}
-                      {data.find((g) => g.items.some((it) => it.id === row.id))?.itemName || ""}
-                    </td>
-                    <td>{row.locationName}</td>
-                    <td style={{ fontFamily: "monospace", fontSize: 10 }}>
-                      {row.requisitionNumber || row.requisitionId}
-                    </td>
-                    <td>{rowRequestedLabel(row)}</td>
-                    <td>{rowPullLabel(row)}</td>
-                    <td>
-                      <span className="bo-warn">{rowBackorderLabel(row)}</span>
-                    </td>
-                    <td style={{ fontSize: 10 }}>{row.fulfillmentNote || ""}</td>
-                    <td />
-                  </tr>
-                ))}
+                {backorderRows.map((row) => {
+                  const parentGroup = data.find((g) =>
+                    g.items.some((it) => it.id === row.id)
+                  );
+                  return (
+                    <tr key={`bo-${row.id}`} className="bo-row">
+                      <td style={{ fontWeight: 700 }}>
+                        {parentGroup?.itemName ?? ""}
+                      </td>
+                      <td>{row.locationName}</td>
+                      <td style={{ fontFamily: "monospace", fontSize: 10 }}>
+                        {row.requisitionNumber || row.requisitionId}
+                      </td>
+                      <td>
+                        <span className="bo-warn">
+                          {rowBackorderLabel(row)}
+                        </span>
+                      </td>
+                      <td style={{ fontSize: 10 }}>
+                        {row.fulfillmentNote || ""}
+                      </td>
+                      {/* Follow-up Status write-in */}
+                      <td />
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
 
             <div className="pl-signoff" style={{ marginTop: 24 }}>
-              {["Backorder Coordinator", "Date Actioned", "Resolution / Notes"].map(
-                (label) => (
-                  <div key={label}>
-                    <div className="pl-signoff-line" />
-                    <div className="pl-signoff-label">{label}</div>
-                  </div>
-                )
-              )}
+              {[
+                "Backorder Coordinator",
+                "Date Actioned",
+                "Resolution / Notes",
+              ].map((label) => (
+                <div key={label}>
+                  <div className="pl-signoff-line" />
+                  <div className="pl-signoff-label">{label}</div>
+                </div>
+              ))}
             </div>
           </div>
         )}
 
-        {/* ════════════════════════════════════════════════════════════════════
-         * APPENDIX — FULL FULFILLMENT SOURCE REGISTER
-         * This is the ONLY section that lists every location ID and
-         * requisition number. Kept separate from operational pages.
+        {/* ══════════════════════════════════════════════════════════════════
+         * APPENDIX — SOURCE REGISTER
+         * Safeguard 1: The only page that lists all location names and
+         *   requisition numbers. Never appears on the first page.
+         * Safeguard 9: must be last.
          */}
         {data.length > 0 && (
           <div className="pl-card pl-section-break">
             <h2 className="pl-section-title">
               Appendix — Full Fulfillment Source Register
             </h2>
-            <p style={{ fontSize: 11, color: "#6b7280", marginBottom: 14, marginTop: -6 }}>
-              Complete record of all locations and requisitions included in this
-              pick list. For audit and traceability only.
-            </p>
-
-            <div
+            <p
               style={{
-                display: "grid",
-                gridTemplateColumns: "1fr 1fr",
-                gap: 24,
+                fontSize: 11,
+                color: "#6b7280",
+                marginBottom: 16,
+                marginTop: -6,
               }}
             >
+              Complete record of all locations and requisitions included in this
+              pick list. For audit and traceability purposes only — do not use
+              for picking.
+            </p>
+
+            <div className="pl-appendix-grid">
               <div>
-                <div
-                  style={{
-                    fontSize: 10,
-                    fontWeight: 900,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.08em",
-                    color: "#374151",
-                    marginBottom: 8,
-                    borderBottom: "1px solid #e5e7eb",
-                    paddingBottom: 4,
-                  }}
-                >
+                <div className="pl-appendix-subhdr">
                   Locations ({locationNames.length})
                 </div>
-                <ol className="pl-appendix-list" style={{ columnCount: 1 }}>
+                <ol className="pl-appendix-list">
                   {locationNames.map((loc, i) => (
-                    <li key={loc} style={{ marginBottom: 2 }}>
+                    <li key={loc}>
                       {i + 1}. {loc}
                     </li>
                   ))}
                 </ol>
               </div>
-
               <div>
-                <div
-                  style={{
-                    fontSize: 10,
-                    fontWeight: 900,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.08em",
-                    color: "#374151",
-                    marginBottom: 8,
-                    borderBottom: "1px solid #e5e7eb",
-                    paddingBottom: 4,
-                  }}
-                >
+                <div className="pl-appendix-subhdr">
                   Requisitions ({requisitionNums.length})
                 </div>
-                <ol className="pl-appendix-list" style={{ columnCount: 2 }}>
+                <ol className="pl-appendix-list" style={{ columnCount: 2, columnGap: 12 }}>
                   {requisitionNums.map((req, i) => (
-                    <li key={req} style={{ marginBottom: 2 }}>
+                    <li key={req}>
                       {i + 1}. {req}
                     </li>
                   ))}
