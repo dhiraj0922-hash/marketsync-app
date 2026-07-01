@@ -42,7 +42,9 @@ import {
   loadInventory,
   loadSaleItems,
   loadLocations,
-  saveNewRequisition,
+  saveRequisitionDraft,
+  submitRequisitionDraft,
+  loadActiveRequisitionDraft,
   loadRequisitionItems,
   loadRequisitionItemsBatch,
   updateRequisitionStatus,
@@ -270,6 +272,9 @@ function LocationManagerView({
   const [filterStatus, setFilterStatus] = useState("all");
   const [draftNotes, setDraftNotes] = useState("");
   const [editingRequisitionId, setEditingRequisitionId] = useState<string | null>(null);
+  const [activeDraftRequisitionId, setActiveDraftRequisitionId] = useState<string | null>(null);
+  const [isDraftCartRestored, setIsDraftCartRestored] = useState(false);
+  const [isRestoringDraft, setIsRestoringDraft] = useState(false);
   const [lineItems, setLineItems] = useState<LineItemDraft[]>([]);
   const [catalogSearch, setCatalogSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("all");
@@ -313,6 +318,87 @@ function LocationManagerView({
   }, [profile.locationId]);
 
   useEffect(() => { fetchReqs(); }, [fetchReqs]);
+
+  const clearDraftCartState = useCallback(() => {
+    setLineItems([]);
+    setDraftNotes("");
+    setCatalogQtyById({});
+    setActiveDraftRequisitionId(null);
+    setIsDraftCartRestored(false);
+  }, []);
+
+  const mapDraftLineForSave = useCallback((li: LineItemDraft) => ({
+    item_id: li.sourceType === 'hq_supplied' && !li.finishedGoodId ? li.itemId : null,
+    finished_good_id: li.sourceType === 'hq_supplied' ? li.finishedGoodId : null,
+    catalog_item_id: li.sourceType === 'local_vendor' ? li.catalogItemId : null,
+    source_type: li.sourceType,
+    supplier_snapshot: li.supplierSnapshot ?? null,
+    pack_qty_snapshot: li.packQty ?? 1,
+    item_name_snapshot: li.itemName,
+    unit_snapshot: li.unit,
+    source_commissary_snapshot: li.sourceType === 'local_vendor' ? null : (li.sourceCommissary ?? "Commissary HQ"),
+    quantity_requested: li.quantityRequested,
+    unit_price: li.unitPrice,
+    line_total: parseFloat((li.quantityRequested * li.unitPrice).toFixed(2)),
+  }), []);
+
+  useEffect(() => {
+    if (!profile.locationId) return;
+    let cancelled = false;
+
+    async function restoreDraft() {
+      setIsRestoringDraft(true);
+      try {
+        const res = await loadActiveRequisitionDraft(profile.locationId || "");
+        if (cancelled) return;
+        if (!res.success) {
+          console.warn("[Requisitions] active draft restore failed", res.error);
+          return;
+        }
+        if (!res.data?.requisition?.id) return;
+
+        const draftItems: LineItemDraft[] = (res.data.items ?? []).map((li: any) => {
+          const isLocal = li.sourceType === 'local_vendor' || li.source_type === 'local_vendor';
+          const finishedGoodId = isLocal ? null : (li.finishedGoodId ?? li.finished_good_id ?? null);
+          return {
+            itemId: isLocal ? null : (finishedGoodId ? null : (li.itemId ?? li.item_id ?? null)),
+            finishedGoodId,
+            catalogItemId: isLocal ? (li.catalogItemId ?? li.catalog_item_id ?? null) : null,
+            sourceType: (isLocal ? 'local_vendor' : 'hq_supplied') as 'hq_supplied' | 'local_vendor',
+            supplierSnapshot: li.supplierSnapshot ?? li.supplier_snapshot ?? null,
+            itemName: li.itemName ?? li.item_name_snapshot ?? "",
+            unit: li.unit ?? li.unit_snapshot ?? "",
+            packQty: li.packQtySnapshot ?? li.packQty ?? li.pack_qty_snapshot ?? 1,
+            unitPrice: li.unitPrice ?? li.unit_price ?? 0,
+            quantityRequested: li.quantityRequested ?? li.quantity_requested ?? 0,
+            sourceCommissary: li.sourceCommissary ?? li.source_commissary_snapshot ?? (isLocal ? "Local Vendor" : "Commissary HQ"),
+            requisitionItemId: li.id ?? null,
+          };
+        }).filter((li) => (li.catalogItemId || li.finishedGoodId || li.itemId) && li.quantityRequested > 0);
+
+        const restoredQty: Record<string, number> = {};
+        draftItems.forEach(li => {
+          const id = li.catalogItemId ?? li.finishedGoodId ?? li.itemId;
+          if (id) restoredQty[id] = li.quantityRequested;
+        });
+
+        setActiveDraftRequisitionId(res.data.requisition.id);
+        setIsDraftCartRestored(true);
+        setLineItems(draftItems);
+        setDraftNotes(res.data.requisition.notes || "");
+        setCatalogQtyById(restoredQty);
+        if (draftItems.length > 0) {
+          setDraftNotice(`Restored saved draft ${res.data.requisition.id}.`);
+          window.setTimeout(() => setDraftNotice(null), 4000);
+        }
+      } finally {
+        if (!cancelled) setIsRestoringDraft(false);
+      }
+    }
+
+    restoreDraft();
+    return () => { cancelled = true; };
+  }, [profile.locationId]);
 
   useEffect(() => {
     if (!selectedReq) { setReqLineItems([]); return; }
@@ -599,42 +685,29 @@ function LocationManagerView({
 
     setIsSaving(true);
     try {
-      const userId = await getCurrentUserId();
-      if (!userId) { setSaveError("Not authenticated."); return; }
       if (!profile.locationId) { setSaveError("Your profile has no location assigned."); return; }
 
-      const reqId = `REQ-${Date.now()}`;
-      const res = await saveNewRequisition(
-        {
-          id:          reqId,
-          location_id: profile.locationId,
-          created_by:  userId,
-          status:      "submitted",
-          notes:       draftNotes,
-          date:        new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
-        },
-        lineItems.map(li => ({
-          item_id:                     li.catalogItemId ? null : (li.finishedGoodId ? null : li.itemId),
-          finished_good_id:            li.finishedGoodId ?? null,
-          catalog_item_id:             li.catalogItemId ?? null,
-          source_type:                 li.sourceType,
-          supplier_snapshot:           li.supplierSnapshot ?? null,
-          pack_qty_snapshot:           li.packQty ?? 1,
-          item_name_snapshot:          li.itemName,
-          unit_snapshot:               li.unit,
-          source_commissary_snapshot:  li.sourceType === 'local_vendor' ? null : (li.sourceCommissary ?? "Commissary HQ"),
-          quantity_requested:          li.quantityRequested,
-          unit_price:                  li.unitPrice,
-          line_total:                  parseFloat((li.quantityRequested * li.unitPrice).toFixed(2)),
-        }))
+      const saveRes = await saveRequisitionDraft(
+        profile.locationId,
+        draftNotes,
+        lineItems.map(mapDraftLineForSave)
       );
 
-      if (!res.success) {
-        setSaveError(res.error?.message ?? "Save failed. Check console.");
+      if (!saveRes.success || !saveRes.data?.requisitionId) {
+        setSaveError(saveRes.error?.message ?? "Draft save failed. Check console.");
         return;
       }
 
-      const notifyRes = await sendHqRequisitionNotification(reqId);
+      const submitRes = await submitRequisitionDraft(saveRes.data.requisitionId, profile.locationId);
+      if (!submitRes.success) {
+        setSaveError(submitRes.error?.message ?? "Draft submit failed. Check console.");
+        setActiveDraftRequisitionId(saveRes.data.requisitionId);
+        setIsDraftCartRestored(true);
+        return;
+      }
+
+      const submittedReqId = submitRes.data?.requisitionId ?? saveRes.data.requisitionId;
+      const notifyRes = await sendHqRequisitionNotification(submittedReqId);
       if (notifyRes.success) {
         showSubmitNotice("success", "Order submitted. HQ notification email sent.");
       } else {
@@ -642,17 +715,48 @@ function LocationManagerView({
         showSubmitNotice("warning", "Order submitted. HQ email notification failed.");
       }
 
-      setLineItems([]);
-      setDraftNotes("");
+      clearDraftCartState();
       await fetchReqs();
     } finally {
       setIsSaving(false);
     }
   };
 
-  const handleSaveDraft = () => {
-    setDraftNotice(lineItems.length > 0 ? "Draft kept in this order cart." : "Add items before saving a draft.");
-    window.setTimeout(() => setDraftNotice(null), 4000);
+  const handleSaveDraft = async () => {
+    setSaveError(null);
+    if (lineItems.length === 0) {
+      setDraftNotice("Add items before saving a draft.");
+      window.setTimeout(() => setDraftNotice(null), 4000);
+      return;
+    }
+    if (lineItems.some(li => li.quantityRequested <= 0)) {
+      setSaveError("All items must have a quantity greater than 0.");
+      return;
+    }
+    if (!profile.locationId) {
+      setSaveError("Your profile has no location assigned.");
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      const res = await saveRequisitionDraft(
+        profile.locationId,
+        draftNotes,
+        lineItems.map(mapDraftLineForSave)
+      );
+      if (!res.success || !res.data?.requisitionId) {
+        setSaveError(res.error?.message ?? "Draft save failed. Check console.");
+        return;
+      }
+      setActiveDraftRequisitionId(res.data.requisitionId);
+      setIsDraftCartRestored(true);
+      setDraftNotice(`Draft saved as ${res.data.requisitionId}.`);
+      window.setTimeout(() => setDraftNotice(null), 4000);
+      await fetchReqs();
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const handleStartEditRequisition = () => {
@@ -824,7 +928,7 @@ function LocationManagerView({
               id="btn-submit-requisition"
               type="button"
               onClick={handleCreate}
-              disabled={isSaving || lineItems.filter(li => li.quantityRequested > 0).length === 0}
+              disabled={isSaving || isRestoringDraft || lineItems.filter(li => li.quantityRequested > 0).length === 0}
               className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-emerald-700 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShoppingCart className="h-4 w-4" />}
@@ -1200,6 +1304,14 @@ function LocationManagerView({
                 <div className="rounded-xl bg-emerald-50 p-2 text-emerald-700"><ShoppingCart className="h-5 w-5" /></div>
               </div>
               <div className="space-y-4 p-5">
+                {!editingRequisitionId && isDraftCartRestored && activeDraftRequisitionId && (
+                  <div className="flex items-start gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+                    <Save className="mt-0.5 h-4 w-4 shrink-0" />
+                    <span>
+                      Saved draft <strong>{activeDraftRequisitionId}</strong> restored. Save again to update it, or submit this same draft.
+                    </span>
+                  </div>
+                )}
                 {saveError && (
                   <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
                     <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -1307,14 +1419,15 @@ function LocationManagerView({
                       <button
                         type="button"
                         onClick={handleSaveDraft}
-                        className="min-h-11 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                        disabled={isSaving || isRestoringDraft || lineItems.length === 0}
+                        className="min-h-11 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
                       >
-                        Save Draft
+                        {isSaving ? "Saving Draft..." : "Save Draft"}
                       </button>
                       <button
                         type="button"
                         onClick={handleCreate}
-                        disabled={isSaving || lineItems.length === 0}
+                        disabled={isSaving || isRestoringDraft || lineItems.length === 0}
                         className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-emerald-700 px-4 text-sm font-semibold text-white transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
@@ -2229,7 +2342,8 @@ function HQAdminView({
   );
 
   return (
-    <DarkPageShell>
+    <>
+      <DarkPageShell>
       {/* Header + Tab toggle */}
       <div className="flex flex-col gap-3 print:hidden lg:flex-row lg:items-center lg:justify-between">
         <div>
@@ -3571,25 +3685,25 @@ function HQAdminView({
           </div>
         </div>
       )}
-    </DarkPageShell>
+      </DarkPageShell>
 
-    {/* ── Delivery Ticket Drawer ──────────────────────────────────────────────
-       Opened by hq_fulfillment clicking "View Delivery Ticket". Other roles
-       navigate to /deliveries and use the full deliveries page instead. */}
-    <DeliveryTicketDrawer
-      ticket={dtDrawerTicket}
-      onClose={() => setDtDrawerTicket(null)}
-      onRefresh={async () => {
-        if (dtDrawerTicket?.id) {
-          const res = await getDeliveryTicketById(dtDrawerTicket.id);
-          if (res.success && res.data) setDtDrawerTicket(res.data);
-        }
-      }}
-      user={profile ? { id: profile.id, email: "", name: profile.fullName ?? "", role: profile.role ?? null, locationId: profile.locationId ?? null } : null}
-      canEditAdmin={isHqMaster(profile)}
-      canActOnTicket={isHqMaster(profile) || isHqOps(profile)}
-      onToast={() => { /* requisitions page has no toast banner — could add one in future */ }}
-    />
+      {/* ── Delivery Ticket Drawer ─────────────────────────────────────────────
+         Opened by hq_fulfillment clicking "View Delivery Ticket". Other roles
+         navigate to /deliveries and use the full deliveries page instead. */}
+      <DeliveryTicketDrawer
+        ticket={dtDrawerTicket}
+        onClose={() => setDtDrawerTicket(null)}
+        onRefresh={async () => {
+          if (dtDrawerTicket?.id) {
+            const res = await getDeliveryTicketById(dtDrawerTicket.id);
+            if (res.success && res.data) setDtDrawerTicket(res.data);
+          }
+        }}
+        user={profile ? { id: profile.id, email: "", name: profile.fullName ?? "", role: profile.role ?? null, locationId: profile.locationId ?? null } : null}
+        canEditAdmin={isHqMaster(profile)}
+        canActOnTicket={isHqMaster(profile) || isHqOps(profile)}
+        onToast={() => {}}
+      />
     </>
   );
 }
