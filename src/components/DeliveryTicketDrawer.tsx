@@ -28,16 +28,19 @@ import {
   Clock,
   FileText,
   MapPin,
+  Package,
   Printer,
   RefreshCw,
   Truck,
   UserRound,
+  Wrench,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import {
   markDeliveryTicketArrived,
   markDeliveryTicketDelivered,
   reportDeliveryTicketIssue,
+  repairPackBreakdownForTicket,
   updateDeliveryTicket,
   updateDeliveryTicketItems,
   updateDeliveryTicketStatus,
@@ -63,6 +66,80 @@ const labelize = (value: string) =>
 
 const getTicketPrintUrl = (ticketId: string, mode?: "print" | "pdf") =>
   `/deliveries/tickets/${ticketId}/print${mode ? `?mode=${mode}` : ""}`;
+
+const getPackingViewUrl = (ticketId: string) =>
+  `/deliveries/tickets/${ticketId}/packing`;
+
+// ── Pack display helper ─────────────────────────────────────────────────────
+// Derives display strings from a ticket item's pack snapshot fields.
+// Returns null for each field when the value cannot be determined safely.
+function getPackingDisplay(item: any): {
+  packSizeLabel: string;
+  pullLabel: string;
+  totalLabel: string;
+  isMissing: boolean;
+  isLoose: boolean;
+} {
+  const packLabel     = item.packLabelSnapshot as string | null;
+  const packQty       = item.packQtySnapshot   as number | null;
+  const packUnit      = item.packUnitSnapshot  as string | null;
+  const packCount     = item.shippedPackCount  as number | null;
+  const baseQty       = item.shippedBaseQty    as number | null;
+  const shippedQty    = Number(item.shippedQty ?? 0);
+
+  // Case 1: fully missing — no pack info at all
+  if (packQty == null && packLabel == null && packCount == null && baseQty == null) {
+    return {
+      packSizeLabel: "Pack config missing",
+      pullLabel: "—",
+      totalLabel: `${shippedQty}${item.unit ? ` ${item.unit}` : ""}`,
+      isMissing: true,
+      isLoose: false,
+    };
+  }
+
+  // Case 2: pack-based item (has pack count and base qty)
+  if (packCount != null && baseQty != null) {
+    const sizeStr = packLabel ?? (packQty != null && packUnit ? `${packQty} ${packUnit}` : null) ?? "packed";
+    const baseStr = packUnit
+      ? formatQty(baseQty, packUnit)
+      : String(baseQty);
+    return {
+      packSizeLabel: sizeStr,
+      pullLabel: `${packCount} pack${packCount !== 1 ? "s" : ""}`,
+      totalLabel: `${packCount} pack${packCount !== 1 ? "s" : ""} · ${baseStr}`,
+      isMissing: false,
+      isLoose: false,
+    };
+  }
+
+  // Case 3: loose / base-unit item (no pack count, has base qty)
+  if (packCount == null && baseQty != null) {
+    const unitStr = packUnit ?? item.unit ?? "";
+    return {
+      packSizeLabel: packLabel ?? "Loose",
+      pullLabel: "—",
+      totalLabel: formatQty(baseQty, unitStr),
+      isMissing: false,
+      isLoose: true,
+    };
+  }
+
+  // Fallback
+  return {
+    packSizeLabel: "Pack config missing",
+    pullLabel: "—",
+    totalLabel: `${shippedQty}${item.unit ? ` ${item.unit}` : ""}`,
+    isMissing: true,
+    isLoose: false,
+  };
+}
+
+function formatQty(qty: number, unit: string): string {
+  // Show one decimal for fractional values, whole numbers otherwise
+  const str = Number.isInteger(qty) ? String(qty) : qty.toFixed(1);
+  return unit ? `${str} ${unit}` : str;
+}
 
 function formatDateTime(value?: string) {
   if (!value) return "—";
@@ -179,6 +256,12 @@ export function DeliveryTicketDrawer({
     }
   };
 
+  const openPackingView = (t: any) => {
+    if (!t?.id) { onToast("Delivery ticket is missing an internal ID."); return; }
+    const win = window.open(getPackingViewUrl(t.id), "_blank", "noopener,noreferrer");
+    if (!win) onToast("Browser blocked the packing view. Allow pop-ups and try again.");
+  };
+
   const saveTicketItems = async () => {
     if (!ticket) return;
     const res = await updateDeliveryTicketItems(ticket.id, ticketItemDrafts);
@@ -286,6 +369,12 @@ export function DeliveryTicketDrawer({
               >
                 <ChevronRight className="h-4 w-4" /> Open Print View
               </button>
+              <button
+                onClick={() => openPackingView(ticket)}
+                className="inline-flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700 hover:bg-emerald-100"
+              >
+                <Package className="h-4 w-4" /> Packing View
+              </button>
             </div>
 
             {/* Operational / admin actions — gated by permission */}
@@ -382,6 +471,12 @@ export function DeliveryTicketDrawer({
               >
                 <ChevronRight className="h-4 w-4" /> Open Print View
               </button>
+              <button
+                onClick={() => openPackingView(ticket)}
+                className="inline-flex items-center gap-2 rounded-lg border border-emerald-300 bg-white px-3 py-2 text-sm font-semibold text-emerald-700 hover:bg-emerald-50"
+              >
+                <Package className="h-4 w-4" /> Packing View
+              </button>
             </div>
           </div>
 
@@ -444,98 +539,163 @@ export function DeliveryTicketDrawer({
 
             {/* Line items */}
             <div className="mt-5 overflow-x-auto">
+              {/* Data quality warning — shown when any item is missing pack configuration */}
+              {(() => {
+                const missingPackCount = ticketItemDrafts.filter(
+                  (it) => it.shippedQty > 0 && it.packQtySnapshot == null
+                ).length;
+                return missingPackCount > 0 ? (
+                  <div className="mb-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5">
+                    <span className="mt-0.5 text-amber-600">⚠️</span>
+                    <p className="text-xs font-semibold text-amber-800">
+                      {missingPackCount === ticketItemDrafts.length
+                        ? "All"
+                        : missingPackCount}{" "}
+                      item{missingPackCount !== 1 ? "s" : ""} missing pack
+                      configuration — confirm quantities manually before dispatch.
+                      {canEditAdmin && (
+                        <span className="ml-1 text-amber-700">
+                          Use the “Generate Packing Breakdown” button below to
+                          backfill.
+                        </span>
+                      )}
+                    </p>
+                  </div>
+                ) : null;
+              })()}
+
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-neutral-200 text-left text-xs uppercase text-neutral-500">
-                    <th className="py-2">Item</th>
-                    <th className="py-2 text-right">Requested</th>
-                    <th className="py-2 text-right">Approved</th>
-                    <th className="py-2 text-right">Shipped</th>
+                    <th className="py-2 pr-3">Item</th>
+                    {/* Packing columns — warehouse facing */}
+                    <th className="py-2 pr-2 text-right">Pack Size</th>
+                    <th className="py-2 pr-2 text-right">Pull</th>
+                    <th className="py-2 pr-3 text-right">Total Qty</th>
+                    {/* Delivery tracking columns — driver / location facing */}
                     <th className="py-2 text-right">Delivered</th>
                     <th className="py-2 text-right">Issue</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {ticketItemDrafts.map((item, index) => (
-                    <tr
-                      key={item.id}
-                      className="border-b border-neutral-100"
-                    >
-                      <td className="py-2 font-medium text-neutral-900">
-                        {item.itemName}
-                        <div className="text-xs text-neutral-400">
-                          {item.unit}
-                        </div>
-                      </td>
-                      <td className="py-2 text-right">{item.requestedQty}</td>
-                      <td className="py-2 text-right">{item.approvedQty}</td>
-                      <td className="py-2 text-right">{item.shippedQty}</td>
-                      <td className="py-2 text-right">
-                        {canActOnTicket ? (
-                          <input
-                            type="number"
-                            min="0"
-                            value={item.deliveredQty}
-                            onChange={(e) =>
-                              setTicketItemDrafts((prev) =>
-                                prev.map((row, idx) =>
-                                  idx === index
-                                    ? {
-                                        ...row,
-                                        deliveredQty: Number(e.target.value),
-                                      }
-                                    : row
-                                )
-                              )
-                            }
-                            className="w-20 rounded border border-neutral-200 px-2 py-1 text-right"
-                          />
-                        ) : (
-                          item.deliveredQty
-                        )}
-                      </td>
-                      <td className="py-2 text-right">
-                        {canActOnTicket ? (
-                          <div className="flex justify-end gap-2">
+                  {ticketItemDrafts.map((item, index) => {
+                    const packing = getPackingDisplay(item);
+                    return (
+                      <tr
+                        key={item.id}
+                        className="border-b border-neutral-100"
+                      >
+                        {/* Item name + unit */}
+                        <td className="py-2 pr-3 font-medium text-neutral-900">
+                          {item.itemName}
+                          <div className="text-xs text-neutral-400">
+                            {item.unit}
+                          </div>
+                        </td>
+
+                        {/* Pack Size */}
+                        <td className="py-2 pr-2 text-right">
+                          {packing.isMissing ? (
+                            <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+                              Config missing
+                            </span>
+                          ) : packing.isLoose ? (
+                            <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-semibold text-slate-600">
+                              Loose
+                            </span>
+                          ) : (
+                            <span className="text-xs text-neutral-700">{packing.packSizeLabel}</span>
+                          )}
+                        </td>
+
+                        {/* Pull (packs to pick) */}
+                        <td className="py-2 pr-2 text-right">
+                          <span className={`text-sm font-semibold ${
+                            packing.isMissing ? "text-amber-600" :
+                            packing.isLoose  ? "text-neutral-400" :
+                            "text-neutral-900"
+                          }`}>
+                            {packing.pullLabel}
+                          </span>
+                        </td>
+
+                        {/* Total Qty */}
+                        <td className="py-2 pr-3 text-right">
+                          <span className="text-sm font-medium text-neutral-800">
+                            {packing.totalLabel}
+                          </span>
+                        </td>
+
+                        {/* Delivered Qty — editable for operational roles */}
+                        <td className="py-2 text-right">
+                          {canActOnTicket ? (
                             <input
                               type="number"
                               min="0"
-                              value={item.issueQty}
+                              value={item.deliveredQty}
                               onChange={(e) =>
                                 setTicketItemDrafts((prev) =>
                                   prev.map((row, idx) =>
                                     idx === index
                                       ? {
                                           ...row,
-                                          issueQty: Number(e.target.value),
+                                          deliveredQty: Number(e.target.value),
                                         }
                                       : row
                                   )
                                 )
                               }
-                              className="w-16 rounded border border-neutral-200 px-2 py-1 text-right"
+                              className="w-20 rounded border border-neutral-200 px-2 py-1 text-right"
                             />
-                            <input
-                              value={item.issueReason ?? ""}
-                              onChange={(e) =>
-                                setTicketItemDrafts((prev) =>
-                                  prev.map((row, idx) =>
-                                    idx === index
-                                      ? { ...row, issueReason: e.target.value }
-                                      : row
+                          ) : (
+                            item.deliveredQty
+                          )}
+                        </td>
+
+                        {/* Issue Qty + Reason — editable for operational roles */}
+                        <td className="py-2 text-right">
+                          {canActOnTicket ? (
+                            <div className="flex justify-end gap-2">
+                              <input
+                                type="number"
+                                min="0"
+                                value={item.issueQty}
+                                onChange={(e) =>
+                                  setTicketItemDrafts((prev) =>
+                                    prev.map((row, idx) =>
+                                      idx === index
+                                        ? {
+                                            ...row,
+                                            issueQty: Number(e.target.value),
+                                          }
+                                        : row
+                                    )
                                   )
-                                )
-                              }
-                              placeholder="Reason"
-                              className="w-32 rounded border border-neutral-200 px-2 py-1"
-                            />
-                          </div>
-                        ) : (
-                          item.issueQty
-                        )}
-                      </td>
-                    </tr>
-                  ))}
+                                }
+                                className="w-16 rounded border border-neutral-200 px-2 py-1 text-right"
+                              />
+                              <input
+                                value={item.issueReason ?? ""}
+                                onChange={(e) =>
+                                  setTicketItemDrafts((prev) =>
+                                    prev.map((row, idx) =>
+                                      idx === index
+                                        ? { ...row, issueReason: e.target.value }
+                                        : row
+                                    )
+                                  )
+                                }
+                                placeholder="Reason"
+                                className="w-32 rounded border border-neutral-200 px-2 py-1"
+                              />
+                            </div>
+                          ) : (
+                            item.issueQty
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -555,7 +715,7 @@ export function DeliveryTicketDrawer({
             </div>
           </div>
 
-          {/* Address edit section — admin only */}
+          {/* Address edit + repair section — admin only */}
           {canEditAdmin && (
             <div className="rounded-xl border border-neutral-200 bg-white p-4 space-y-3">
               <p className="text-xs font-bold uppercase tracking-wider text-neutral-500">
@@ -631,7 +791,7 @@ export function DeliveryTicketDrawer({
                 </div>
               </div>
 
-              <div className="pt-2">
+              <div className="pt-2 flex flex-col gap-2">
                 <button
                   onClick={async () => {
                     const res: any = await updateTicketAddressFromProfile(
@@ -652,6 +812,25 @@ export function DeliveryTicketDrawer({
                 >
                   <RefreshCw className="h-3.5 w-3.5" /> Update Address from
                   Store Profile
+                </button>
+
+                {/* Generate Packing Breakdown — HQ admin only repair for open tickets */}
+                <button
+                  onClick={async () => {
+                    if (!ticket?.id) return;
+                    const res = await repairPackBreakdownForTicket(ticket.id);
+                    if (!res.success) {
+                      alert(`Pack repair failed: ${res.error?.message ?? "Unknown error"}`);
+                    } else if (res.updatedCount === 0 && res.skippedCount === 0) {
+                      onToast("All items already have pack breakdown data.");
+                    } else {
+                      onToast(`Pack breakdown generated for ${res.updatedCount} item${res.updatedCount !== 1 ? "s" : ""}.${res.skippedCount > 0 ? ` ${res.skippedCount} item${res.skippedCount !== 1 ? "s" : ""} had no pack configuration available.` : ""}`);
+                      await onRefresh();
+                    }
+                  }}
+                  className="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-100"
+                >
+                  <Wrench className="h-3.5 w-3.5" /> Generate Packing Breakdown from Requisition
                 </button>
               </div>
             </div>

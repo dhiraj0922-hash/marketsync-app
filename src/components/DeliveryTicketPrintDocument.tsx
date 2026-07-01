@@ -18,6 +18,57 @@ const formatDateTime = (value?: string | Date | null) => {
 const labelize = (value?: string | null) =>
   String(value || "draft").replace(/_/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
 
+// ── Pack display helper for print ─────────────────────────────────────────
+// Returns display strings suitable for printing on a warehouse pick list.
+function getPackingPrint(item: any): {
+  packSize: string;
+  pull: string;
+  total: string;
+  isMissing: boolean;
+} {
+  const packLabel = item.packLabelSnapshot as string | null;
+  const packQty   = item.packQtySnapshot   as number | null;
+  const packUnit  = item.packUnitSnapshot  as string | null;
+  const packCount = item.shippedPackCount  as number | null;
+  const baseQty   = item.shippedBaseQty    as number | null;
+  const shippedQty = Number(item.shippedQty ?? 0);
+  const unitStr   = packUnit ?? item.unit ?? "";
+
+  const fmtQty = (q: number, u: string) => {
+    const s = Number.isInteger(q) ? String(q) : q.toFixed(1);
+    return u ? `${s} ${u}` : s;
+  };
+
+  // Missing
+  if (packQty == null && packLabel == null && packCount == null && baseQty == null) {
+    return {
+      packSize: "—",
+      pull: "—",
+      total: fmtQty(shippedQty, unitStr),
+      isMissing: true,
+    };
+  }
+
+  // Pack-based
+  if (packCount != null && baseQty != null) {
+    const sizeStr = packLabel ?? (packQty != null && packUnit ? `${packQty} ${packUnit}` : "packed");
+    return {
+      packSize: sizeStr,
+      pull: `${packCount} pack${packCount !== 1 ? "s" : ""}`,
+      total: fmtQty(baseQty, unitStr),
+      isMissing: false,
+    };
+  }
+
+  // Loose
+  return {
+    packSize: packLabel ?? "Loose",
+    pull: "—",
+    total: fmtQty(baseQty ?? shippedQty, unitStr),
+    isMissing: false,
+  };
+}
+
 function Detail({ label, value }: { label: string; value?: React.ReactNode }) {
   return (
     <div className="ticket-detail">
@@ -238,6 +289,37 @@ export function DeliveryTicketPrintStyles() {
         .ticket-detail-grid { grid-template-columns: 1fr; }
         .ticket-proof-grid { grid-template-columns: 1fr; }
       }
+      /* Packing list table */
+      .ticket-packing-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 11px;
+        margin-top: 6px;
+      }
+      .ticket-packing-table th {
+        border: 1px solid #9ca3af;
+        background: #ecfdf5;
+        padding: 6px 6px;
+        text-align: left;
+        font-size: 9px;
+        font-weight: 900;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #065f46;
+      }
+      .ticket-packing-table td {
+        border: 1px solid #d1d5db;
+        padding: 7px 6px;
+        vertical-align: middle;
+      }
+      .ticket-packing-check {
+        width: 32px;
+        text-align: center;
+        font-size: 14px;
+      }
+      .ticket-packing-item { font-weight: 700; }
+      .ticket-packing-sub  { font-size: 10px; color: #6b7280; margin-top: 2px; }
+      .ticket-packing-warn { font-size: 9px; font-weight: 700; color: #b45309; }
     `}</style>
   );
 }
@@ -333,6 +415,51 @@ export function DeliveryTicketPrintDocument({
           </tbody>
         </table>
       </section>
+
+      {items.length > 0 && (
+        <section className="ticket-section">
+          <h2 className="ticket-section-title">Packing List</h2>
+          {items.some((it: any) => it.shippedQty > 0 && it.packQtySnapshot == null) && (
+            <div style={{ marginBottom: 8, padding: "6px 10px", background: "#fffbeb", border: "1px solid #fbbf24", borderRadius: 6, fontSize: 10, fontWeight: 700, color: "#92400e" }}>
+              ⚠ One or more items are missing pack configuration — confirm quantities manually before dispatch.
+            </div>
+          )}
+          <table className="ticket-packing-table">
+            <thead>
+              <tr>
+                <th className="ticket-packing-check">✓</th>
+                <th>Item</th>
+                <th>Pack Size</th>
+                <th>Pull (packs)</th>
+                <th>Total Qty</th>
+                <th style={{ minWidth: 56 }}>Checked By</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((item: any, index: number) => {
+                const pk = getPackingPrint(item);
+                return (
+                  <tr key={`packing-${item.id || index}`}>
+                    <td className="ticket-packing-check">□</td>
+                    <td>
+                      <div className="ticket-packing-item">{item.itemName}</div>
+                      {pk.isMissing && (
+                        <div className="ticket-packing-warn">
+                          Pack config missing — confirm manually
+                        </div>
+                      )}
+                    </td>
+                    <td>{pk.packSize}</td>
+                    <td style={{ fontWeight: 700 }}>{pk.pull}</td>
+                    <td>{pk.total}</td>
+                    <td className="ticket-write-cell" />
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </section>
+      )}
 
       <section className="ticket-section">
         <h2 className="ticket-section-title">Notes</h2>

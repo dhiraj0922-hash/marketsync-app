@@ -5265,6 +5265,14 @@ const mapDeliveryTicketItemToFrontend = (db: any) => ({
   issueQty: Number(db.issue_qty ?? 0),
   issueReason: db.issue_reason ?? '',
   createdAt: db.created_at,
+  // ── Pack breakdown snapshots (added by migration_delivery_ticket_pack_snapshots.sql)
+  // All values are captured at ticket-creation time and never recalculated live.
+  // NULL on rows created before this migration was applied.
+  packQtySnapshot:   db.pack_qty_snapshot   != null ? Number(db.pack_qty_snapshot)  : null,
+  packUnitSnapshot:  db.pack_unit_snapshot  ?? null,
+  packLabelSnapshot: db.pack_label_snapshot ?? null,
+  shippedPackCount:  db.shipped_pack_count  != null ? Number(db.shipped_pack_count) : null,
+  shippedBaseQty:    db.shipped_base_qty    != null ? Number(db.shipped_base_qty)   : null,
 });
 
 const mapDeliveryRunToFrontend = (db: any): any => ({
@@ -5566,6 +5574,81 @@ export async function createDeliveryTicketFromRequisition(requisitionId: string)
       ? (item.quantityFulfilled != null ? Number(item.quantityFulfilled) : Number(item.allocatedQty ?? 0))
       : Number(item.quantityApproved ?? item.quantityFulfilled ?? requestedQty);
     const shippedQty = approvedQty;
+
+    // ── Pack snapshot computation ─────────────────────────────────────────────
+    //
+    // Quantity semantics in requisition_items:
+    //   • isFGMode (finished_good_id is set): quantities are PACK COUNTS.
+    //     The fulfillment UI stores and displays packs; base quantity = packs × packQtySnapshot.
+    //   • Raw inventory items (itemId set, no finishedGoodId): quantities are BASE UNITS.
+    //     No multiplication needed.
+    //
+    // Safeguard 1 (per user requirement): do NOT rely solely on isFGMode.
+    //   We additionally require pack_qty_snapshot > 1 to treat a line as pack-based.
+    //   This prevents doubling base-unit quantities on legacy rows where pack_qty_snapshot
+    //   defaults to 1.
+    //
+    // Safeguard 2: only compute shipped_base_qty when we are confident about semantics.
+    //   If pack information is missing or ambiguous → leave all four columns NULL,
+    //   and the UI will show the "confirm manually" warning.
+    //
+    // pack_label_snapshot preserves the original container wording if available.
+    // We fall back to "/ pack" only when no specific container label exists.
+
+    const rawPackQty = item.packQtySnapshot ?? null; // already Number | 1 from mapReqItemRow
+    // Treat as pack-based only if:
+    //   - the item has a finished_good_id (FG mode — quantity is in packs), AND
+    //   - pack_qty_snapshot is present and > 1 (non-trivial pack — not a bare base unit)
+    const isPackBased = !!item.finishedGoodId && rawPackQty != null && rawPackQty > 1;
+
+    // Build the label — preserve container wording from the catalog if it exists.
+    // outlet_catalog_items may carry a 'pack_label' field; we check item.packLabel first.
+    let packLabelSnapshot: string | null = null;
+    let packQtySnapshotOut: number | null = null;
+    let packUnitSnapshotOut: string | null = null;
+    let shippedPackCount: number | null = null;
+    let shippedBaseQty: number | null = null;
+
+    if (isPackBased) {
+      packQtySnapshotOut = rawPackQty!;
+      packUnitSnapshotOut = item.unit ?? null; // base unit (g, pcs, L, kg, ea …)
+      // Use catalog pack label if available; otherwise build one from qty + unit.
+      const catalogLabel: string | null = item.packLabel ?? item.pack_label ?? null;
+      packLabelSnapshot = catalogLabel
+        ? catalogLabel
+        : `${rawPackQty} ${item.unit ?? ''} / pack`.trim();
+      // shipped_qty is PACK COUNT for FG items
+      shippedPackCount = shippedQty;
+      shippedBaseQty   = shippedQty * rawPackQty!;
+    } else if (item.finishedGoodId && rawPackQty != null && rawPackQty <= 1) {
+      // FG item but pack_qty_snapshot = 1 → it is a unit-per-unit item (ea / piece).
+      // Treat as loose: shipped_qty is already the base quantity.
+      packQtySnapshotOut = 1;
+      packUnitSnapshotOut = item.unit ?? null;
+      packLabelSnapshot = null; // show as "Loose"
+      shippedPackCount = null;
+      shippedBaseQty   = shippedQty;
+    } else if (!item.finishedGoodId && rawPackQty != null && rawPackQty > 1) {
+      // Raw inventory item with pack info — quantity is in base units.
+      // Do NOT multiply; shipped_qty is already base units.
+      packQtySnapshotOut = rawPackQty;
+      packUnitSnapshotOut = item.unit ?? null;
+      const catalogLabel: string | null = item.packLabel ?? item.pack_label ?? null;
+      packLabelSnapshot = catalogLabel
+        ? catalogLabel
+        : `${rawPackQty} ${item.unit ?? ''} / pack`.trim();
+      shippedPackCount = null;          // base-unit line — no pack count
+      shippedBaseQty   = shippedQty;    // already in base units
+    } else {
+      // No usable pack information — all pack columns remain NULL.
+      // The UI will display: "Pack configuration missing — confirm quantity manually before dispatch."
+      packQtySnapshotOut = null;
+      packUnitSnapshotOut = null;
+      packLabelSnapshot = null;
+      shippedPackCount = null;
+      shippedBaseQty = null;
+    }
+
     return {
       delivery_ticket_id: ticket.id,
       requisition_item_id: item.id,
@@ -5578,6 +5661,12 @@ export async function createDeliveryTicketFromRequisition(requisitionId: string)
       delivered_qty: 0,
       issue_qty: 0,
       issue_reason: null,
+      // Pack breakdown snapshots
+      pack_qty_snapshot:   packQtySnapshotOut,
+      pack_unit_snapshot:  packUnitSnapshotOut,
+      pack_label_snapshot: packLabelSnapshot,
+      shipped_pack_count:  shippedPackCount,
+      shipped_base_qty:    shippedBaseQty,
     };
   });
 
@@ -5591,6 +5680,139 @@ export async function createDeliveryTicketFromRequisition(requisitionId: string)
   const { error: itemError } = await supabase.from('delivery_ticket_items').insert(itemRows);
   if (itemError) return { success: false, error: itemError };
   return await getDeliveryTicketById(ticket.id);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// repairPackBreakdownForTicket
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// HQ-only repair action: backfill pack snapshot columns on existing open tickets
+// that were created before migration_delivery_ticket_pack_snapshots.sql was run.
+//
+// Safety constraints:
+//   - Only updates tickets whose status is NOT 'delivered' or 'cancelled'.
+//   - Only updates items whose pack columns are currently NULL (already-set rows
+//     are left untouched to preserve historical accuracy).
+//   - Applies the same quantity-semantics rules as createDeliveryTicketFromRequisition.
+//   - Does NOT change shipped_qty, delivered_qty, issue_qty or any financial field.
+//
+export async function repairPackBreakdownForTicket(
+  ticketId: string
+): Promise<{ success: boolean; updatedCount: number; skippedCount: number; error?: any }> {
+  // 1. Fetch the ticket to check status.
+  const { data: ticket, error: ticketErr } = await supabase
+    .from('delivery_tickets')
+    .select('id, status')
+    .eq('id', ticketId)
+    .single();
+  if (ticketErr || !ticket) {
+    return { success: false, updatedCount: 0, skippedCount: 0, error: ticketErr ?? { message: 'Ticket not found.' } };
+  }
+
+  const safeStatuses = ['draft', 'assigned', 'loaded', 'out_for_delivery', 'issue_reported'];
+  if (!safeStatuses.includes(String(ticket.status ?? '').toLowerCase())) {
+    return {
+      success: false,
+      updatedCount: 0,
+      skippedCount: 0,
+      error: { message: `Cannot repair a ticket with status "${ticket.status}". Only open tickets (draft, assigned, loaded, out_for_delivery, issue_reported) can be repaired.` },
+    };
+  }
+
+  // 2. Load the ticket items that still have NULL pack columns.
+  const { data: ticketItems, error: itemsErr } = await supabase
+    .from('delivery_ticket_items')
+    .select('id, requisition_item_id, shipped_qty, pack_qty_snapshot')
+    .eq('delivery_ticket_id', ticketId)
+    .is('pack_qty_snapshot', null);
+  if (itemsErr) return { success: false, updatedCount: 0, skippedCount: 0, error: itemsErr };
+  if (!ticketItems || ticketItems.length === 0) {
+    return { success: true, updatedCount: 0, skippedCount: 0 };
+  }
+
+  // 3. Load the linked requisition items (need pack_qty_snapshot + source info).
+  const reqItemIds = ticketItems
+    .map((ti: any) => ti.requisition_item_id)
+    .filter(Boolean) as string[];
+
+  if (reqItemIds.length === 0) {
+    return { success: true, updatedCount: 0, skippedCount: ticketItems.length };
+  }
+
+  const { data: reqRows, error: reqErr } = await supabase
+    .from('requisition_items')
+    .select('id, finished_good_id, item_id, pack_qty_snapshot, unit_snapshot, source_type')
+    .in('id', reqItemIds);
+  if (reqErr) return { success: false, updatedCount: 0, skippedCount: 0, error: reqErr };
+
+  const reqMap = new Map((reqRows ?? []).map((r: any) => [r.id, r]));
+
+  // 4. Compute and apply updates.
+  let updatedCount = 0;
+  let skippedCount = 0;
+
+  await Promise.all(ticketItems.map(async (ti: any) => {
+    const req = reqMap.get(ti.requisition_item_id);
+    if (!req) { skippedCount++; return; }
+
+    const shippedQty     = Number(ti.shipped_qty ?? 0);
+    const rawPackQty     = req.pack_qty_snapshot != null ? Number(req.pack_qty_snapshot) : null;
+    const unitSnapshot   = req.unit_snapshot ?? null;
+    const isFGMode       = !!req.finished_good_id;
+    const isPackBased    = isFGMode && rawPackQty != null && rawPackQty > 1;
+
+    let packQtyOut: number | null = null;
+    let packUnitOut: string | null = null;
+    let packLabelOut: string | null = null;
+    let packCountOut: number | null = null;
+    let baseQtyOut: number | null = null;
+
+    if (isPackBased) {
+      packQtyOut   = rawPackQty!;
+      packUnitOut  = unitSnapshot;
+      packLabelOut = rawPackQty != null && unitSnapshot
+        ? `${rawPackQty} ${unitSnapshot} / pack`
+        : null;
+      packCountOut = shippedQty;
+      baseQtyOut   = shippedQty * rawPackQty!;
+    } else if (isFGMode && rawPackQty != null && rawPackQty <= 1) {
+      packQtyOut   = 1;
+      packUnitOut  = unitSnapshot;
+      packLabelOut = null;
+      packCountOut = null;
+      baseQtyOut   = shippedQty;
+    } else if (!isFGMode && rawPackQty != null && rawPackQty > 1) {
+      packQtyOut   = rawPackQty;
+      packUnitOut  = unitSnapshot;
+      packLabelOut = rawPackQty != null && unitSnapshot
+        ? `${rawPackQty} ${unitSnapshot} / pack`
+        : null;
+      packCountOut = null;
+      baseQtyOut   = shippedQty; // base unit line — no multiplication
+    } else {
+      skippedCount++; return; // no pack info available — leave NULL
+    }
+
+    const { error: upErr } = await supabase
+      .from('delivery_ticket_items')
+      .update({
+        pack_qty_snapshot:   packQtyOut,
+        pack_unit_snapshot:  packUnitOut,
+        pack_label_snapshot: packLabelOut,
+        shipped_pack_count:  packCountOut,
+        shipped_base_qty:    baseQtyOut,
+      })
+      .eq('id', ti.id);
+
+    if (upErr) {
+      console.error('[repairPackBreakdownForTicket] item update failed', ti.id, upErr);
+      skippedCount++;
+    } else {
+      updatedCount++;
+    }
+  }));
+
+  return { success: true, updatedCount, skippedCount };
 }
 
 export async function updateDeliveryTicket(id: string, patch: any) {
