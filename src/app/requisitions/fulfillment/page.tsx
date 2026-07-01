@@ -1,17 +1,92 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/components/AuthProvider";
 import { getFulfillmentSummary, saveFulfillmentAllocations, completeFulfillmentMovement, createDeliveryTicketFromRequisition, approveRequisition, rejectRequisition, getActiveDeliveryRuns, assignDeliveryTicketToRun, removeTicketFromDeliveryRun, getDeliveryTicketById } from "@/lib/storage";
 import { isHqFulfillment, isHqMaster, isHqOps } from "@/lib/roles";
-import { ChevronDown, ChevronRight, Search, Save, Check, RefreshCw, AlertTriangle, Play, Sparkles, Truck, PackageCheck, CheckCircle2, XSquare, Loader2, Printer, FileText, X, ExternalLink, List, AlignJustify, AlertOctagon } from "lucide-react";
+import { ChevronDown, ChevronRight, Search, Save, Check, RefreshCw, AlertTriangle, Play, Sparkles, Truck, PackageCheck, CheckCircle2, XSquare, Loader2, Printer, FileText, X, ExternalLink, List, AlignJustify, AlertOctagon, Calendar, CalendarRange, ChevronLeft, ChevronRight as ChevronRightIcon, Info } from "lucide-react";
 import { DeliveryTicketDrawer } from "@/components/DeliveryTicketDrawer";
 
 type PrintScope = "visible" | "locations" | "requisitions" | "items";
 type FulfillmentTab = "summary" | "allocation" | "backorders" | "print";
+type DateFilterMode = "today" | "tomorrow" | "this_week" | "custom" | "range" | "all";
+
+// ─── Date helpers ─────────────────────────────────────────────────────────────
+// Requisitions store `date` as the submission date (locale or ISO string).
+// We normalise to YYYY-MM-DD for comparison.
+
+function toIso(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+function todayIso(): string {
+  return toIso(new Date());
+}
+
+function tomorrowIso(): string {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  return toIso(d);
+}
+
+function weekEndIso(): string {
+  const d = new Date();
+  // end of this ISO week (Sunday)
+  const day = d.getDay(); // 0=Sun
+  const diff = day === 0 ? 6 : 7 - day;
+  d.setDate(d.getDate() + diff);
+  return toIso(d);
+}
+
+/** Normalise any date string the DB might store to YYYY-MM-DD, or null. */
+function normaliseReqDate(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  // Already ISO
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+  // Locale string e.g. "May 10, 2025" or "Jul 1, 2026"
+  const parsed = new Date(raw);
+  if (isNaN(parsed.getTime())) return null;
+  return toIso(parsed);
+}
+
+function fmtDisplayDate(iso: string): string {
+  if (!iso) return "";
+  const d = new Date(iso + "T00:00:00");
+  return d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+}
+
+function modeLabel(mode: DateFilterMode, customDate: string, rangeFrom: string, rangeTo: string): string {
+  switch (mode) {
+    case "today":     return `Today (${fmtDisplayDate(todayIso())})`;
+    case "tomorrow":  return `Tomorrow (${fmtDisplayDate(tomorrowIso())})`;
+    case "this_week": return `This Week`;
+    case "custom":    return customDate ? `${fmtDisplayDate(customDate)}` : "Custom Date";
+    case "range":     return (rangeFrom && rangeTo) ? `${fmtDisplayDate(rangeFrom)} – ${fmtDisplayDate(rangeTo)}` : "Date Range";
+    case "all":       return "All Open Requisitions";
+  }
+}
+
+function batchRef(mode: DateFilterMode, customDate: string, rangeFrom: string): string {
+  const base = mode === "today" ? todayIso()
+    : mode === "tomorrow" ? tomorrowIso()
+    : mode === "custom" && customDate ? customDate
+    : mode === "range" && rangeFrom ? rangeFrom
+    : todayIso();
+  return `FUL-${base.replace(/-/g, "")}-001`;
+}
+
+/** Tiny inline stat for the batch summary strip. */
+function Stat({ label, value, color }: { label: string; value: number; color?: string }) {
+  return (
+    <div className="flex items-baseline gap-1">
+      <span className={`text-base font-black ${color ?? "text-neutral-900"}`}>{value}</span>
+      <span className="text-xs text-neutral-500">{label}</span>
+    </div>
+  );
+}
 
 export default function FulfillmentPage() {
   const { user } = useAuth();
@@ -20,6 +95,39 @@ export default function FulfillmentPage() {
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<FulfillmentTab>("summary");
+
+  // ── Date filter state ─────────────────────────────────────────────────────
+  const [dateMode, setDateMode]         = useState<DateFilterMode>("today");
+  const [customDate, setCustomDate]     = useState(todayIso());
+  const [rangeFrom, setRangeFrom]       = useState(todayIso());
+  const [rangeTo, setRangeTo]           = useState(todayIso());
+  const [includeOverdue, setIncludeOverdue] = useState(false);
+
+  /** Resolved [from, to] ISO strings for the active date mode. Null means no bound. */
+  const activeDateRange = useMemo((): [string | null, string | null] => {
+    const t = todayIso();
+    switch (dateMode) {
+      case "today":     return [t, t];
+      case "tomorrow":  return [tomorrowIso(), tomorrowIso()];
+      case "this_week": return [t, weekEndIso()];
+      case "custom":    return customDate ? [customDate, customDate] : [t, t];
+      case "range":     return [rangeFrom || t, rangeTo || t];
+      case "all":       return [null, null];
+    }
+  }, [dateMode, customDate, rangeFrom, rangeTo]);
+
+  /** Returns true if a requisition date (normalised) falls in the active batch. */
+  const reqDateInBatch = useCallback((rawDate: string | null | undefined): boolean => {
+    const [from, to] = activeDateRange;
+    if (from === null && to === null) return true; // all mode
+    const iso = normaliseReqDate(rawDate);
+    if (!iso) return false;
+    // Main window
+    if (from && iso >= from && to && iso <= to) return true;
+    // Overdue: date is before the batch start and requisition is still open
+    if (includeOverdue && from && iso < from) return true;
+    return false;
+  }, [activeDateRange, includeOverdue]);
 
   // Expanded items state
   const [expandedItems, setExpandedItems] = useState<Record<string, boolean>>({});
@@ -195,41 +303,31 @@ export default function FulfillmentPage() {
     return data.map(group => group.itemName).filter(Boolean).sort((a, b) => a.localeCompare(b));
   }, [data]);
 
-  // Filtered Grouped Items
+  // Filtered Grouped Items — applies date filter + existing filters
   const filteredData = useMemo(() => {
     return data.map(group => {
-      // Filter the items inside the group first
       const filteredItems = group.items.filter((item: any) => {
         const matchLocation = locationFilter === "all" || item.locationName === locationFilter;
         const matchStatus = statusFilter === "all" || item.requisitionStatus === statusFilter;
-        return matchLocation && matchStatus;
+        // Date filter: match item's requisitionDate against the active batch
+        const matchDate = reqDateInBatch(item.requisitionDate);
+        return matchLocation && matchStatus && matchDate;
       });
 
-      // Compute filtered totals based on current drafts
-      let totalReq = 0;
-      let totalAlloc = 0;
-      let totalBO = 0;
-
+      let totalReq = 0, totalAlloc = 0, totalBO = 0;
       for (const item of filteredItems) {
         const draft = drafts[item.id] || { allocatedQty: item.allocatedQty, backorderQty: item.backorderQty };
-        totalReq += item.quantityRequested;
+        totalReq  += item.quantityRequested;
         totalAlloc += draft.allocatedQty;
-        totalBO += draft.backorderQty;
+        totalBO   += draft.backorderQty;
       }
 
-      return {
-        ...group,
-        items: filteredItems,
-        totalRequested: totalReq,
-        totalAllocated: totalAlloc,
-        totalBackorder: totalBO
-      };
+      return { ...group, items: filteredItems, totalRequested: totalReq, totalAllocated: totalAlloc, totalBackorder: totalBO };
     }).filter(group => {
-      // Filter the main group by search query and ensure it has items
       const matchSearch = group.itemName.toLowerCase().includes(search.toLowerCase());
       return matchSearch && group.items.length > 0;
     });
-  }, [data, search, locationFilter, statusFilter, drafts]);
+  }, [data, search, locationFilter, statusFilter, drafts, reqDateInBatch]);
 
   const toggleExpand = (itemName: string) => {
     setExpandedItems(prev => ({
@@ -250,6 +348,15 @@ export default function FulfillmentPage() {
     const params = new URLSearchParams();
     params.set("scope", printScope);
     if (mode === "print") params.set("mode", "print");
+    // ── Date filter params (always propagated so print uses same batch) ──
+    params.set("dateMode", dateMode);
+    if (dateMode === "custom" && customDate)    params.set("customDate", customDate);
+    if (dateMode === "range") {
+      if (rangeFrom) params.set("rangeFrom", rangeFrom);
+      if (rangeTo)   params.set("rangeTo",   rangeTo);
+    }
+    if (includeOverdue) params.set("includeOverdue", "1");
+    // ── Existing filters ──
     if (printScope === "visible") {
       if (search.trim()) params.set("search", search.trim());
       if (locationFilter !== "all") params.set("location", locationFilter);
@@ -258,9 +365,7 @@ export default function FulfillmentPage() {
     if (printScope === "locations" && printSelectedLocations.length > 0) params.set("locations", printSelectedLocations.join(","));
     if (printScope === "requisitions" && printSelectedRequisitions.length > 0) params.set("requisitions", printSelectedRequisitions.join(","));
     if (printScope === "items" && printSelectedItems.length > 0) params.set("items", printSelectedItems.join(","));
-    Object.entries(printOptions).forEach(([key, value]) => {
-      params.set(key, value ? "1" : "0");
-    });
+    Object.entries(printOptions).forEach(([key, value]) => { params.set(key, value ? "1" : "0"); });
     return `/requisitions/fulfillment/print?${params.toString()}`;
   };
 
@@ -520,9 +625,149 @@ export default function FulfillmentPage() {
         </div>
       </div>
 
+      {/* ── FULFILLMENT DATE FILTER BAR (sticky while scrolling) ── */}
+      <div className="sticky top-0 z-30 bg-white border border-neutral-200 rounded-xl shadow-sm px-4 py-3">
+        {/* Quick filter buttons */}
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          <span className="text-xs font-bold text-neutral-500 uppercase tracking-wider mr-1">Fulfillment Date:</span>
+          {(["today", "tomorrow", "this_week", "custom", "range", "all"] as DateFilterMode[]).map(m => (
+            <button
+              key={m}
+              onClick={() => setDateMode(m)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors border ${
+                dateMode === m
+                  ? m === "all"
+                    ? "bg-amber-500 border-amber-500 text-white"
+                    : "bg-brand-600 border-brand-600 text-white"
+                  : "bg-white border-neutral-200 text-neutral-600 hover:border-brand-400 hover:text-brand-700"
+              }`}
+            >
+              {m === "today" ? "Today" : m === "tomorrow" ? "Tomorrow" : m === "this_week" ? "This Week" : m === "custom" ? "Custom Date" : m === "range" ? "Date Range" : "All Open"}
+            </button>
+          ))}
+        </div>
+
+        {/* Custom date / range inputs */}
+        {dateMode === "custom" && (
+          <div className="flex items-center gap-2 mb-2">
+            <Calendar className="h-4 w-4 text-brand-600 shrink-0" />
+            <label className="text-xs font-semibold text-neutral-600">Date:</label>
+            <input
+              type="date"
+              value={customDate}
+              onChange={e => setCustomDate(e.target.value)}
+              className="border border-neutral-300 rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
+            />
+          </div>
+        )}
+        {dateMode === "range" && (
+          <div className="flex items-center gap-2 mb-2 flex-wrap">
+            <CalendarRange className="h-4 w-4 text-brand-600 shrink-0" />
+            <label className="text-xs font-semibold text-neutral-600">From:</label>
+            <input
+              type="date"
+              value={rangeFrom}
+              onChange={e => setRangeFrom(e.target.value)}
+              className="border border-neutral-300 rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
+            />
+            <label className="text-xs font-semibold text-neutral-600">To:</label>
+            <input
+              type="date"
+              value={rangeTo}
+              onChange={e => setRangeTo(e.target.value)}
+              className="border border-neutral-300 rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-brand-500"
+            />
+          </div>
+        )}
+
+        {/* Active filter label + overdue checkbox */}
+        <div className="flex flex-wrap items-center gap-4">
+          <div className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold ${
+            dateMode === "all"
+              ? "bg-amber-50 border border-amber-200 text-amber-800"
+              : "bg-brand-50 border border-brand-200 text-brand-800"
+          }`}>
+            <Calendar className="h-3.5 w-3.5" />
+            Showing requisitions for: <strong>{modeLabel(dateMode, customDate, rangeFrom, rangeTo)}</strong>
+          </div>
+          {dateMode !== "all" && (
+            <label className="inline-flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={includeOverdue}
+                onChange={e => setIncludeOverdue(e.target.checked)}
+                className="h-4 w-4 rounded border-neutral-300 accent-amber-500"
+              />
+              <span className="text-xs font-semibold text-neutral-700">Include overdue open requisitions</span>
+            </label>
+          )}
+        </div>
+
+        {/* All Open mode warning */}
+        {dateMode === "all" && (
+          <div className="mt-2 flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+            <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" />
+            <p className="text-xs font-semibold text-amber-800">
+              You are viewing <strong>all open requisitions across multiple dates.</strong> Allocating or printing in this mode may mix batches from different delivery dates. Use a specific date for operational safety.
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* ── BATCH SUMMARY CARD ── */}
+      {!loading && (() => {
+        const allItems        = filteredData.flatMap((g: any) => g.items);
+        const uniqLocations   = new Set(allItems.map((it: any) => it.locationName)).size;
+        const uniqReqs        = new Set(allItems.map((it: any) => it.requisitionId)).size;
+        const totalLines      = allItems.length;
+        const fullyAllocLines = allItems.filter((it: any) => {
+          const d = drafts[it.id] || it;
+          return Number(d.allocatedQty ?? it.allocatedQty) >= Number(it.quantityRequested) && Number(d.backorderQty ?? it.backorderQty) === 0;
+        }).length;
+        const partialLines    = allItems.filter((it: any) => {
+          const d = drafts[it.id] || it;
+          const alloc = Number(d.allocatedQty ?? it.allocatedQty);
+          return alloc > 0 && alloc < Number(it.quantityRequested);
+        }).length;
+        const boLines         = allItems.filter((it: any) => Number((drafts[it.id] || it).backorderQty ?? it.backorderQty) > 0).length;
+        const overdueLines    = includeOverdue
+          ? allItems.filter((it: any) => {
+              const iso = normaliseReqDate(it.requisitionDate);
+              const [from] = activeDateRange;
+              return iso && from && iso < from;
+            }).length
+          : 0;
+        const ref = dateMode !== "all" ? batchRef(dateMode, customDate, rangeFrom) : null;
+
+        if (filteredData.length === 0) return null;
+        return (
+          <Card className="border-brand-100 bg-gradient-to-r from-brand-50/30 to-white shadow-sm">
+            <CardContent className="px-5 py-3">
+              <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+                {ref && (
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs font-bold text-neutral-400 uppercase tracking-wider">Batch:</span>
+                    <span className="font-mono text-xs font-bold text-brand-700 bg-brand-100 px-2 py-0.5 rounded">{ref}</span>
+                  </div>
+                )}
+                <div className="h-4 w-px bg-neutral-200 hidden sm:block" />
+                <Stat label="Locations" value={uniqLocations} />
+                <Stat label="Requisitions" value={uniqReqs} />
+                <Stat label="Items" value={filteredData.length} />
+                <div className="h-4 w-px bg-neutral-200 hidden sm:block" />
+                <Stat label="Fully Allocated" value={fullyAllocLines} color="text-emerald-600" />
+                <Stat label="Partial" value={partialLines} color="text-amber-600" />
+                <Stat label="Backorder Lines" value={boLines} color={boLines > 0 ? "text-red-600" : "text-neutral-400"} />
+                {overdueLines > 0 && <Stat label="Overdue Included" value={overdueLines} color="text-amber-700" />}
+              </div>
+            </CardContent>
+          </Card>
+        );
+      })()}
+
       {/* ── Tab strip ── */}
       {(() => {
-        const backorderCount = data.reduce((s, g) => s + g.items.filter((it: any) => Number(it.backorderQty ?? 0) > 0).length, 0);
+        const backorderCount = filteredData.reduce((s: number, g: any) => s + g.items.filter((it: any) => Number(it.backorderQty ?? 0) > 0).length, 0);
         const tabs: { id: FulfillmentTab; label: string; icon: React.ReactNode; badge?: number }[] = [
           { id: "summary",    label: "Pick Summary",       icon: <List className="h-3.5 w-3.5" /> },
           { id: "allocation", label: "Allocation Details", icon: <AlignJustify className="h-3.5 w-3.5" /> },
@@ -608,9 +853,25 @@ export default function FulfillmentPage() {
         <div className="text-center py-12 text-neutral-400">Loading fulfillment data...</div>
       ) : filteredData.length === 0 ? (
         <Card className="p-8 text-center border-dashed border-neutral-300">
-          <AlertTriangle className="h-8 w-8 text-neutral-400 mx-auto mb-2" />
-          <p className="text-sm font-semibold text-neutral-900">No Requisitions Awaiting Fulfillment</p>
-          <p className="text-xs text-neutral-500 mt-1">There are no approved or submitted requisitions matching the filters.</p>
+          <Calendar className="h-8 w-8 text-neutral-400 mx-auto mb-2" />
+          <p className="text-sm font-semibold text-neutral-900">
+            {dateMode === "all"
+              ? "No Requisitions Awaiting Fulfillment"
+              : "No eligible requisitions for this fulfillment date."}
+          </p>
+          <p className="text-xs text-neutral-500 mt-1">
+            {dateMode === "all"
+              ? "There are no approved or submitted requisitions matching the filters."
+              : "Try a different date, or check \"Include overdue\" to include past open requisitions."}
+          </p>
+          {dateMode !== "all" && (
+            <button
+              onClick={() => setDateMode("all")}
+              className="mt-3 inline-flex items-center gap-1.5 text-xs font-bold text-brand-600 hover:underline"
+            >
+              View All Open Requisitions
+            </button>
+          )}
         </Card>
       ) : activeTab === "backorders" ? (
         /* ── BACKORDERS TAB ── */

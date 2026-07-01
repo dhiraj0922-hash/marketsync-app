@@ -149,6 +149,78 @@ function getSection(g: FulfillmentGroup): string {
   return "General Inventory";
 }
 
+// ─── Date filter helpers (mirrors fulfillment screen) ────────────────────────
+//
+// The `date` field on requisitions is the submission/requisition date.
+// We normalise any format (ISO or locale string) to YYYY-MM-DD for comparison.
+
+type DateFilterMode = "today" | "tomorrow" | "this_week" | "custom" | "range" | "all";
+
+function toIso(d: Date): string { return d.toISOString().slice(0, 10); }
+function todayIso(): string { return toIso(new Date()); }
+function tomorrowIso(): string { const d = new Date(); d.setDate(d.getDate() + 1); return toIso(d); }
+function weekEndIso(): string {
+  const d = new Date(); const day = d.getDay();
+  d.setDate(d.getDate() + (day === 0 ? 6 : 7 - day)); return toIso(d);
+}
+
+function normaliseReqDate(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+  const parsed = new Date(raw);
+  if (isNaN(parsed.getTime())) return null;
+  return toIso(parsed);
+}
+
+function fmtDisplayDate(iso: string): string {
+  if (!iso) return "";
+  const d = new Date(iso + "T00:00:00");
+  return d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+}
+
+function resolveActiveDateRange(params: URLSearchParams): [string | null, string | null] {
+  const mode = (params.get("dateMode") || "all") as DateFilterMode;
+  const t = todayIso();
+  switch (mode) {
+    case "today":     return [t, t];
+    case "tomorrow":  return [tomorrowIso(), tomorrowIso()];
+    case "this_week": return [t, weekEndIso()];
+    case "custom":    { const d = params.get("customDate") || t; return [d, d]; }
+    case "range":     return [params.get("rangeFrom") || t, params.get("rangeTo") || t];
+    case "all":       return [null, null];
+  }
+}
+
+function dateFilterLabel(params: URLSearchParams): string {
+  const mode = (params.get("dateMode") || "all") as DateFilterMode;
+  const includeOverdue = params.get("includeOverdue") === "1";
+  const extra = includeOverdue ? " + Overdue Open" : "";
+  const t = todayIso();
+  switch (mode) {
+    case "today":     return `Today (${fmtDisplayDate(t)})${extra}`;
+    case "tomorrow":  return `Tomorrow (${fmtDisplayDate(tomorrowIso())})${extra}`;
+    case "this_week": return `This Week${extra}`;
+    case "custom":    { const d = params.get("customDate") || t; return `${fmtDisplayDate(d)}${extra}`; }
+    case "range":     {
+      const f = params.get("rangeFrom") || t, to = params.get("rangeTo") || t;
+      return `${fmtDisplayDate(f)} – ${fmtDisplayDate(to)}${extra}`;
+    }
+    case "all":       return "All Open Requisitions";
+  }
+}
+
+function batchRef(params: URLSearchParams): string | null {
+  const mode = (params.get("dateMode") || "all") as DateFilterMode;
+  if (mode === "all") return null;
+  const t = todayIso();
+  const base = mode === "today" ? t
+    : mode === "tomorrow" ? tomorrowIso()
+    : mode === "custom" ? (params.get("customDate") || t)
+    : mode === "range" ? (params.get("rangeFrom") || t)
+    : t;
+  return `FUL-${base.replace(/-/g, "")}-001`;
+}
+
 // ─── Filter logic (mirrors fulfillment screen) ────────────────────────────────
 
 function filterSummary(
@@ -163,26 +235,35 @@ function filterSummary(
   const selectedRequisitions = new Set(splitParam(params.get("requisitions")));
   const selectedItems = new Set(splitParam(params.get("items")));
 
+  // Date filter
+  const [dateFrom, dateTo] = resolveActiveDateRange(params);
+  const includeOverdue = params.get("includeOverdue") === "1";
+  const noDateFilter = dateFrom === null && dateTo === null;
+
+  const reqDateInBatch = (rawDate: string | null | undefined): boolean => {
+    if (noDateFilter) return true;
+    const iso = normaliseReqDate(rawDate);
+    if (!iso) return false;
+    if (dateFrom && iso >= dateFrom && dateTo && iso <= dateTo) return true;
+    if (includeOverdue && dateFrom && iso < dateFrom) return true;
+    return false;
+  };
+
   return data
     .map((group) => {
-      const groupMatchesSearch =
-        !search || group.itemName.toLowerCase().includes(search);
-      const groupSelected =
-        scope !== "items" || selectedItems.has(group.itemName);
+      const groupMatchesSearch = !search || group.itemName.toLowerCase().includes(search);
+      const groupSelected = scope !== "items" || selectedItems.has(group.itemName);
 
       const items = group.items.filter((item) => {
         if (!groupMatchesSearch || !groupSelected) return false;
+        // Date filter applies to every item regardless of scope
+        if (!reqDateInBatch(item.requisitionDate)) return false;
         if (scope === "visible") {
           if (location !== "all" && item.locationName !== location) return false;
           if (status !== "all" && item.requisitionStatus !== status) return false;
         }
-        if (scope === "locations" && !selectedLocations.has(item.locationName))
-          return false;
-        if (
-          scope === "requisitions" &&
-          !selectedRequisitions.has(item.requisitionId)
-        )
-          return false;
+        if (scope === "locations" && !selectedLocations.has(item.locationName)) return false;
+        if (scope === "requisitions" && !selectedRequisitions.has(item.requisitionId)) return false;
         return true;
       });
 
@@ -751,19 +832,28 @@ export default function FulfillmentPickListPrintPage() {
             <div>
               <div className="pl-brand">Stock Dharma · Warehouse Operations</div>
               <h1 className="pl-doc-title">HQ FULFILLMENT PICK LIST</h1>
-              {/* Safeguard 1 / 9: no comma-separated ID list here */}
+              {/* Batch ref and fulfillment date */}
+              {batchRef(searchParams) && (
+                <div className="pl-doc-sub" style={{ marginBottom: 2 }}>
+                  Fulfillment Batch:{" "}
+                  <strong style={{ fontFamily: "monospace", letterSpacing: "0.05em", color: "#1d4ed8" }}>
+                    {batchRef(searchParams)}
+                  </strong>
+                </div>
+              )}
+              <div className="pl-doc-sub">
+                Fulfillment Date:{" "}
+                <strong>{dateFilterLabel(searchParams)}</strong>
+              </div>
               <div className="pl-doc-sub">
                 Prepared by:{" "}
                 <strong>{user?.name || user?.email || "HQ Staff"}</strong>
-              </div>
-              <div className="pl-doc-sub">
+                {"  ·  "}
                 <strong>{totalItems}</strong> item{totalItems !== 1 ? "s" : ""}
                 {"  ·  "}
                 <strong>{totalLocations}</strong> location{totalLocations !== 1 ? "s" : ""}
                 {"  ·  "}
                 <strong>{totalReqs}</strong> requisition{totalReqs !== 1 ? "s" : ""}
-                {"  ·  "}
-                Allocation sheets on following pages.
                 {totalBO > 0 && (
                   <>
                     {"  ·  "}
@@ -785,6 +875,7 @@ export default function FulfillmentPickListPrintPage() {
               <strong>{generatedAt.toLocaleTimeString()}</strong>
             </div>
           </header>
+
 
           {/* Stats — counts only, no cross-unit sums (Safeguard 1) */}
           <div className="pl-stats">
