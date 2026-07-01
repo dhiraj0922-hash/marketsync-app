@@ -7,10 +7,11 @@ import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/components/AuthProvider";
 import { getFulfillmentSummary, saveFulfillmentAllocations, completeFulfillmentMovement, createDeliveryTicketFromRequisition, approveRequisition, rejectRequisition, getActiveDeliveryRuns, assignDeliveryTicketToRun, removeTicketFromDeliveryRun, getDeliveryTicketById } from "@/lib/storage";
 import { isHqFulfillment, isHqMaster, isHqOps } from "@/lib/roles";
-import { ChevronDown, ChevronRight, Search, Save, Check, RefreshCw, AlertTriangle, Play, Sparkles, Truck, PackageCheck, CheckCircle2, XSquare, Loader2, Printer, FileText, X, ExternalLink } from "lucide-react";
+import { ChevronDown, ChevronRight, Search, Save, Check, RefreshCw, AlertTriangle, Play, Sparkles, Truck, PackageCheck, CheckCircle2, XSquare, Loader2, Printer, FileText, X, ExternalLink, List, AlignJustify, AlertOctagon } from "lucide-react";
 import { DeliveryTicketDrawer } from "@/components/DeliveryTicketDrawer";
 
 type PrintScope = "visible" | "locations" | "requisitions" | "items";
+type FulfillmentTab = "summary" | "allocation" | "backorders" | "print";
 
 export default function FulfillmentPage() {
   const { user } = useAuth();
@@ -18,6 +19,7 @@ export default function FulfillmentPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<FulfillmentTab>("summary");
 
   // Expanded items state
   const [expandedItems, setExpandedItems] = useState<Record<string, boolean>>({});
@@ -501,14 +503,6 @@ export default function FulfillmentPage() {
             <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
             Refresh
           </button>
-          <button
-            onClick={() => setPrintModalOpen(true)}
-            disabled={loading}
-            className="flex items-center justify-center gap-2 px-3 py-2 text-sm font-medium bg-white border border-neutral-200 text-neutral-700 rounded-lg hover:bg-neutral-50 transition-colors shadow-sm"
-          >
-            <Printer className="h-4 w-4" />
-            Print Pick List
-          </button>
           <button 
             onClick={handleSave}
             disabled={saving || loading}
@@ -525,6 +519,43 @@ export default function FulfillmentPage() {
           </button>
         </div>
       </div>
+
+      {/* ── Tab strip ── */}
+      {(() => {
+        const backorderCount = data.reduce((s, g) => s + g.items.filter((it: any) => Number(it.backorderQty ?? 0) > 0).length, 0);
+        const tabs: { id: FulfillmentTab; label: string; icon: React.ReactNode; badge?: number }[] = [
+          { id: "summary",    label: "Pick Summary",       icon: <List className="h-3.5 w-3.5" /> },
+          { id: "allocation", label: "Allocation Details", icon: <AlignJustify className="h-3.5 w-3.5" /> },
+          { id: "backorders", label: "Backorders",         icon: <AlertOctagon className="h-3.5 w-3.5" />, badge: backorderCount },
+          { id: "print",      label: "Print Pick List",   icon: <Printer className="h-3.5 w-3.5" /> },
+        ];
+        return (
+          <div className="flex items-center gap-1 border-b border-neutral-200 overflow-x-auto">
+            {tabs.map(tab => (
+              <button
+                key={tab.id}
+                onClick={() => {
+                  if (tab.id === "print") { setPrintModalOpen(true); return; }
+                  setActiveTab(tab.id);
+                }}
+                className={`inline-flex items-center gap-1.5 px-4 py-2.5 text-sm font-semibold whitespace-nowrap border-b-2 transition-colors ${
+                  activeTab === tab.id && tab.id !== "print"
+                    ? "border-brand-600 text-brand-700 bg-brand-50/50"
+                    : "border-transparent text-neutral-500 hover:text-neutral-800 hover:border-neutral-300"
+                }`}
+              >
+                {tab.icon}
+                {tab.label}
+                {tab.badge != null && tab.badge > 0 && (
+                  <span className="ml-0.5 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-700">
+                    {tab.badge}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        );
+      })()}
 
       {toast && (
         <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-lg p-3 text-sm font-semibold flex items-center gap-2 animate-in fade-in slide-in-from-top-2">
@@ -572,7 +603,7 @@ export default function FulfillmentPage() {
         </CardContent>
       </Card>
 
-      {/* Main Grouped Items View */}
+      {/* Main content — rendered based on active tab */}
       {loading ? (
         <div className="text-center py-12 text-neutral-400">Loading fulfillment data...</div>
       ) : filteredData.length === 0 ? (
@@ -581,10 +612,80 @@ export default function FulfillmentPage() {
           <p className="text-sm font-semibold text-neutral-900">No Requisitions Awaiting Fulfillment</p>
           <p className="text-xs text-neutral-500 mt-1">There are no approved or submitted requisitions matching the filters.</p>
         </Card>
+      ) : activeTab === "backorders" ? (
+        /* ── BACKORDERS TAB ── */
+        <div className="space-y-2">
+          {(() => {
+            const boRows = filteredData.flatMap(g =>
+              g.items
+                .filter((it: any) => Number(it.backorderQty ?? 0) > 0)
+                .map((it: any) => ({ ...it, itemName: g.itemName, isFGMode: g.isFGMode, packQty: g.packQty }))
+            );
+            if (boRows.length === 0) return (
+              <Card className="p-8 text-center border-dashed border-neutral-300">
+                <Check className="h-8 w-8 text-emerald-400 mx-auto mb-2" />
+                <p className="text-sm font-semibold text-neutral-900">No Backorders</p>
+                <p className="text-xs text-neutral-500 mt-1">All allocated quantities match requested quantities.</p>
+              </Card>
+            );
+            return (
+              <Card className="overflow-hidden border-amber-200 shadow-sm">
+                <CardHeader className="bg-amber-50 py-3 px-5 border-b border-amber-100">
+                  <CardTitle className="text-sm font-bold text-amber-900">
+                    {boRows.length} backorder line{boRows.length !== 1 ? "s" : ""} requiring follow-up
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="p-0">
+                  <Table>
+                    <TableHeader className="bg-amber-50/30 text-xs text-amber-700 uppercase tracking-wider">
+                      <TableRow>
+                        <TableHead className="px-5 py-2.5">Item</TableHead>
+                        <TableHead className="py-2.5">Location</TableHead>
+                        <TableHead className="py-2.5">Req #</TableHead>
+                        <TableHead className="py-2.5 text-center">Requested</TableHead>
+                        <TableHead className="py-2.5 text-center">Allocated</TableHead>
+                        <TableHead className="py-2.5 text-center">Backordered</TableHead>
+                        <TableHead className="py-2.5">Note</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {boRows.map((row: any) => (
+                        <TableRow key={`bo-${row.id}`} className="bg-amber-50/20 hover:bg-amber-50">
+                          <TableCell className="px-5 py-3 font-semibold text-sm">{row.itemName}</TableCell>
+                          <TableCell className="py-3 text-sm">{row.locationName}</TableCell>
+                          <TableCell className="py-3 font-mono text-xs">{row.requisitionNumber || row.requisitionId}</TableCell>
+                          <TableCell className="py-3 text-center text-sm">
+                            {row.isFGMode
+                              ? `${row.quantityRequested} pack${row.quantityRequested !== 1 ? "s" : ""}`
+                              : `${row.quantityRequested} ${row.unit || "ea"}`}
+                          </TableCell>
+                          <TableCell className="py-3 text-center text-sm font-semibold text-brand-600">
+                            {row.isFGMode
+                              ? `${row.allocatedQty} pack${row.allocatedQty !== 1 ? "s" : ""}`
+                              : `${row.allocatedQty} ${row.unit || "ea"}`}
+                          </TableCell>
+                          <TableCell className="py-3 text-center text-sm font-bold text-amber-700">
+                            {row.isFGMode
+                              ? `${row.backorderQty} pack${row.backorderQty !== 1 ? "s" : ""}`
+                              : `${row.backorderQty} ${row.unit || "ea"}`}
+                          </TableCell>
+                          <TableCell className="py-3 text-xs text-neutral-500">{row.fulfillmentNote || "—"}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </CardContent>
+              </Card>
+            );
+          })()}
+        </div>
       ) : (
+        /* ── PICK SUMMARY tab (default) + ALLOCATION DETAILS tab ── */
+        /* When activeTab === "allocation" all items start expanded */
         <div className="space-y-4">
           {filteredData.map(group => {
-            const isExpanded = expandedItems[group.itemName] || false;
+            // On Allocation Details tab: all items expanded by default
+            const isExpanded = activeTab === "allocation" ? true : (expandedItems[group.itemName] || false);
             const status = getGroupStatus(group);
             
             return (
@@ -942,9 +1043,11 @@ export default function FulfillmentPage() {
           })}
         </div>
       )}
+
     </div>
 
     {/* ── Print Pick List Modal ────────────────────────────────────────────── */}
+
     {printModalOpen && (
       <div className="fixed inset-0 z-[190] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
         <div className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
