@@ -2212,12 +2212,15 @@ function HQAdminView({
   };
 
   const hqProductionDemand = () => {
-    // Returns per-commissary aggregations:
-    //   pending[commissary]   — items still to be produced by that commissary
-    //   completed[commissary] — items fulfilled by that commissary today
+    // Returns per-commissary aggregations.
+    // Pack fields (isFGMode, packQty) are carried through so renderProductionTable
+    // can display Pack Size / Required Qty / Total Base Qty per item.
     //
-    // source_commissary_snapshot on each line item determines the commissary.
-    // NULL (legacy rows) defaults to 'Commissary HQ'.
+    // Quantity semantics (same as Delivery Ticket Pack Breakdown / Fulfillment Pick List):
+    //   isFGMode = true  → quantityRequested is PACK COUNT
+    //                      baseQty = packCount × packQty
+    //   isFGMode = false → quantityRequested is BASE UNITS (loose/raw)
+    //   packQty null/0   → configuration missing; never invent pack math
 
     const normalize = (d: string): string => {
       if (!d) return "";
@@ -2226,19 +2229,43 @@ function HQAdminView({
     };
     const targetDate = normalize(productionDate);
 
-    type AggMap = Record<string, { totalQty: number; unit: string; locations: { loc: string; qty: number }[] }>;
-    // One AggMap per commissary per section
+    type LocEntry = { loc: string; qty: number; baseQty: number };
+    type AggEntry = {
+      totalQty:  number;       // always PACK COUNT for FG, BASE UNITS for loose
+      unit:      string;
+      isFGMode:  boolean;
+      packQty:   number | null; // null or 0 = missing config
+      locations: LocEntry[];
+    };
+    type AggMap = Record<string, AggEntry>;
+
     const pending:   Record<string, AggMap> = {};
     const completed: Record<string, AggMap> = {};
     for (const c of COMMISSARY_OPTIONS) { pending[c] = {}; completed[c] = {}; }
 
-    const addToAgg = (agg: AggMap, name: string, unit: string, qty: number, loc: string) => {
+    const addToAgg = (
+      agg: AggMap,
+      name: string,
+      unit: string,
+      qty: number,         // pack count (FG) or base units (loose)
+      loc: string,
+      isFGMode: boolean,
+      packQty: number | null
+    ) => {
       if (!name || qty <= 0) return;
-      if (!agg[name]) agg[name] = { totalQty: 0, unit, locations: [] };
+      const pq = (packQty != null && Number(packQty) > 0) ? Number(packQty) : null;
+      const baseQty = (isFGMode && pq) ? qty * pq : qty;
+      if (!agg[name]) {
+        agg[name] = { totalQty: 0, unit, isFGMode, packQty: pq, locations: [] };
+      }
       agg[name].totalQty += qty;
       const existing = agg[name].locations.find((l) => l.loc === loc);
-      if (existing) existing.qty += qty;
-      else agg[name].locations.push({ loc, qty });
+      if (existing) {
+        existing.qty     += qty;
+        existing.baseQty += baseQty;
+      } else {
+        agg[name].locations.push({ loc, qty, baseQty });
+      }
     };
 
     requisitions.forEach((req) => {
@@ -2254,16 +2281,18 @@ function HQAdminView({
         const fulfilled  = Number(li.quantityFulfilled  ?? 0);
         const name = li.itemName ?? li.item_name_snapshot ?? li.itemId ?? "Unknown";
         const unit = li.unit ?? li.unit_snapshot ?? "";
-        // Route to commissary — snapshot at order time, NULL falls back to HQ
+        const isFGMode: boolean = !!li.isFGMode;
+        // packQtySnapshot is already resolved in mapReqItemRow; default 1 is set there.
+        // We treat packQty=1 the same as packQty>1 — just one unit per pack.
+        const packQty: number | null = li.packQtySnapshot != null ? Number(li.packQtySnapshot) : null;
         const commissary: string = li.sourceCommissary ?? "Commissary HQ";
-        // Ensure the commissary bucket exists (for any future/custom values)
         if (!pending[commissary])   pending[commissary]   = {};
         if (!completed[commissary]) completed[commissary] = {};
 
         if (s === "fulfilled") {
-          addToAgg(completed[commissary], name, unit, fulfilled, locKey);
+          addToAgg(completed[commissary], name, unit, fulfilled, locKey, isFGMode, packQty);
         } else {
-          addToAgg(pending[commissary], name, unit, requested, locKey);
+          addToAgg(pending[commissary], name, unit, requested, locKey, isFGMode, packQty);
         }
       });
     });
@@ -2283,9 +2312,44 @@ function HQAdminView({
   const toggleExpand = (name: string) =>
     setExpandedRows((prev) => prev.includes(name) ? prev.filter((i) => i !== name) : [...prev, name]);
 
+  // ─── Pack display helpers for HQ Production ───────────────────────────────
+  // Identical semantics to Delivery Ticket Pack Breakdown and Fulfillment Pick List:
+  //   FG item with valid packQty → qty = pack count, base = qty × packQty
+  //   Loose/raw item             → qty = base units, packSize = Loose
+  //   Missing/zero packQty on FG → show amber warning, no pack math
+
+  type ProdAggEntry = {
+    totalQty:  number;
+    unit:      string;
+    isFGMode:  boolean;
+    packQty:   number | null;
+    locations: { loc: string; qty: number; baseQty: number }[];
+  };
+
+  function prodPackSizeLabel(entry: ProdAggEntry): string {
+    if (!entry.isFGMode) return "Loose";
+    if (!entry.packQty || entry.packQty <= 0) return "—";
+    return `${entry.packQty} ${entry.unit || "ea"} / pack`;
+  }
+
+  function prodRequiredLabel(qty: number, entry: ProdAggEntry): string {
+    if (!entry.isFGMode) return `${qty} ${entry.unit || "ea"}`;
+    if (!entry.packQty || entry.packQty <= 0) return `${qty} packs`;
+    return `${qty} pack${qty !== 1 ? "s" : ""}`;
+  }
+
+  function prodTotalBaseLabel(qty: number, entry: ProdAggEntry): string {
+    if (!entry.isFGMode) return `${qty} ${entry.unit || "ea"}`;
+    if (!entry.packQty || entry.packQty <= 0) return "—";
+    return `${qty * entry.packQty} ${entry.unit || "ea"}`;
+  }
+
+  const missingPackConfig = (entry: ProdAggEntry) =>
+    entry.isFGMode && (!entry.packQty || entry.packQty <= 0);
+
   // Helper to render a production aggregation table (shared by pending and completed sections)
   const renderProductionTable = (
-    entries: [string, { totalQty: number; unit: string; locations: { loc: string; qty: number }[] }][],
+    entries: [string, ProdAggEntry][],
     colorClass: string
   ) => (
     <div className="overflow-x-auto rounded-xl border border-neutral-200 print:border-none shadow-sm print:shadow-none">
@@ -2293,32 +2357,109 @@ function HQAdminView({
         <TableHeader className="bg-neutral-50/80 text-xs text-neutral-500 uppercase tracking-wider print:bg-transparent">
           <TableRow>
             <TableHead className="w-[40px] px-4 print:px-0">#</TableHead>
-            <TableHead className="py-3 px-4 print:px-0">Item Name</TableHead>
-            <TableHead className="py-3 px-4 print:px-0">Qty</TableHead>
+            <TableHead className="py-3 px-4 print:px-0">Item</TableHead>
+            <TableHead className="py-3 px-4 print:px-0 hidden sm:table-cell">Pack Size</TableHead>
+            <TableHead className="py-3 px-4 print:px-0">Required</TableHead>
+            <TableHead className="py-3 px-4 print:px-0 hidden sm:table-cell">Total Base Qty</TableHead>
+            <TableHead className="py-3 px-4 print:px-0 hidden md:table-cell text-center">Destinations</TableHead>
+            <TableHead className="py-3 px-4 print:px-0 print:hidden w-[36px]"></TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {entries.map(([itemName, data], idx) => {
+            const entry = data as ProdAggEntry;
             const isExpanded = expandedRows.includes(itemName);
+            const isMissing  = missingPackConfig(entry);
             return (
               <React.Fragment key={idx}>
-                <TableRow className="hover:bg-brand-50/30 cursor-pointer print:hover:bg-transparent" onClick={() => toggleExpand(itemName)}>
+                {/* Main row */}
+                <TableRow
+                  className="hover:bg-brand-50/30 cursor-pointer print:hover:bg-transparent"
+                  onClick={() => toggleExpand(itemName)}
+                >
+                  {/* # / expand icon */}
                   <TableCell className="px-4 py-3 print:px-0">
-                    <div className="print:hidden">{isExpanded ? <ChevronDown className="h-4 w-4 text-brand-600" /> : <ChevronRight className="h-4 w-4 text-neutral-400" />}</div>
+                    <div className="print:hidden">
+                      {isExpanded
+                        ? <ChevronDown className="h-4 w-4 text-brand-600" />
+                        : <ChevronRight className="h-4 w-4 text-neutral-400" />}
+                    </div>
                     <div className="hidden print:block text-neutral-500 font-medium">#{idx + 1}</div>
                   </TableCell>
-                  <TableCell className="py-3 px-4 print:px-0"><span className="font-bold text-neutral-900 text-base">{itemName}</span></TableCell>
+
+                  {/* Item name + missing-config warning */}
                   <TableCell className="py-3 px-4 print:px-0">
-                    <span className={`font-bold text-base px-2 py-1 rounded-md print:bg-transparent ${colorClass}`}>{data.totalQty} {data.unit}</span>
+                    <span className="font-bold text-neutral-900 text-sm">{itemName}</span>
+                    {isMissing && (
+                      <div className="mt-0.5 text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 inline-block">
+                        Pack config missing — confirm before production
+                      </div>
+                    )}
+                  </TableCell>
+
+                  {/* Pack Size */}
+                  <TableCell className="py-3 px-4 print:px-0 hidden sm:table-cell">
+                    <span className={`text-xs font-semibold px-2 py-1 rounded-md ${
+                      entry.isFGMode && !isMissing
+                        ? "bg-blue-50 text-blue-700 border border-blue-100"
+                        : isMissing
+                        ? "bg-amber-50 text-amber-700 border border-amber-200"
+                        : "bg-neutral-100 text-neutral-600"
+                    }`}>
+                      {prodPackSizeLabel(entry)}
+                    </span>
+                  </TableCell>
+
+                  {/* Required / Production Qty */}
+                  <TableCell className="py-3 px-4 print:px-0">
+                    <span className={`font-bold text-sm px-2 py-1 rounded-md print:bg-transparent ${colorClass}`}>
+                      {prodRequiredLabel(entry.totalQty, entry)}
+                    </span>
+                  </TableCell>
+
+                  {/* Total Base Qty */}
+                  <TableCell className="py-3 px-4 print:px-0 hidden sm:table-cell">
+                    {isMissing ? (
+                      <span className="text-xs text-amber-600 font-semibold">Confirm manually</span>
+                    ) : (
+                      <span className="text-sm font-semibold text-neutral-700">
+                        {prodTotalBaseLabel(entry.totalQty, entry)}
+                      </span>
+                    )}
+                  </TableCell>
+
+                  {/* Destination count */}
+                  <TableCell className="py-3 px-4 print:px-0 hidden md:table-cell text-center">
+                    <span className="text-sm font-semibold text-neutral-600">
+                      {entry.locations.length}
+                    </span>
+                  </TableCell>
+
+                  {/* Expand chevron (screen only) */}
+                  <TableCell className="py-3 px-2 print:hidden text-right">
+                    <span className="text-[10px] text-neutral-400 font-medium">
+                      {isExpanded ? "hide" : "detail"}
+                    </span>
                   </TableCell>
                 </TableRow>
+
+                {/* Expanded per-location rows */}
                 <TableRow className={`bg-neutral-50/50 print:table-row print:bg-transparent ${isExpanded ? "table-row" : "hidden print:table-row"}`}>
-                  <TableCell colSpan={3} className="px-10 py-3 print:px-4">
+                  <TableCell colSpan={7} className="px-10 py-3 print:px-4">
                     <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 py-2">
-                      {data.locations.map((loc, lIdx) => (
-                        <div key={lIdx} className="flex justify-between items-center text-sm py-1 border-b border-neutral-200 border-dashed last:border-0">
-                          <span className="text-neutral-600 font-medium">{loc.loc}</span>
-                          <span className="text-neutral-900 font-bold bg-white border border-neutral-200 px-2 rounded-md shadow-sm">{loc.qty} {data.unit}</span>
+                      {entry.locations.map((loc, lIdx) => (
+                        <div key={lIdx} className="flex justify-between items-start text-sm py-1.5 border-b border-neutral-200 border-dashed last:border-0">
+                          <span className="text-neutral-600 font-medium truncate max-w-[55%]">{loc.loc}</span>
+                          <div className="text-right">
+                            <div className="font-bold text-neutral-900 bg-white border border-neutral-200 px-2 rounded-md shadow-sm text-xs">
+                              {prodRequiredLabel(loc.qty, entry)}
+                            </div>
+                            {entry.isFGMode && !isMissing && (
+                              <div className="text-[10px] text-neutral-500 mt-0.5">
+                                {prodTotalBaseLabel(loc.qty, entry)}
+                              </div>
+                            )}
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -3271,7 +3412,7 @@ function HQAdminView({
                             <span className="block text-sm font-bold mt-0.5">{backorderedCount}</span>
                           </div>
                         </div>
-                      </div>
+                                      </div>
 
                       {!isEditable && !isFulfillmentLocked && (
                         <p className="text-xs text-neutral-400 pt-1 text-center italic">
@@ -3336,13 +3477,67 @@ function HQAdminView({
             {/* Print-only header */}
             <div className="hidden print:block border-b-2 border-neutral-900 pb-4 mb-6">
               <h1 className="text-3xl font-extrabold tracking-tight text-neutral-950">STOCK DHARMA</h1>
-              <h2 className="text-xl font-bold text-neutral-800 mt-1">HQ Production Summary</h2>
+              <h2 className="text-xl font-bold text-neutral-800 mt-1">HQ Kitchen Production Sheet</h2>
               <div className="text-sm font-medium text-neutral-600 mt-2">
-                Date: {productionDate} &nbsp;|&nbsp; Supplier/Commissary: {activeCommissary}
+                Date: {productionDate} &nbsp;|&nbsp; Commissary: {activeCommissary}
+              </div>
+              <div className="text-xs text-neutral-500 mt-1">
+                Required = Pack Count for FG items · Total Base Qty = Packs × Pack Size · Loose = base qty direct.
+                '—' in Total Base = pack config missing, confirm with kitchen before production.
               </div>
             </div>
 
-            {/* ── Pending Production ─────────────────────────────────── */}
+            {/* ── Screen-only: Batch summary stats ── */}
+            {(() => {
+              const allEntries = [...pendingEntries, ...completedEntries] as [string, ProdAggEntry][];
+              const destSet = new Set(allEntries.flatMap(([, e]) => e.locations.map(l => l.loc)));
+              const normDate = (d: string) => {
+                if (!d) return "";
+                if (isNaN(Date.parse(d))) return d.trim();
+                return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+              };
+              const targetNorm = normDate(productionDate);
+              const reqSet = new Set(
+                requisitions
+                  .filter(r => PRODUCTION_STATUSES.has((r.status ?? "").toLowerCase()) && normDate(r.date ?? "") === targetNorm)
+                  .map(r => r.id)
+              );
+              const missingCount = allEntries.filter(([, e]) => e.isFGMode && (!e.packQty || e.packQty <= 0)).length;
+              return (
+                <div className="print:hidden grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3 mb-2">
+                  <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-center">
+                    <div className="text-2xl font-black text-amber-700">{pendingEntries.length}</div>
+                    <div className="text-[10px] font-bold text-amber-600 uppercase tracking-wide mt-0.5">Pending Items</div>
+                  </div>
+                  <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-center">
+                    <div className="text-2xl font-black text-emerald-700">{completedEntries.length}</div>
+                    <div className="text-[10px] font-bold text-emerald-600 uppercase tracking-wide mt-0.5">Completed</div>
+                  </div>
+                  <div className="bg-neutral-50 border border-neutral-200 rounded-xl p-3 text-center">
+                    <div className="text-2xl font-black text-neutral-700">{destSet.size}</div>
+                    <div className="text-[10px] font-bold text-neutral-500 uppercase tracking-wide mt-0.5">Destinations</div>
+                  </div>
+                  <div className="bg-neutral-50 border border-neutral-200 rounded-xl p-3 text-center">
+                    <div className="text-2xl font-black text-neutral-700">{reqSet.size}</div>
+                    <div className="text-[10px] font-bold text-neutral-500 uppercase tracking-wide mt-0.5">Requisitions</div>
+                  </div>
+                  <div className={`rounded-xl p-3 text-center border ${
+                    missingCount > 0 ? "bg-amber-50 border-amber-200" : "bg-neutral-50 border-neutral-200"
+                  }`}>
+                    <div className={`text-2xl font-black ${missingCount > 0 ? "text-amber-700" : "text-neutral-400"}`}>
+                      {missingCount}
+                    </div>
+                    <div className={`text-[10px] font-bold uppercase tracking-wide mt-0.5 ${
+                      missingCount > 0 ? "text-amber-600" : "text-neutral-400"
+                    }`}>
+                      Missing Pack Config
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* ── Pending Production ── */}
             <div>
               <div className="flex items-center gap-2 mb-3">
                 <span className="h-2.5 w-2.5 rounded-full bg-warning-500" />
