@@ -44,6 +44,7 @@ import {
 import { useAuth } from "@/components/AuthProvider";
 import { isDeliveryDestinationLocation } from "@/lib/locationRegistry";
 import { canAssignDrivers, isDriver, isHqStaff, isLocationManager, resolveLocationId } from "@/lib/roles";
+import { DeliveryTicketDrawer } from "@/components/DeliveryTicketDrawer";
 import { supabase } from "@/lib/supabase";
 import {
   CalendarDays,
@@ -1155,192 +1156,15 @@ export default function DeliveriesPage() {
           </div>
         ) : null}
 
-        <Drawer
-          isOpen={!!selectedTicket}
+        <DeliveryTicketDrawer
+          ticket={selectedTicket}
           onClose={() => setSelectedTicket(null)}
-          title={`Delivery Ticket ${selectedTicket?.ticketNumber ?? ""}`}
-          description={`Requisition ${selectedTicket?.requisitionId ?? "—"} · ${selectedTicket?.destinationName ?? "—"}`}
-          variant="dialog"
-          footer={selectedTicket && (
-            <div className="flex w-full flex-wrap items-center justify-between gap-2">
-              <div className="flex flex-wrap gap-2">
-                <button onClick={() => openTicketPrintView(selectedTicket, "print")} className="inline-flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50"><Printer className="h-4 w-4" /> Print Ticket</button>
-                <button onClick={() => openTicketPrintView(selectedTicket, "pdf")} className="inline-flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50"><FileText className="h-4 w-4" /> Download PDF</button>
-                <button onClick={() => openTicketPrintView(selectedTicket, "view")} className="inline-flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-semibold text-neutral-700 hover:bg-neutral-50"><ChevronRight className="h-4 w-4" /> Open Print View</button>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {hqAdmin && ticketStatuses.map((status) => (
-                  <button key={status} onClick={async () => { const res = await updateDeliveryTicketStatus(selectedTicket.id, status); if (!res.success) alert(res.error?.message ?? "Update failed"); else { setSelectedTicket({ ...selectedTicket, status }); await refresh(); } }} className="rounded-lg border border-neutral-200 bg-white px-3 py-2 text-xs font-semibold text-neutral-700 hover:bg-slate-50">{labelize(status)}</button>
-                ))}
-                {(hqAdmin || driverUser || managerUser) && <button onClick={saveTicketItems} className="rounded-lg bg-neutral-900 px-3 py-2 text-sm font-semibold text-white">Save Lines</button>}
-                {(hqAdmin || driverUser) && <button onClick={() => markArrived()} className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white">Mark Arrived</button>}
-                {(hqAdmin || driverUser || managerUser) && <button onClick={() => reportIssue()} className="rounded-lg bg-amber-600 px-3 py-2 text-sm font-semibold text-white">Report Issue</button>}
-                {(hqAdmin || driverUser || managerUser) && <button onClick={markDelivered} className="rounded-lg bg-success-600 px-3 py-2 text-sm font-semibold text-white">{managerUser ? "Confirm Receipt" : "Mark Delivered"}</button>}
-              </div>
-            </div>
-          )}
-        >
-          {selectedTicket && (
-            <div className="space-y-4 text-neutral-700">
-              <div className="flex flex-col gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                  <p className="text-sm font-bold text-blue-950">Dispatch paperwork</p>
-                  <p className="text-xs text-blue-700">Print or save this delivery ticket before the driver starts the run.</p>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <button onClick={() => openTicketPrintView(selectedTicket, "print")} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-700"><Printer className="h-4 w-4" /> Print Ticket</button>
-                  <button onClick={() => openTicketPrintView(selectedTicket, "pdf")} className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-100"><FileText className="h-4 w-4" /> Download PDF</button>
-                  <button onClick={() => openTicketPrintView(selectedTicket, "view")} className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-100"><ChevronRight className="h-4 w-4" /> Open Print View</button>
-                </div>
-              </div>
-              <div id="delivery-ticket-print" className="rounded-xl border border-neutral-200 bg-white p-5">
-                <div className="flex flex-col gap-3 border-b border-neutral-200 pb-4 sm:flex-row sm:items-start sm:justify-between">
-                  <div>
-                    <p className="text-xs font-bold uppercase tracking-wider text-neutral-500">STOCK DHARMA Delivery Ticket</p>
-                    <h2 className="mt-1 text-2xl font-bold text-neutral-950">{selectedTicket.ticketNumber}</h2>
-                    <p className="text-sm text-neutral-500">Requisition {selectedTicket.requisitionId}</p>
-                  </div>
-                  <div className="text-left sm:text-right">
-                    {statusBadge(selectedTicket.status)}
-                    <p className="mt-2 text-xs text-neutral-500">Run: {selectedTicket.deliveryRun?.runNumber ?? "Unassigned"}</p>
-                  </div>
-                </div>
-                <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <InfoLine icon={<MapPin className="h-4 w-4" />} label="Destination" value={`${selectedTicket.destinationName || "—"}\n${selectedTicket.destinationAddress || "No address snapshot"}`} />
-                  <InfoLine icon={<Truck className="h-4 w-4" />} label="Driver / Vehicle" value={`${selectedTicket.deliveryRun?.driver?.name ?? "—"}\n${selectedTicket.deliveryRun?.vehicle?.vehicleName ?? "—"}`} />
-                  <InfoLine icon={<Clock className="h-4 w-4" />} label="Arrived At" value={formatDateTime(selectedTicket.arrivedAt)} />
-                  <InfoLine icon={<Clock className="h-4 w-4" />} label="Delivered At" value={formatDateTime(selectedTicket.deliveredAt)} />
-                  <InfoLine icon={<UserRound className="h-4 w-4" />} label="Received By" value={selectedTicket.receivedBy || "Signature required"} />
-                </div>
-                <div className="mt-5 overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b border-neutral-200 text-left text-xs uppercase text-neutral-500">
-                        <th className="py-2">Item</th><th className="py-2 text-right">Requested</th><th className="py-2 text-right">Approved</th><th className="py-2 text-right">Shipped</th><th className="py-2 text-right">Delivered</th><th className="py-2 text-right">Issue</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {ticketItemDrafts.map((item, index) => (
-                        <tr key={item.id} className="border-b border-neutral-100">
-                          <td className="py-2 font-medium text-neutral-900">{item.itemName}<div className="text-xs text-neutral-400">{item.unit}</div></td>
-                          <td className="py-2 text-right">{item.requestedQty}</td>
-                          <td className="py-2 text-right">{item.approvedQty}</td>
-                          <td className="py-2 text-right">{item.shippedQty}</td>
-                          <td className="py-2 text-right">
-                            {(hqAdmin || driverUser || managerUser) ? <input type="number" min="0" value={item.deliveredQty} onChange={(e) => setTicketItemDrafts((prev) => prev.map((row, idx) => idx === index ? { ...row, deliveredQty: Number(e.target.value) } : row))} className="w-20 rounded border border-neutral-200 px-2 py-1 text-right" /> : item.deliveredQty}
-                          </td>
-                          <td className="py-2 text-right">
-                            {(hqAdmin || driverUser || managerUser) ? (
-                              <div className="flex justify-end gap-2">
-                                <input type="number" min="0" value={item.issueQty} onChange={(e) => setTicketItemDrafts((prev) => prev.map((row, idx) => idx === index ? { ...row, issueQty: Number(e.target.value) } : row))} className="w-16 rounded border border-neutral-200 px-2 py-1 text-right" />
-                                <input value={item.issueReason ?? ""} onChange={(e) => setTicketItemDrafts((prev) => prev.map((row, idx) => idx === index ? { ...row, issueReason: e.target.value } : row))} placeholder="Reason" className="w-32 rounded border border-neutral-200 px-2 py-1" />
-                              </div>
-                            ) : item.issueQty}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <div><p className="text-xs font-semibold uppercase text-neutral-500">Notes</p><p className="mt-1 whitespace-pre-wrap text-sm">{selectedTicket.notes || "—"}</p></div>
-                  <div className="border-t border-neutral-300 pt-8 text-sm text-neutral-500">Receiver signature</div>
-                </div>
-              </div>
-              {hqAdmin && (
-                <div className="rounded-xl border border-neutral-200 bg-white p-4 space-y-3">
-                  <p className="text-xs font-bold uppercase tracking-wider text-neutral-500 font-semibold">Edit Destination Address & Info</p>
-                  
-                  <div>
-                    <label className="block text-[10px] font-semibold uppercase text-neutral-500">Destination Name</label>
-                    <input
-                      value={selectedTicket.destinationName ?? ""}
-                      onChange={(e) => setSelectedTicket({ ...selectedTicket, destinationName: e.target.value })}
-                      onBlur={async () => {
-                        await updateDeliveryTicket(selectedTicket.id, { destinationName: selectedTicket.destinationName });
-                        await refresh();
-                      }}
-                      placeholder="Destination Name"
-                      className="mt-1 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-[10px] font-semibold uppercase text-neutral-500">Destination Address</label>
-                    <textarea
-                      value={selectedTicket.destinationAddress ?? ""}
-                      onChange={(e) => setSelectedTicket({ ...selectedTicket, destinationAddress: e.target.value })}
-                      onBlur={async () => {
-                        await updateDeliveryTicket(selectedTicket.id, { destinationAddress: selectedTicket.destinationAddress });
-                        await refresh();
-                      }}
-                      placeholder="Destination Address"
-                      className="mt-1 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm min-h-16"
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="block text-[10px] font-semibold uppercase text-neutral-500">Contact Person</label>
-                      <input
-                        value={selectedTicket.destinationContact ?? ""}
-                        onChange={(e) => setSelectedTicket({ ...selectedTicket, destinationContact: e.target.value })}
-                        onBlur={async () => {
-                          await updateDeliveryTicket(selectedTicket.id, { destinationContact: selectedTicket.destinationContact });
-                          await refresh();
-                        }}
-                        placeholder="Contact name"
-                        className="mt-1 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-semibold uppercase text-neutral-500">Contact Phone</label>
-                      <input
-                        value={selectedTicket.destinationPhone ?? ""}
-                        onChange={(e) => setSelectedTicket({ ...selectedTicket, destinationPhone: e.target.value })}
-                        onBlur={async () => {
-                          await updateDeliveryTicket(selectedTicket.id, { destinationPhone: selectedTicket.destinationPhone });
-                          await refresh();
-                        }}
-                        placeholder="Contact phone"
-                        className="mt-1 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="pt-2">
-                    <button
-                      onClick={async () => {
-                        const res: any = await updateTicketAddressFromProfile(selectedTicket.id);
-                        if (res.success && res.data) {
-                          setToast("Delivery address updated from store profile.");
-                          setSelectedTicket(res.data);
-                          await refresh();
-                        } else {
-                          alert(`Address update failed: ${res.error?.message ?? "Unknown error"}`);
-                        }
-                      }}
-                      className="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-xs font-semibold text-neutral-700 hover:bg-neutral-100"
-                    >
-                      <RefreshCw className="h-3.5 w-3.5" /> Update Address from Store Profile
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {(hqAdmin || driverUser || managerUser) && (
-                <div className="rounded-xl border border-neutral-200 bg-white p-4">
-                  <label className="text-xs font-semibold uppercase text-neutral-500">Received by</label>
-                  <input value={receivedBy} onChange={(e) => setReceivedBy(e.target.value)} placeholder="Receiver name" className="mt-1 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm" />
-                  <label className="mt-3 block text-xs font-semibold uppercase text-neutral-500">Ticket notes</label>
-                  <textarea value={selectedTicket.notes ?? ""} onChange={(e) => setSelectedTicket({ ...selectedTicket, notes: e.target.value })} onBlur={async () => { await updateDeliveryTicket(selectedTicket.id, { notes: selectedTicket.notes }); await refresh(); }} className="mt-1 min-h-20 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm" />
-                  <label className="mt-3 block text-xs font-semibold uppercase text-neutral-500">Delivery notes</label>
-                  <textarea value={selectedTicket.deliveryNotes ?? ""} onChange={(e) => setSelectedTicket({ ...selectedTicket, deliveryNotes: e.target.value })} onBlur={async () => { await updateDeliveryTicket(selectedTicket.id, { deliveryNotes: selectedTicket.deliveryNotes }); await refresh(); }} className="mt-1 min-h-20 w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm" />
-                </div>
-              )}
-            </div>
-          )}
-        </Drawer>
+          onRefresh={refresh}
+          user={user}
+          canEditAdmin={hqAdmin}
+          canActOnTicket={hqAdmin || driverUser || managerUser}
+          onToast={setToast}
+        />
 
         <Drawer isOpen={!!routeRun} onClose={() => setRouteRun(null)} title={`Manage Route ${routeRun?.runNumber ?? ""}`} description="Start the run, manage stops, and record odometer actuals." variant="dialog">
           {routeRun && (() => {

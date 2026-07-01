@@ -5,9 +5,10 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/components/AuthProvider";
-import { getFulfillmentSummary, saveFulfillmentAllocations, completeFulfillmentMovement, createDeliveryTicketFromRequisition, approveRequisition, rejectRequisition, getActiveDeliveryRuns, assignDeliveryTicketToRun, removeTicketFromDeliveryRun } from "@/lib/storage";
+import { getFulfillmentSummary, saveFulfillmentAllocations, completeFulfillmentMovement, createDeliveryTicketFromRequisition, approveRequisition, rejectRequisition, getActiveDeliveryRuns, assignDeliveryTicketToRun, removeTicketFromDeliveryRun, getDeliveryTicketById } from "@/lib/storage";
 import { isHqFulfillment, isHqMaster, isHqOps } from "@/lib/roles";
-import { ChevronDown, ChevronRight, Search, Save, Check, RefreshCw, AlertTriangle, Play, Sparkles, Truck, PackageCheck, CheckCircle2, XSquare, Loader2, Printer, FileText, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Search, Save, Check, RefreshCw, AlertTriangle, Play, Sparkles, Truck, PackageCheck, CheckCircle2, XSquare, Loader2, Printer, FileText, X, ExternalLink } from "lucide-react";
+import { DeliveryTicketDrawer } from "@/components/DeliveryTicketDrawer";
 
 type PrintScope = "visible" | "locations" | "requisitions" | "items";
 
@@ -50,11 +51,24 @@ export default function FulfillmentPage() {
   const [activeRuns, setActiveRuns] = useState<{ id: string; runNumber: string; label: string; status: string }[]>([]);
   const [runAssigning, setRunAssigning] = useState<string | null>(null); // ticketId being reassigned
 
-  // Rejection modal
   const [rejectModalReqId, setRejectModalReqId] = useState<string | null>(null);
   const [rejectionReason, setRejectionReason] = useState("");
   const [rejectActionLoading, setRejectActionLoading] = useState(false);
   const [approveActionLoading, setApproveActionLoading] = useState<string | null>(null);
+
+  // ── Delivery Ticket Drawer state ────────────────────────────────────────────
+  const [dtDrawerTicket, setDtDrawerTicket] = useState<any | null>(null);
+  const [dtLoading, setDtLoading] = useState<string | null>(null);
+
+  // ── Role-aware permission helpers ───────────────────────────────────────────
+  // These drive what the DeliveryTicketDrawer renders for hq_fulfillment vs.
+  // hq_master vs. hq_ops when opened from this page.
+  const isUserHqMaster = isHqMaster(user);   // hq_master / hq_admin
+  const isUserHqOps    = isHqOps(user);       // hq_ops
+  // canEditAdmin: only hq_master may edit address / status on a ticket
+  const fulfillmentCanEditAdmin   = isUserHqMaster;
+  // canActOnTicket: hq_master and hq_ops may perform operational actions
+  const fulfillmentCanActOnTicket = isUserHqMaster || isUserHqOps;
 
   const loadData = async () => {
     setLoading(true);
@@ -89,6 +103,55 @@ export default function FulfillmentPage() {
   useEffect(() => {
     loadData();
   }, []);
+
+  // ── Deep-link: open ticket drawer from URL ?ticketId=<uuid> ────────────────
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const ticketId = params.get("ticketId");
+    if (!ticketId) return;
+    // Load and open the drawer automatically
+    (async () => {
+      try {
+        const res = await getDeliveryTicketById(ticketId);
+        if (res.success && res.data) {
+          setDtDrawerTicket(res.data);
+        } else {
+          setToast("Could not load delivery ticket from URL. Please try again.");
+        }
+      } catch {
+        setToast("Could not load delivery ticket from URL.");
+      }
+    })();
+  // Run once on mount only
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Handler: load full ticket and open drawer ───────────────────────────────
+  const handleOpenDeliveryTicket = async (
+    deliveryTicketId: string,
+    deliveryTicketNumber?: string
+  ) => {
+    try {
+      setDtLoading(deliveryTicketId);
+      const res = await getDeliveryTicketById(deliveryTicketId);
+      if (!res.success || !res.data) {
+        throw new Error(res.error?.message ?? "Delivery ticket not found.");
+      }
+      setDtDrawerTicket(res.data);
+      // Reflect in URL for deep-linking / back-button support
+      const url = new URL(window.location.href);
+      url.searchParams.set("ticketId", deliveryTicketId);
+      window.history.pushState({}, "", url.toString());
+    } catch (err: any) {
+      console.error("[fulfillment-open-delivery-ticket]", err);
+      setToast(
+        `Unable to open ${deliveryTicketNumber || "delivery ticket"}. Please refresh and try again.`
+      );
+    } finally {
+      setDtLoading(null);
+    }
+  };
 
   useEffect(() => {
     if (toast) {
@@ -752,12 +815,49 @@ export default function FulfillmentPage() {
                                         ) : (
                                           <>
                                             {item.deliveryTicketId ? (
-                                              <div className="flex flex-col items-end gap-1.5">
-                                                <Badge variant="success" className="font-semibold text-xs py-1 px-2.5">
-                                                  Ticket: {item.deliveryTicketNumber}
-                                                </Badge>
+                                          <div className="flex flex-col items-end gap-1.5">
+                                                {/* Ticket number badge — clickable */}
+                                                <button
+                                                  onClick={() => handleOpenDeliveryTicket(item.deliveryTicketId, item.deliveryTicketNumber)}
+                                                  disabled={dtLoading === item.deliveryTicketId}
+                                                  className="inline-flex items-center gap-1 font-mono text-xs font-bold text-blue-700 bg-blue-50 border border-blue-200 rounded px-2 py-1 hover:bg-blue-100 transition-colors"
+                                                  title="Click to open full delivery ticket"
+                                                >
+                                                  {dtLoading === item.deliveryTicketId ? (
+                                                    <Loader2 className="h-3 w-3 animate-spin" />
+                                                  ) : (
+                                                    <FileText className="h-3 w-3" />
+                                                  )}
+                                                  {item.deliveryTicketNumber}
+                                                </button>
+
+                                                {/* Open Delivery Ticket button */}
+                                                <button
+                                                  onClick={() => handleOpenDeliveryTicket(item.deliveryTicketId, item.deliveryTicketNumber)}
+                                                  disabled={dtLoading === item.deliveryTicketId}
+                                                  className="inline-flex items-center gap-1.5 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 px-2.5 py-1.5 rounded-lg transition-colors shadow-sm"
+                                                  title="Open the full delivery ticket"
+                                                >
+                                                  <ExternalLink className="h-3.5 w-3.5" />
+                                                  Open Delivery Ticket
+                                                </button>
+
+                                                {/* Quick print — opens print URL directly */}
+                                                <button
+                                                  onClick={() => {
+                                                    const url = `/deliveries/tickets/${item.deliveryTicketId}/print?mode=print`;
+                                                    const win = window.open(url, "_blank", "noopener,noreferrer");
+                                                    if (!win) setToast("Browser blocked the print window. Allow pop-ups and try again.");
+                                                  }}
+                                                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-neutral-700 bg-white hover:bg-neutral-50 border border-neutral-200 px-2.5 py-1.5 rounded-lg transition-colors shadow-sm"
+                                                  title="Print delivery ticket"
+                                                >
+                                                  <Printer className="h-3.5 w-3.5" />
+                                                  Print Ticket
+                                                </button>
+
                                                 {/* Run assignment dropdown */}
-                                                {activeRuns.length > 0 ? (
+                                                {!isHqFulfillment(user) && activeRuns.length > 0 ? (
                                                   <div className="flex items-center gap-1.5">
                                                     <select
                                                       defaultValue={item.deliveryRunId ?? ""}
@@ -797,21 +897,29 @@ export default function FulfillmentPage() {
                                                     )}
                                                   </div>
                                                 ) : (
-                                                  <span className="text-[10px] text-neutral-400 italic">No active runs</span>
+                                                  !isHqFulfillment(user) && <span className="text-[10px] text-neutral-400 italic">No active runs</span>
                                                 )}
                                               </div>
                                             ) : (
                                               /* Safeguard: no ticket button for rejected reqs */
                                               item.requisitionStatus !== 'rejected' ? (
-                                                <button
-                                                  onClick={() => handleCreateDeliveryTicket(item.requisitionId)}
-                                                  disabled={ticketingId !== null}
-                                                  className="text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 px-2.5 py-1.5 rounded-lg transition-colors inline-flex items-center gap-1 shadow-sm"
-                                                  title="Generate a delivery ticket using the fulfilled allocations for this requisition"
-                                                >
-                                                  <Truck className="h-3.5 w-3.5" />
-                                                  {ticketingId === item.requisitionId ? "Creating..." : "Create Delivery Ticket"}
-                                                </button>
+                                                /* Only hq_master / hq_ops can create tickets; hq_fulfillment cannot */
+                                                !isHqFulfillment(user) ? (
+                                                  <>
+                                                    <span className="text-xs text-neutral-500 italic">No delivery ticket created yet</span>
+                                                    <button
+                                                      onClick={() => handleCreateDeliveryTicket(item.requisitionId)}
+                                                      disabled={ticketingId !== null}
+                                                      className="text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 px-2.5 py-1.5 rounded-lg transition-colors inline-flex items-center gap-1 shadow-sm"
+                                                      title="Generate a delivery ticket using the fulfilled allocations for this requisition"
+                                                    >
+                                                      <Truck className="h-3.5 w-3.5" />
+                                                      {ticketingId === item.requisitionId ? "Creating..." : "Create Delivery Ticket"}
+                                                    </button>
+                                                  </>
+                                                ) : (
+                                                  <span className="text-xs text-neutral-500 italic">No delivery ticket created yet</span>
+                                                )
                                               ) : (
                                                 <span className="text-xs text-danger-500 font-semibold">Rejected</span>
                                               )
@@ -1055,6 +1163,25 @@ export default function FulfillmentPage() {
         </div>
       </div>
     )}
+
+    {/* ── Delivery Ticket Drawer (shared canonical component) ──────────────── */}
+    <DeliveryTicketDrawer
+      ticket={dtDrawerTicket}
+      onClose={() => {
+        setDtDrawerTicket(null);
+        // Remove ticketId from URL when the drawer is closed
+        if (typeof window !== "undefined") {
+          const url = new URL(window.location.href);
+          url.searchParams.delete("ticketId");
+          window.history.pushState({}, "", url.toString());
+        }
+      }}
+      onRefresh={loadData}
+      user={user}
+      canEditAdmin={fulfillmentCanEditAdmin}
+      canActOnTicket={fulfillmentCanActOnTicket}
+      onToast={(msg) => setToast(msg)}
+    />
     </>
   );
 }
