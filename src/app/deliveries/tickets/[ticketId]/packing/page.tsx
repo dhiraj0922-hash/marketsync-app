@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
-import { CheckSquare, Loader2, Package, Printer } from "lucide-react";
+import { Loader2, Package, Printer } from "lucide-react";
 import { getDeliveryTicketById } from "@/lib/storage";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -24,13 +24,13 @@ interface PackInfo {
 }
 
 function getPackInfo(item: any): PackInfo {
-  const packLabel = item.packLabelSnapshot as string | null;
-  const packQty   = item.packQtySnapshot   as number | null;
-  const packUnit  = item.packUnitSnapshot  as string | null;
-  const packCount = item.shippedPackCount  as number | null;
-  const baseQty   = item.shippedBaseQty    as number | null;
+  const packLabel  = item.packLabelSnapshot as string | null;
+  const packQty    = item.packQtySnapshot   as number | null;
+  const packUnit   = item.packUnitSnapshot  as string | null;
+  const packCount  = item.shippedPackCount  as number | null;
+  const baseQty    = item.shippedBaseQty    as number | null;
   const shippedQty = Number(item.shippedQty ?? 0);
-  const unitStr   = packUnit ?? item.unit ?? "";
+  const unitStr    = packUnit ?? item.unit ?? "";
 
   // Missing — no pack info at all
   if (packQty == null && packLabel == null && packCount == null && baseQty == null) {
@@ -45,7 +45,9 @@ function getPackInfo(item: any): PackInfo {
 
   // Pack-based
   if (packCount != null && baseQty != null) {
-    const sizeStr = packLabel ?? (packQty != null && packUnit ? `${packQty} ${packUnit}` : "packed");
+    const sizeStr =
+      packLabel ??
+      (packQty != null && packUnit ? `${packQty} ${packUnit}` : "packed");
     return {
       packSize: sizeStr,
       pull: `${packCount}`,
@@ -55,7 +57,7 @@ function getPackInfo(item: any): PackInfo {
     };
   }
 
-  // Loose
+  // Loose / base-unit
   return {
     packSize: packLabel ?? "Loose",
     pull: "—",
@@ -75,7 +77,8 @@ export default function PackingViewPage() {
   const [loading, setLoading] = useState(true);
   const hasAutoPrinted = useRef(false);
   const generatedAt   = useMemo(() => new Date(), []);
-  const shouldAutoPrint = searchParams.get("print") === "1" || searchParams.get("mode") === "print";
+  const shouldAutoPrint =
+    searchParams.get("print") === "1" || searchParams.get("mode") === "print";
 
   useEffect(() => {
     let cancelled = false;
@@ -84,7 +87,9 @@ export default function PackingViewPage() {
       const res = await getDeliveryTicketById(params.ticketId);
       if (cancelled) return;
       if (!res.success) {
-        setError(res.error?.message ?? "Delivery ticket not found or access denied.");
+        setError(
+          res.error?.message ?? "Delivery ticket not found or access denied."
+        );
       } else {
         setTicket(res.data);
         document.title = `Packing List — ${res.data?.ticketNumber ?? ""}`;
@@ -99,10 +104,11 @@ export default function PackingViewPage() {
     if (!ticket || !shouldAutoPrint) return;
     if (hasAutoPrinted.current) return;
     hasAutoPrinted.current = true;
-    const t = window.setTimeout(() => window.print(), 350);
+    const t = window.setTimeout(() => window.print(), 400);
     return () => window.clearTimeout(t);
   }, [shouldAutoPrint, ticket]);
 
+  /* ── loading / error states ── */
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center gap-2 bg-slate-50 text-slate-500">
@@ -110,37 +116,71 @@ export default function PackingViewPage() {
       </div>
     );
   }
-
   if (error || !ticket) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
         <div className="rounded-2xl border border-red-200 bg-white p-6 text-center shadow-sm">
-          <p className="text-sm font-semibold text-red-700">{error || "Delivery ticket not found."}</p>
+          <p className="text-sm font-semibold text-red-700">
+            {error || "Delivery ticket not found."}
+          </p>
         </div>
       </div>
     );
   }
 
-  const items: any[] = Array.isArray(ticket.items) ? ticket.items : [];
-  const missingCount = items.filter((it) => it.shippedQty > 0 && it.packQtySnapshot == null).length;
+  const items: any[]  = Array.isArray(ticket.items) ? ticket.items : [];
+  const missingCount  = items.filter(
+    (it) => it.shippedQty > 0 && it.packQtySnapshot == null
+  ).length;
+  const ticketNum     = ticket.ticketNumber ?? "";
 
   return (
-    <main className="packing-shell min-h-screen bg-slate-50 py-6 print:bg-white print:py-0">
+    <>
+      {/*
+       * ── STYLE BLOCK ──────────────────────────────────────────────────────────
+       *
+       * Print-safe rules:
+       *
+       * 1. html/body must be height:auto and overflow:visible so the browser
+       *    renders the full document height, not just the scroll viewport.
+       *    Without this, Chrome prints only "1 page" regardless of content.
+       *
+       * 2. thead { display: table-header-group } makes the header row repeat
+       *    automatically on every printed page (W3C standard).
+       *
+       * 3. tbody tr { break-inside: avoid } keeps each row on one page.
+       *    Combined with page-break-inside: avoid for older browsers.
+       *
+       * 4. tfoot { display: table-footer-group } pins the summary sign-off
+       *    section to the bottom of the last page.
+       *
+       * 5. No transform, scale, fixed positioning, or CSS zoom is used.
+       *    These break the browser print layout engine.
+       *
+       * 6. .packing-shell uses height:auto (not min-h-screen) in print.
+       *    The Tailwind class is only applied on screen via a wrapping div.
+       */}
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap');
+
+        /* ── Base (screen + print) ── */
         .packing-shell {
           font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
           color: #111827;
+          background: #f8fafc;
         }
-        .packing-page {
+        .packing-content {
           max-width: 8.5in;
           margin: 0 auto;
           background: #ffffff;
-          padding: 32px;
+          padding: 32px 36px;
         }
-        .packing-screen-bar {
+
+        /* ── Screen toolbar ── */
+        .packing-toolbar {
           max-width: 8.5in;
           margin: 0 auto 12px;
+          padding: 0 4px;
           display: flex;
           align-items: center;
           gap: 8px;
@@ -154,268 +194,546 @@ export default function PackingViewPage() {
           background: #fff;
           border-radius: 10px;
           padding: 8px 14px;
+          font-family: inherit;
           font-size: 13px;
           font-weight: 700;
           cursor: pointer;
+          transition: background 0.15s;
         }
+        .packing-btn:hover { background: #f3f4f6; }
         .packing-btn-primary {
           background: #10b981;
           border-color: #059669;
           color: #fff;
         }
-        .packing-header {
+        .packing-btn-primary:hover { background: #059669; }
+
+        /* ── Document header ── */
+        .packing-doc-header {
           display: flex;
           justify-content: space-between;
           align-items: flex-start;
           gap: 16px;
-          border-bottom: 2px solid #111827;
-          padding-bottom: 16px;
-          margin-bottom: 20px;
+          border-bottom: 2.5px solid #111827;
+          padding-bottom: 14px;
+          margin-bottom: 18px;
+          /* keep header on first page only — do not repeat */
+          break-inside: avoid;
+          page-break-inside: avoid;
         }
         .packing-brand {
-          font-size: 11px;
+          font-size: 10px;
           font-weight: 900;
-          letter-spacing: 0.16em;
+          letter-spacing: 0.18em;
           text-transform: uppercase;
           color: #6b7280;
+          margin-bottom: 4px;
         }
         .packing-title {
-          font-size: 26px;
+          font-size: 24px;
           font-weight: 900;
-          letter-spacing: -0.03em;
-          margin-top: 4px;
+          letter-spacing: -0.02em;
+          margin: 0 0 4px;
         }
         .packing-sub {
-          font-size: 12px;
+          font-size: 11px;
           color: #6b7280;
-          margin-top: 4px;
+          margin-top: 3px;
+          line-height: 1.5;
         }
         .packing-meta {
           text-align: right;
           font-size: 11px;
           color: #6b7280;
+          white-space: nowrap;
         }
         .packing-meta strong { color: #111827; }
-        .packing-warn-banner {
-          margin-bottom: 14px;
-          padding: 10px 14px;
+
+        /* ── Warning banner ── */
+        .packing-warn {
+          margin-bottom: 12px;
+          padding: 9px 12px;
           background: #fffbeb;
           border: 1px solid #fbbf24;
-          border-radius: 8px;
-          font-size: 12px;
+          border-radius: 6px;
+          font-size: 11px;
           font-weight: 700;
           color: #92400e;
+          break-inside: avoid;
+          page-break-inside: avoid;
         }
+
+        /* ── Main packing table ────────────────────────────────────────────────
+         *
+         * thead { display: table-header-group }
+         *   → repeats column headings on every printed page automatically.
+         *
+         * tr { break-inside: avoid }
+         *   → prevents a single data row from splitting across a page break.
+         */
         .packing-table {
           width: 100%;
           border-collapse: collapse;
-          font-size: 13px;
+          font-size: 12px;
+          table-layout: auto;
+        }
+        .packing-table thead {
+          /* CRITICAL: repeat header on every printed page */
+          display: table-header-group;
+        }
+        .packing-table tfoot {
+          display: table-footer-group;
         }
         .packing-table thead th {
           background: #f0fdf4;
           border: 1px solid #86efac;
-          padding: 9px 10px;
+          padding: 8px 10px;
           text-align: left;
-          font-size: 10px;
+          font-size: 9px;
           font-weight: 900;
           letter-spacing: 0.1em;
           text-transform: uppercase;
           color: #166534;
+          vertical-align: bottom;
         }
         .packing-table tbody td {
           border: 1px solid #e5e7eb;
-          padding: 12px 10px;
+          padding: 10px 10px;
           vertical-align: top;
         }
+        .packing-table tbody tr {
+          /* CRITICAL: do not split a single row across a page break */
+          break-inside: avoid;
+          page-break-inside: avoid;
+        }
         .packing-table tbody tr:hover { background: #f9fafb; }
-        .packing-check-col { width: 40px; text-align: center; font-size: 20px; }
-        .packing-item-name { font-weight: 700; font-size: 13px; }
-        .packing-item-unit { font-size: 11px; color: #6b7280; margin-top: 2px; }
-        .packing-pull {
-          font-size: 22px;
+
+        /* Column sizing */
+        .col-check  { width: 36px;  text-align: center; }
+        .col-pull   { width: 80px;  text-align: center; }
+        .col-size   { width: 130px; }
+        .col-total  { width: 110px; }
+        .col-signed { width: 90px;  }
+
+        /* Cell content helpers */
+        .packing-check-cell { font-size: 20px; text-align: center; }
+        .packing-item-name  { font-weight: 700; font-size: 12px; }
+        .packing-item-unit  { font-size: 10px; color: #6b7280; margin-top: 1px; }
+        .packing-pull-num {
+          font-size: 20px;
           font-weight: 900;
           color: #065f46;
           text-align: center;
+          line-height: 1;
         }
-        .packing-pull-label { font-size: 10px; color: #6b7280; text-align: center; margin-top: 2px; }
-        .packing-total { font-size: 13px; font-weight: 600; }
-        .packing-size { font-size: 12px; color: #374151; }
-        .packing-missing {
-          font-size: 10px;
+        .packing-pull-lbl { font-size: 9px; color: #6b7280; text-align: center; margin-top: 2px; }
+        .packing-total-val { font-size: 12px; font-weight: 600; }
+        .packing-size-val  { font-size: 11px; color: #374151; }
+        .packing-loose-badge {
+          display: inline-block;
+          border: 1px solid #d1d5db;
+          border-radius: 4px;
+          padding: 1px 5px;
+          font-size: 9px;
+          color: #6b7280;
+        }
+        .packing-miss-badge {
+          display: inline-block;
+          font-size: 9px;
           font-weight: 700;
           color: #b45309;
           background: #fffbeb;
           border: 1px solid #fbbf24;
           border-radius: 4px;
-          padding: 2px 6px;
-          display: inline-block;
+          padding: 1px 5px;
+          margin-top: 3px;
+        }
+
+        /* ── Sign-off / footer area ── */
+        .packing-signoff {
+          margin-top: 24px;
+          display: grid;
+          grid-template-columns: 1fr 1fr 1fr;
+          gap: 16px;
+          break-inside: avoid;
+          page-break-inside: avoid;
+        }
+        .packing-signoff-line {
+          border-bottom: 1px solid #111827;
+          height: 32px;
+          margin-top: 16px;
+        }
+        .packing-signoff-label {
           margin-top: 4px;
+          font-size: 9px;
+          font-weight: 800;
+          color: #4b5563;
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
         }
-        .packing-loose {
-          display: inline-block;
-          border: 1px solid #d1d5db;
-          border-radius: 4px;
-          padding: 2px 6px;
-          font-size: 10px;
-          color: #6b7280;
+
+        /* ── Print-only page footer (repeated via tfoot) ── */
+        .packing-page-footer td {
+          border: none !important;
+          padding-top: 8px;
+          font-size: 9px;
+          color: #9ca3af;
         }
-        .packing-footer {
-          margin-top: 28px;
+
+        /* ── Screen-only doc footer ── */
+        .packing-doc-footer {
+          margin-top: 20px;
           border-top: 1px solid #e5e7eb;
-          padding-top: 10px;
+          padding-top: 8px;
           font-size: 10px;
           color: #9ca3af;
           display: flex;
           justify-content: space-between;
         }
+
+        /* ═══════════════════════════════════════════════════════════════════
+         * @media print — the critical section
+         * ═══════════════════════════════════════════════════════════════════
+         *
+         * Chrome's print engine uses the scroll container's rendered height
+         * to decide how many pages to produce. If any ancestor has:
+         *   - height / min-height in viewport units (vh) or pixels
+         *   - overflow: hidden / auto / scroll
+         *   - fixed or sticky positioning
+         * …then only the "visible" area prints, cutting off remaining content.
+         *
+         * The fix: in print media, every ancestor of the packing table must
+         * have height:auto, overflow:visible, and position:static.
+         */
         @media print {
-          .packing-screen-bar { display: none !important; }
-          .packing-shell { background: white !important; }
-          .packing-page { max-width: none; margin: 0; padding: 0; }
-          .packing-table tbody tr:hover { background: transparent; }
+          /* 1. Neutralise html + body constraints */
+          html,
+          body {
+            height: auto !important;
+            min-height: 0 !important;
+            max-height: none !important;
+            overflow: visible !important;
+            background: white !important;
+            margin: 0 !important;
+            padding: 0 !important;
+          }
+
+          /* 2. Neutralise all ancestor wrappers Next.js may inject
+                (#__next, [data-nextjs-scroll-focus-boundary], etc.) */
+          #__next,
+          [data-nextjs-scroll-focus-boundary],
+          [id^="radix-"],
+          body > div {
+            height: auto !important;
+            min-height: 0 !important;
+            max-height: none !important;
+            overflow: visible !important;
+            position: static !important;
+          }
+
+          /* 3. This page's own shell / content */
+          .packing-shell,
+          .packing-content {
+            height: auto !important;
+            min-height: 0 !important;
+            max-height: none !important;
+            overflow: visible !important;
+            position: static !important;
+            background: white !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            max-width: none !important;
+            width: 100% !important;
+          }
+
+          /* 4. Hide screen-only chrome */
+          .packing-toolbar,
+          .packing-doc-footer,
+          nav,
+          header:not(.packing-doc-header) {
+            display: none !important;
+          }
+
+          /* 5. Table — allow natural multi-page flow */
+          .packing-table {
+            width: 100% !important;
+            font-size: 10px;
+          }
+          .packing-table thead {
+            /* Repeat column headers on every printed page */
+            display: table-header-group !important;
+          }
+          .packing-table tfoot {
+            display: table-footer-group !important;
+          }
+          .packing-table tbody tr {
+            /* Never split a single row across a page break */
+            break-inside: avoid !important;
+            page-break-inside: avoid !important;
+          }
+          .packing-table tbody tr:hover {
+            background: transparent !important;
+          }
+          .packing-table thead th {
+            /* Ensure backgrounds print (Chrome blocks backgrounds by default) */
+            -webkit-print-color-adjust: exact;
+            print-color-adjust: exact;
+            background: #f0fdf4 !important;
+          }
+
+          /* 6. Pull number — slightly smaller in print */
+          .packing-pull-num { font-size: 16px; }
+
+          /* 7. Sign-off stays together */
+          .packing-signoff {
+            break-before: avoid;
+            page-break-before: avoid;
+          }
         }
-        @page { size: Letter; margin: 0.45in; }
+
+        /* ── @page rule — paper size and margins ── */
+        @page {
+          size: letter portrait;
+          margin: 12mm 14mm;
+        }
       `}</style>
 
-      {/* Screen-only toolbar */}
-      <div className="packing-screen-bar">
-        <button className="packing-btn packing-btn-primary" onClick={() => window.print()}>
-          <Printer className="h-4 w-4" /> Print Packing List
-        </button>
-        <button className="packing-btn" onClick={() => window.close()}>
-          Close
-        </button>
-        <span style={{ marginLeft: "auto", fontSize: 12, color: "#6b7280" }}>
-          Generated {generatedAt.toLocaleString()}
-        </span>
-      </div>
+      {/* ── Screen wrapper — provides background + scroll ──────────────────── */}
+      <div className="packing-shell" style={{ minHeight: "100vh", paddingTop: 24, paddingBottom: 48 }}>
 
-      <div className="packing-page">
-        {/* Header */}
-        <header className="packing-header">
-          <div>
-            <div className="packing-brand">
-              <Package style={{ display: "inline", height: 12, width: 12, marginRight: 4 }} />
-              Stock Dharma · Warehouse
-            </div>
-            <div className="packing-title">PACKING LIST</div>
-            <div className="packing-sub">
-              Ticket: <strong>{ticket.ticketNumber}</strong>
-              {" · "}
-              Req: <strong>{ticket.requisitionId ?? "—"}</strong>
-              {" · "}
-              Status: <strong>{labelize(ticket.status ?? "draft")}</strong>
-            </div>
-            <div className="packing-sub">
-              Destination: <strong>{ticket.destinationName ?? "—"}</strong>
-            </div>
-          </div>
-          <div className="packing-meta">
-            <div>Print Date</div>
-            <strong>{generatedAt.toLocaleDateString()}</strong>
-            <div style={{ marginTop: 6 }}>Time</div>
-            <strong>{generatedAt.toLocaleTimeString()}</strong>
-            <div style={{ marginTop: 6 }}>
-              Run: <strong>{ticket.deliveryRun?.runNumber ?? "Unassigned"}</strong>
-            </div>
-          </div>
-        </header>
-
-        {/* Warning banner */}
-        {missingCount > 0 && (
-          <div className="packing-warn-banner">
-            ⚠ {missingCount} item{missingCount !== 1 ? "s" : ""} missing pack configuration —
-            confirm quantities manually before dispatch.
-          </div>
-        )}
-
-        {/* Packing table */}
-        {items.length === 0 ? (
-          <p style={{ color: "#6b7280", fontSize: 13 }}>No items on this ticket.</p>
-        ) : (
-          <table className="packing-table">
-            <thead>
-              <tr>
-                <th className="packing-check-col">✓</th>
-                <th>Item</th>
-                <th>Pack Size</th>
-                <th style={{ textAlign: "center" }}>Pull (packs)</th>
-                <th>Total Qty</th>
-                <th style={{ minWidth: 72 }}>Checked By</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((item: any, i: number) => {
-                const pk = getPackInfo(item);
-                return (
-                  <tr key={item.id ?? i}>
-                    <td className="packing-check-col" style={{ fontSize: 24 }}>□</td>
-                    <td>
-                      <div className="packing-item-name">{item.itemName}</div>
-                      <div className="packing-item-unit">{item.unit ?? ""}</div>
-                      {pk.isMissing && (
-                        <span className="packing-missing">
-                          Pack config missing — confirm manually before dispatch
-                        </span>
-                      )}
-                    </td>
-                    <td>
-                      {pk.isLoose ? (
-                        <span className="packing-loose">Loose</span>
-                      ) : pk.isMissing ? (
-                        <span style={{ color: "#b45309", fontSize: 12 }}>—</span>
-                      ) : (
-                        <span className="packing-size">{pk.packSize}</span>
-                      )}
-                    </td>
-                    <td>
-                      {pk.isLoose || pk.isMissing ? (
-                        <div className="packing-pull-label" style={{ textAlign: "center" }}>—</div>
-                      ) : (
-                        <>
-                          <div className="packing-pull">{pk.pull}</div>
-                          <div className="packing-pull-label">packs</div>
-                        </>
-                      )}
-                    </td>
-                    <td>
-                      <div className="packing-total">{pk.total}</div>
-                    </td>
-                    <td />
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
-
-        {/* Warehouse sign-off */}
-        <div style={{ marginTop: 28, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
-          <div>
-            <div style={{ borderBottom: "1px solid #111827", height: 34, marginTop: 18 }} />
-            <div style={{ marginTop: 5, fontSize: 10, fontWeight: 800, color: "#4b5563", textTransform: "uppercase", letterSpacing: "0.08em" }}>
-              Packed By
-            </div>
-          </div>
-          <div>
-            <div style={{ borderBottom: "1px solid #111827", height: 34, marginTop: 18 }} />
-            <div style={{ marginTop: 5, fontSize: 10, fontWeight: 800, color: "#4b5563", textTransform: "uppercase", letterSpacing: "0.08em" }}>
-              Checked By
-            </div>
-          </div>
-          <div>
-            <div style={{ borderBottom: "1px solid #111827", height: 34, marginTop: 18 }} />
-            <div style={{ marginTop: 5, fontSize: 10, fontWeight: 800, color: "#4b5563", textTransform: "uppercase", letterSpacing: "0.08em" }}>
-              Date / Time
-            </div>
-          </div>
+        {/* Screen toolbar — hidden in print via CSS */}
+        <div className="packing-toolbar">
+          <button
+            className="packing-btn packing-btn-primary"
+            onClick={() => window.print()}
+          >
+            <Printer style={{ height: 14, width: 14 }} /> Print Packing List
+          </button>
+          <button className="packing-btn" onClick={() => window.close()}>
+            Close
+          </button>
+          <span style={{ marginLeft: "auto", fontSize: 11, color: "#6b7280" }}>
+            Generated {generatedAt.toLocaleString()}
+          </span>
         </div>
 
-        <footer className="packing-footer">
-          <span>Stock Dharma · Packing List · {ticket.ticketNumber}</span>
-          <span>{generatedAt.toLocaleString()}</span>
-        </footer>
-      </div>
-    </main>
+        {/* ── Printable content area ──────────────────────────────────────── */}
+        <div className="packing-content">
+
+          {/* Document header — first page only */}
+          <header className="packing-doc-header">
+            <div>
+              <div className="packing-brand">
+                Stock Dharma · Warehouse Packing List
+              </div>
+              <h1 className="packing-title">PACKING LIST</h1>
+              <div className="packing-sub">
+                Ticket: <strong>{ticketNum}</strong>
+                {" · "}
+                Req: <strong>{ticket.requisitionId ?? "—"}</strong>
+                {" · "}
+                Status: <strong>{labelize(ticket.status ?? "draft")}</strong>
+              </div>
+              <div className="packing-sub">
+                Destination:{" "}
+                <strong>{ticket.destinationName ?? "—"}</strong>
+              </div>
+              <div className="packing-sub">
+                Run:{" "}
+                <strong>
+                  {ticket.deliveryRun?.runNumber ?? "Unassigned"}
+                </strong>
+              </div>
+            </div>
+            <div className="packing-meta">
+              <div>Print Date</div>
+              <strong>{generatedAt.toLocaleDateString()}</strong>
+              <div style={{ marginTop: 6 }}>Time</div>
+              <strong>{generatedAt.toLocaleTimeString()}</strong>
+              <div style={{ marginTop: 6 }}>Items</div>
+              <strong>{items.length}</strong>
+            </div>
+          </header>
+
+          {/* Warning banner */}
+          {missingCount > 0 && (
+            <div className="packing-warn">
+              ⚠ {missingCount} item{missingCount !== 1 ? "s" : ""} missing
+              pack configuration — confirm quantities manually before
+              dispatch.
+            </div>
+          )}
+
+          {/* ── Packing table ────────────────────────────────────────────── */}
+          {items.length === 0 ? (
+            <p style={{ color: "#6b7280", fontSize: 13 }}>
+              No items on this ticket.
+            </p>
+          ) : (
+            <table className="packing-table">
+              {/*
+               * thead with display:table-header-group repeats on every page.
+               * Do NOT use display:block or display:flex on thead/tbody/tfoot —
+               * it breaks multi-page repetition.
+               */}
+              <thead>
+                <tr>
+                  <th className="col-check">✓</th>
+                  <th>Item</th>
+                  <th className="col-size">Pack Size</th>
+                  <th className="col-pull">Pull<br />(packs)</th>
+                  <th className="col-total">Total Qty</th>
+                  <th className="col-signed">Checked By</th>
+                </tr>
+              </thead>
+
+              {/*
+               * tfoot appears at the bottom of the LAST page.
+               * It shows the sign-off lines so warehouse staff can sign
+               * immediately after the last item row.
+               */}
+              <tfoot>
+                {/* Spacer row */}
+                <tr className="packing-page-footer">
+                  <td colSpan={6} style={{ paddingTop: 20, paddingBottom: 0, borderTop: "1px solid #e5e7eb" }}>
+                    <div style={{
+                      display: "grid",
+                      gridTemplateColumns: "1fr 1fr 1fr",
+                      gap: 16,
+                    }}>
+                      {[
+                        "Packed By",
+                        "Checked By",
+                        "Date / Time",
+                      ].map((label) => (
+                        <div key={label}>
+                          <div style={{
+                            borderBottom: "1px solid #111827",
+                            height: 30,
+                            marginTop: 12,
+                          }} />
+                          <div style={{
+                            marginTop: 4,
+                            fontSize: 8,
+                            fontWeight: 800,
+                            color: "#4b5563",
+                            textTransform: "uppercase",
+                            letterSpacing: "0.08em",
+                          }}>
+                            {label}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </td>
+                </tr>
+                {/* Print page footer */}
+                <tr className="packing-page-footer">
+                  <td colSpan={6}>
+                    <div style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      paddingTop: 6,
+                      borderTop: "1px solid #e5e7eb",
+                      fontSize: 8,
+                      color: "#9ca3af",
+                    }}>
+                      <span>
+                        Stock Dharma · Packing List · {ticketNum}
+                      </span>
+                      <span>{generatedAt.toLocaleDateString()}</span>
+                    </div>
+                  </td>
+                </tr>
+              </tfoot>
+
+              <tbody>
+                {items.map((item: any, i: number) => {
+                  const pk = getPackInfo(item);
+                  return (
+                    <tr key={item.id ?? i}>
+                      {/* Checkbox */}
+                      <td className="col-check packing-check-cell">
+                        □
+                      </td>
+
+                      {/* Item name + unit + missing warning */}
+                      <td>
+                        <div className="packing-item-name">
+                          {item.itemName}
+                        </div>
+                        <div className="packing-item-unit">
+                          {item.unit ?? ""}
+                        </div>
+                        {pk.isMissing && (
+                          <span className="packing-miss-badge">
+                            Pack config missing — confirm manually
+                          </span>
+                        )}
+                      </td>
+
+                      {/* Pack size */}
+                      <td className="col-size">
+                        {pk.isLoose ? (
+                          <span className="packing-loose-badge">
+                            Loose
+                          </span>
+                        ) : pk.isMissing ? (
+                          <span style={{ color: "#b45309", fontSize: 10 }}>
+                            —
+                          </span>
+                        ) : (
+                          <span className="packing-size-val">
+                            {pk.packSize}
+                          </span>
+                        )}
+                      </td>
+
+                      {/* Pull count */}
+                      <td className="col-pull">
+                        {pk.isLoose || pk.isMissing ? (
+                          <div style={{
+                            textAlign: "center",
+                            color: "#9ca3af",
+                            fontSize: 11,
+                          }}>
+                            —
+                          </div>
+                        ) : (
+                          <>
+                            <div className="packing-pull-num">
+                              {pk.pull}
+                            </div>
+                            <div className="packing-pull-lbl">packs</div>
+                          </>
+                        )}
+                      </td>
+
+                      {/* Total qty */}
+                      <td className="col-total">
+                        <div className="packing-total-val">
+                          {pk.total}
+                        </div>
+                      </td>
+
+                      {/* Checked-by write-in */}
+                      <td className="col-signed" />
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+
+          {/* Screen-only footer (hidden in print) */}
+          <div className="packing-doc-footer">
+            <span>
+              Stock Dharma · Packing List · {ticketNum}
+            </span>
+            <span>{generatedAt.toLocaleString()}</span>
+          </div>
+        </div>{/* end .packing-content */}
+      </div>{/* end .packing-shell */}
+    </>
   );
 }
