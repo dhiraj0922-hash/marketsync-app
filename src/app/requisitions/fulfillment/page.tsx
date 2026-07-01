@@ -60,12 +60,12 @@ function fmtDisplayDate(iso: string): string {
 
 function modeLabel(mode: DateFilterMode, customDate: string, rangeFrom: string, rangeTo: string): string {
   switch (mode) {
-    case "today":     return `Today (${fmtDisplayDate(todayIso())})`;
-    case "tomorrow":  return `Tomorrow (${fmtDisplayDate(tomorrowIso())})`;
-    case "this_week": return `This Week`;
-    case "custom":    return customDate ? `${fmtDisplayDate(customDate)}` : "Custom Date";
-    case "range":     return (rangeFrom && rangeTo) ? `${fmtDisplayDate(rangeFrom)} – ${fmtDisplayDate(rangeTo)}` : "Date Range";
-    case "all":       return "All Open Requisitions";
+    case "today":     return `Today — submitted ${fmtDisplayDate(todayIso())}`;
+    case "tomorrow":  return `Tomorrow — submitted ${fmtDisplayDate(tomorrowIso())}`;
+    case "this_week": return `This Week — submitted this week`;
+    case "custom":    return customDate ? `submitted on ${fmtDisplayDate(customDate)}` : "Custom Date";
+    case "range":     return (rangeFrom && rangeTo) ? `submitted ${fmtDisplayDate(rangeFrom)} – ${fmtDisplayDate(rangeTo)}` : "Date Range";
+    case "all":       return "All Open Requisitions (any submission date)";
   }
 }
 
@@ -75,8 +75,22 @@ function batchRef(mode: DateFilterMode, customDate: string, rangeFrom: string): 
     : mode === "custom" && customDate ? customDate
     : mode === "range" && rangeFrom ? rangeFrom
     : todayIso();
-  return `FUL-${base.replace(/-/g, "")}-001`;
+  return `REQ-BATCH-${base.replace(/-/g, "")}-001`;
 }
+
+// ─── Architecture note ────────────────────────────────────────────────────────
+// The `date` field on requisitions is the SUBMISSION date only.
+// It does not represent when the goods are actually needed for delivery.
+//
+// TODO (future): Add a `required_by_date` (or `requested_delivery_date`) column
+// to the requisitions table. Once that field exists:
+//   - Fulfillment batching should filter by required_by_date, not date.
+//   - Delivery planning and dispatch scheduling should also use required_by_date.
+//   - The UI label can then truthfully say "Fulfillment Date" or "Delivery Date".
+//   - This file's activeDateRange logic filters item.requisitionDate which maps
+//     to req.date — swap the source field here when the column is available.
+// Until then, all filtering is by requisition SUBMISSION date and is labelled
+// accordingly as "Requisition Date Batch".
 
 /** Tiny inline stat for the batch summary strip. */
 function Stat({ label, value, color }: { label: string; value: number; color?: string }) {
@@ -625,11 +639,11 @@ export default function FulfillmentPage() {
         </div>
       </div>
 
-      {/* ── FULFILLMENT DATE FILTER BAR (sticky while scrolling) ── */}
+      {/* ── REQUISITION DATE BATCH FILTER (sticky while scrolling) ── */}
       <div className="sticky top-0 z-30 bg-white border border-neutral-200 rounded-xl shadow-sm px-4 py-3">
         {/* Quick filter buttons */}
         <div className="flex flex-wrap items-center gap-2 mb-3">
-          <span className="text-xs font-bold text-neutral-500 uppercase tracking-wider mr-1">Fulfillment Date:</span>
+          <span className="text-xs font-bold text-neutral-500 uppercase tracking-wider mr-1">Requisition Date Batch:</span>
           {(["today", "tomorrow", "this_week", "custom", "range", "all"] as DateFilterMode[]).map(m => (
             <button
               key={m}
@@ -688,7 +702,9 @@ export default function FulfillmentPage() {
               : "bg-brand-50 border border-brand-200 text-brand-800"
           }`}>
             <Calendar className="h-3.5 w-3.5" />
-            Showing requisitions for: <strong>{modeLabel(dateMode, customDate, rangeFrom, rangeTo)}</strong>
+            {dateMode === "all"
+              ? "Showing all open requisitions (any submission date)"
+              : <>Showing requisitions submitted on: <strong className="ml-1">{modeLabel(dateMode, customDate, rangeFrom, rangeTo)}</strong></>}
           </div>
           {dateMode !== "all" && (
             <label className="inline-flex items-center gap-2 cursor-pointer">
@@ -708,7 +724,8 @@ export default function FulfillmentPage() {
           <div className="mt-2 flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
             <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" />
             <p className="text-xs font-semibold text-amber-800">
-              You are viewing <strong>all open requisitions across multiple dates.</strong> Allocating or printing in this mode may mix batches from different delivery dates. Use a specific date for operational safety.
+              You are viewing <strong>all open requisitions regardless of submission date.</strong> Allocating or printing in this mode may mix batches from different submission dates. Select a specific date for operational safety.
+              <span className="block mt-0.5 font-normal text-amber-700">Note: this filter uses <code className="bg-amber-100 px-1 rounded">requisitions.date</code> (submission date). A future <code className="bg-amber-100 px-1 rounded">required_by_date</code> field will enable true delivery-date batching.</span>
             </p>
           </div>
         )}
@@ -746,7 +763,7 @@ export default function FulfillmentPage() {
               <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
                 {ref && (
                   <div className="flex items-center gap-1.5">
-                    <span className="text-xs font-bold text-neutral-400 uppercase tracking-wider">Batch:</span>
+                    <span className="text-xs font-bold text-neutral-400 uppercase tracking-wider">Req Batch:</span>
                     <span className="font-mono text-xs font-bold text-brand-700 bg-brand-100 px-2 py-0.5 rounded">{ref}</span>
                   </div>
                 )}

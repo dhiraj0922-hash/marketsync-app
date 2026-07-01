@@ -197,15 +197,15 @@ function dateFilterLabel(params: URLSearchParams): string {
   const extra = includeOverdue ? " + Overdue Open" : "";
   const t = todayIso();
   switch (mode) {
-    case "today":     return `Today (${fmtDisplayDate(t)})${extra}`;
-    case "tomorrow":  return `Tomorrow (${fmtDisplayDate(tomorrowIso())})${extra}`;
-    case "this_week": return `This Week${extra}`;
-    case "custom":    { const d = params.get("customDate") || t; return `${fmtDisplayDate(d)}${extra}`; }
+    case "today":     return `Today — submitted ${fmtDisplayDate(t)}${extra}`;
+    case "tomorrow":  return `Tomorrow — submitted ${fmtDisplayDate(tomorrowIso())}${extra}`;
+    case "this_week": return `This Week — submitted this week${extra}`;
+    case "custom":    { const d = params.get("customDate") || t; return `submitted on ${fmtDisplayDate(d)}${extra}`; }
     case "range":     {
       const f = params.get("rangeFrom") || t, to = params.get("rangeTo") || t;
-      return `${fmtDisplayDate(f)} – ${fmtDisplayDate(to)}${extra}`;
+      return `submitted ${fmtDisplayDate(f)} – ${fmtDisplayDate(to)}${extra}`;
     }
-    case "all":       return "All Open Requisitions";
+    case "all":       return "All Open Requisitions (any submission date)";
   }
 }
 
@@ -218,8 +218,22 @@ function batchRef(params: URLSearchParams): string | null {
     : mode === "custom" ? (params.get("customDate") || t)
     : mode === "range" ? (params.get("rangeFrom") || t)
     : t;
-  return `FUL-${base.replace(/-/g, "")}-001`;
+  return `REQ-BATCH-${base.replace(/-/g, "")}-001`;
 }
+
+// ─── Architecture note ────────────────────────────────────────────────────────
+// The `date` field on requisitions is the SUBMISSION date only.
+// It does not represent when the goods are actually needed for delivery.
+//
+// TODO (future): Add a `required_by_date` (or `requested_delivery_date`) column
+// to the requisitions table. Once that field exists:
+//   - Fulfillment batching should filter by required_by_date, not date.
+//   - Delivery planning and dispatch scheduling should also use required_by_date.
+//   - The UI label can then say "Fulfillment Date" or "Required Delivery Date".
+//   - filterSummary below filters item.requisitionDate which maps to req.date;
+//     swap the source field here when the column is available.
+// Until then, all filtering is by requisition SUBMISSION date and is labelled
+// accordingly as "Requisition Date Batch".
 
 // ─── Filter logic (mirrors fulfillment screen) ────────────────────────────────
 
@@ -832,17 +846,17 @@ export default function FulfillmentPickListPrintPage() {
             <div>
               <div className="pl-brand">Stock Dharma · Warehouse Operations</div>
               <h1 className="pl-doc-title">HQ FULFILLMENT PICK LIST</h1>
-              {/* Batch ref and fulfillment date */}
+              {/* Batch ref and requisition date batch */}
               {batchRef(searchParams) && (
                 <div className="pl-doc-sub" style={{ marginBottom: 2 }}>
-                  Fulfillment Batch:{" "}
+                  Requisition Batch:{" "}
                   <strong style={{ fontFamily: "monospace", letterSpacing: "0.05em", color: "#1d4ed8" }}>
                     {batchRef(searchParams)}
                   </strong>
                 </div>
               )}
               <div className="pl-doc-sub">
-                Fulfillment Date:{" "}
+                Requisition Date Batch:{" "}
                 <strong>{dateFilterLabel(searchParams)}</strong>
               </div>
               <div className="pl-doc-sub">
