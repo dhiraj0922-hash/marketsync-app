@@ -73,7 +73,7 @@ import {
   type UserProfile,
 } from "@/lib/auth";
 import { supabase } from "@/lib/supabase";
-import { isHqFulfillment, isHqMaster, isHqOps } from "@/lib/roles";
+import { isHqFulfillment, isHqMaster, isHqOps, canPrintRequisition } from "@/lib/roles";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -1461,7 +1461,17 @@ function LocationManagerView({
                   </span>
                 )}
               </div>
-              <div>
+              <div className="flex items-center gap-2">
+                {/* Print Requisition — available to all print-allowed roles when status is not draft */}
+                {canPrintRequisition(profile) &&
+                 !['draft'].includes(String(selectedReq.status || '').toLowerCase()) && (
+                  <button
+                    onClick={() => window.open(`/requisitions/${selectedReq.id}/print`, '_blank', 'noopener,noreferrer')}
+                    className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-neutral-100 border border-neutral-200 px-4 text-sm font-semibold text-neutral-700 transition hover:bg-neutral-200"
+                  >
+                    <Printer className="h-4 w-4" /> Print Requisition
+                  </button>
+                )}
                 {['submitted', 'pending', 'requested'].includes(String(selectedReq.status || '').toLowerCase()) && (
                   <button
                     onClick={handleStartEditRequisition}
@@ -2689,7 +2699,21 @@ function HQAdminView({
                         return <StatusBadge status={visual} />;
                       })()}</TableCell>
                       <TableCell className="px-6 py-4 text-right">
-                        <span className="text-sm font-medium text-blue-300 transition-colors hover:text-blue-200">Review</span>
+                        <div className="flex items-center justify-end gap-2">
+                          <span className="text-sm font-medium text-blue-300 transition-colors hover:text-blue-200">Review</span>
+                          {canPrintRequisition(profile) && (
+                            <button
+                              title="Print pick list"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                window.open(`/requisitions/${req.id}/print`, '_blank', 'noopener,noreferrer');
+                              }}
+                              className="rounded p-1.5 text-zinc-500 hover:text-zinc-200 hover:bg-zinc-700 transition-colors"
+                            >
+                              <Printer className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                        </div>
                       </TableCell>
                     </TableRow>
                   )) : (
@@ -2709,12 +2733,10 @@ function HQAdminView({
             description={`Submitted by ${selectedReq?.requestedBy || selectedReq?.requestedby || "—"} from ${selectedReq?.location} on ${selectedReq?.date}`}
             footer={
               <div className="w-full flex flex-col gap-2">
-                {/* ── Fulfillment summary (shown once locked or fulfilled) ────── */}
                 {(() => {
                   const status = (selectedReq?.status ?? "").toLowerCase();
                   if (!isFulfillmentLocked && !["fulfilled", "partial", "backordered"].includes(status)) return null;
                   if (!isFulfillmentLocked && status === "approved") return null;
-                  // Compute final status from current in-memory items
                   const items = hqReqItems;
                   if (!items.length) return null;
                   const allDone = items.every((li: any) =>
@@ -2746,6 +2768,15 @@ function HQAdminView({
                     </span>
                   </div>
                   <div className="flex items-center gap-3">
+                    {/* Print Requisition — all print-allowed roles, any status */}
+                    {canPrintRequisition(profile) && selectedReq && (
+                      <button
+                        onClick={() => window.open(`/requisitions/${selectedReq.id}/print`, '_blank', 'noopener,noreferrer')}
+                        className="px-4 py-2 text-sm font-medium bg-white border border-zinc-200 text-zinc-700 rounded-lg hover:bg-zinc-50 transition-colors shadow-sm flex items-center gap-2"
+                      >
+                        <Printer className="h-4 w-4" /> Print Requisition
+                      </button>
+                    )}
                     {/* Ticket button: hq_fulfillment only sees it when a ticket exists. */}
                     {["approved", "fulfilled"].includes((selectedReq?.status ?? "").toLowerCase()) &&
                      (deliveryTicketForReq || !isHqFulfillmentUser) && (

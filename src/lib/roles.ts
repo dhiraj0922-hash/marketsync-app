@@ -112,6 +112,26 @@ export const canAccessInvoices = (user: { role?: string | null } | null | undefi
 export const canDeleteArchiveAdmin = (user: { role?: string | null } | null | undefined) => isHqMaster(user);
 export const canViewOwnerDashboard = (user: { role?: string | null } | null | undefined) => isHqMaster(user) || isLocationManager(user);
 
+/**
+ * Returns true if the user may access the Requisition Pick List print route.
+ *
+ * Allowed roles (any requisition):  hq_master, hq_admin (= hq_master), hq_ops, hq_fulfillment
+ * Allowed with location restriction: location_manager (own location only, status ≠ draft)
+ * Denied:                            driver
+ *
+ * NOTE: The print route MUST perform an additional DB-level check for
+ * location_manager to confirm requisition.location_id === user.locationId
+ * and that the status is not 'draft'.  This helper is a UI-layer guard only.
+ */
+export const canPrintRequisition = (
+  user: { role?: string | null } | null | undefined
+): boolean =>
+  isHqMaster(user) ||
+  isHqAdmin(user) ||
+  isHqOps(user) ||
+  isHqFulfillment(user) ||
+  isLocationManager(user);
+
 export function getAllowedHomePath(user: { role?: string | null } | null | undefined): string {
   if (isDriver(user)) return "/deliveries";
   if (isHqFulfillment(user)) return "/requisitions/fulfillment";

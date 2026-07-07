@@ -5212,8 +5212,173 @@ function mapReqItemRow(row: any, hqStockMap?: Record<string, number>) {
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// REQUISITION PRINT DATA
+// Calls the get_requisition_for_print SECURITY DEFINER RPC which enforces
+// role-level and location-level authorization at the DB layer.
+// Returns snapshot-only fields. No pricing.
+// ─────────────────────────────────────────────────────────────────────────────
 
+export type PrintSourceLabel = 'hq_pick' | 'local_vendor' | 'hq_setup_required';
 
+export type PrintLineItem = {
+  id: string | number;
+  lineNumber: number;
+  itemName: string;
+  /** Primary display ID — finished_good_id if FG mode, else item_id, else catalog_item_id */
+  itemId: string | null;
+  sourceLabel: PrintSourceLabel;
+  supplier: string;
+  unitPackLabel: string;
+  isFGMode: boolean;
+  quantityRequested: number;
+  quantityApproved: number | null;
+  quantityFulfilled: number | null;
+  backorderQty: number;
+  fulfillmentNote: string;
+  unit: string | null;
+  packQtySnapshot: number | null;
+};
+
+export type RequisitionPrintData = {
+  requisition: {
+    id: string;
+    location: string | null;
+    locationId: string | null;
+    requestedBy: string | null;
+    date: string | null;
+    status: string;
+    notes: string | null;
+    approvedAt: string | null;
+    approvedBy: string | null;
+    fulfilledAt: string | null;
+    fulfilledBy: string | null;
+    createdAt: string | null;
+  };
+  items: PrintLineItem[];
+};
+
+/** Determines the source label for a print line item. */
+function resolveSourceLabel(row: any): PrintSourceLabel {
+  const fg  = row.finished_good_id ?? null;
+  const st  = (row.source_type ?? '').toLowerCase().trim();
+  const cat = row.catalog_item_id ?? null;
+
+  if (fg || st === 'hq_supplied' || (!st && !cat)) return 'hq_pick';
+  if (st === 'local_vendor') return 'local_vendor';
+  return 'hq_setup_required';
+}
+
+/** Resolves the supplier display string for a print line item. */
+function resolveSupplierForPrint(row: any): string {
+  const isFGMode   = !!row.finished_good_id;
+  const sourceType = (row.source_type ?? '').toLowerCase().trim();
+  const snap       = (row.supplier_snapshot ?? '').trim();
+
+  if (isFGMode || sourceType === 'hq_supplied' || (!sourceType && !row.catalog_item_id)) {
+    // HQ-supplied or legacy HQ line — fall back to Commissary HQ
+    return snap || 'Commissary HQ';
+  }
+  // local_vendor — use saved snapshot; empty → em-dash
+  return snap || '—';
+}
+
+/** Resolves the Unit / Pack column string for a print line item. */
+function resolveUnitPackLabel(row: any): string {
+  const isFGMode      = !!row.finished_good_id;
+  const packQty       = row.pack_qty_snapshot != null ? Number(row.pack_qty_snapshot) : null;
+  const unit          = row.unit_snapshot ?? null;
+
+  if (isFGMode) {
+    if (!packQty || packQty <= 0) return 'Pack config missing';
+    return unit ? `${packQty} ${unit} / pack` : `${packQty} / pack`;
+  }
+  return unit ?? '—';
+}
+
+/**
+ * Fetches requisition + line items for the print route via the
+ * `get_requisition_for_print` SECURITY DEFINER RPC.
+ *
+ * The RPC enforces:
+ *   - Caller must be authenticated
+ *   - Role must be hq_admin/hq_master/hq_ops/hq_fulfillment OR location_manager
+ *   - location_manager: requisition.location_id must match their profile location
+ *   - location_manager: status must not be 'draft'
+ *   - driver: denied
+ *
+ * Returns typed PrintData with no pricing fields.
+ */
+export async function getRequisitionForPrint(
+  requisitionId: string
+): Promise<{ success: true; data: RequisitionPrintData } | { success: false; error: string; code?: string }> {
+  const { data: rpcResult, error } = await supabase
+    .rpc('get_requisition_for_print', { p_requisition_id: requisitionId });
+
+  if (error) {
+    const msg = error.message ?? '';
+    // Translate well-known PLPGSQL exception prefixes to user-facing errors
+    if (msg.startsWith('UNAUTHORIZED') || msg.startsWith('FORBIDDEN')) {
+      return { success: false, error: msg, code: 'FORBIDDEN' };
+    }
+    if (msg.startsWith('NOT FOUND')) {
+      return { success: false, error: `Requisition ${requisitionId} not found.`, code: 'NOT_FOUND' };
+    }
+    return { success: false, error: `Failed to load print data: ${msg}` };
+  }
+
+  const raw = rpcResult as any;
+  if (!raw || !raw.requisition) {
+    return { success: false, error: 'Invalid response from server.' };
+  }
+
+  const req = raw.requisition;
+  const rawItems: any[] = Array.isArray(raw.items) ? raw.items : [];
+
+  const items: PrintLineItem[] = rawItems.map((row: any, idx: number) => {
+    const isFGMode        = !!row.finished_good_id;
+    const packQtySnapshot = row.pack_qty_snapshot != null ? Number(row.pack_qty_snapshot) : null;
+
+    return {
+      id:                row.id,
+      lineNumber:        idx + 1,
+      itemName:          row.item_name_snapshot ?? row.finished_good_id ?? row.item_id ?? '—',
+      itemId:            row.finished_good_id ?? row.item_id ?? row.catalog_item_id ?? null,
+      sourceLabel:       resolveSourceLabel(row),
+      supplier:          resolveSupplierForPrint(row),
+      unitPackLabel:     resolveUnitPackLabel(row),
+      isFGMode,
+      quantityRequested: Number(row.quantity_requested ?? 0),
+      quantityApproved:  row.quantity_approved  != null ? Number(row.quantity_approved)  : null,
+      quantityFulfilled: row.quantity_fulfilled != null ? Number(row.quantity_fulfilled) : null,
+      backorderQty:      Number(row.backorder_qty ?? 0),
+      fulfillmentNote:   row.fulfillment_note ?? '',
+      unit:              row.unit_snapshot ?? null,
+      packQtySnapshot,
+    };
+  });
+
+  return {
+    success: true,
+    data: {
+      requisition: {
+        id:          req.id,
+        location:    req.location   ?? null,
+        locationId:  req.location_id ?? null,
+        requestedBy: req.requestedby ?? null,
+        date:        req.date        ?? null,
+        status:      req.status      ?? '',
+        notes:       req.notes       ?? null,
+        approvedAt:  req.approved_at ?? null,
+        approvedBy:  req.approved_by ?? null,
+        fulfilledAt: req.fulfilled_at ?? null,
+        fulfilledBy: req.fulfilled_by ?? null,
+        createdAt:   req.created_at  ?? null,
+      },
+      items,
+    },
+  };
+}
 
 
 

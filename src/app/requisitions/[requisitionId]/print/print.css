@@ -1,0 +1,207 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   Requisition Pick List — Print CSS
+   Applied via <link rel="stylesheet"> in the print page.
+   All rules are inside @media print to avoid affecting screen layout.
+───────────────────────────────────────────────────────────────────────────── */
+
+@media print {
+  /* ── Page setup ───────────────────────────────────────────────────────────── */
+  @page {
+    size: letter portrait;
+    margin: 0.45in 0.4in 0.5in 0.4in;
+  }
+
+  /* ── Reset: white page, black text, no background images ─────────────────── */
+  html,
+  body,
+  #__next,
+  main {
+    background: #ffffff !important;
+    color: #000000 !important;
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
+  }
+
+  /* ── Hide all screen chrome ──────────────────────────────────────────────── */
+  nav,
+  aside,
+  header,
+  [data-sidebar],
+  [data-radix-popper-content-wrapper],
+  .no-print,
+  .print-hide,
+  button {
+    display: none !important;
+  }
+
+  /* ── Show only the print document ───────────────────────────────────────── */
+  .print-container {
+    display: block !important;
+    width: 100%;
+    overflow: visible !important;
+    height: auto !important;
+  }
+
+  /* ── Document header ─────────────────────────────────────────────────────── */
+  .print-doc-header {
+    border-bottom: 2px solid #000;
+    padding-bottom: 8pt;
+    margin-bottom: 10pt;
+  }
+
+  .print-doc-title {
+    font-size: 16pt;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .print-org-name {
+    font-size: 12pt;
+    font-weight: 700;
+  }
+
+  .print-meta-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2pt 12pt;
+    font-size: 8pt;
+    margin-top: 6pt;
+  }
+
+  .print-meta-label {
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #444;
+  }
+
+  /* ── Status badge — print-safe ───────────────────────────────────────────── */
+  .print-status-badge {
+    display: inline-block;
+    border: 1px solid #000;
+    padding: 1pt 4pt;
+    font-size: 7pt;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    background: none !important;
+    color: #000 !important;
+  }
+
+  /* ── Line items table ────────────────────────────────────────────────────── */
+  .print-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 7.5pt;
+    margin-top: 10pt;
+  }
+
+  .print-table thead {
+    display: table-header-group; /* repeat on every page */
+  }
+
+  .print-table th {
+    background: #f0f0f0 !important;
+    border: 1px solid #999;
+    padding: 3pt 4pt;
+    text-align: left;
+    font-weight: 700;
+    font-size: 7pt;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    white-space: nowrap;
+  }
+
+  .print-table th.text-right,
+  .print-table td.text-right {
+    text-align: right;
+  }
+
+  .print-table td {
+    border: 1px solid #ccc;
+    padding: 3pt 4pt;
+    vertical-align: top;
+  }
+
+  /* Prevent rows from splitting across pages */
+  .print-table tr {
+    page-break-inside: avoid;
+  }
+
+  /* ── Source label badges — print-safe ────────────────────────────────────── */
+  .source-badge {
+    display: inline-block;
+    border: 1px solid #000;
+    padding: 1pt 3pt;
+    font-size: 6.5pt;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    background: none !important;
+    color: #000 !important;
+    white-space: nowrap;
+  }
+
+  /* ── Backorder highlight ─────────────────────────────────────────────────── */
+  .backorder-warn {
+    font-weight: 700;
+    font-size: 7pt;
+    padding: 1pt 0 0 0;
+  }
+
+  /* ── Sign-off footer ─────────────────────────────────────────────────────── */
+  .print-signoff {
+    margin-top: 20pt;
+    border-top: 1.5px solid #000;
+    padding-top: 10pt;
+    page-break-inside: avoid;
+  }
+
+  .print-signoff-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10pt 20pt;
+    font-size: 8.5pt;
+  }
+
+  .print-signoff-line {
+    border-bottom: 1px solid #666;
+    margin-top: 14pt;
+    height: 1pt;
+  }
+
+  /* ── Check column ────────────────────────────────────────────────────────── */
+  .check-box {
+    display: inline-block;
+    width: 9pt;
+    height: 9pt;
+    border: 1.2px solid #333;
+    vertical-align: middle;
+  }
+
+  /* ── Item name cell ──────────────────────────────────────────────────────── */
+  .item-name {
+    font-weight: 600;
+    font-size: 8pt;
+  }
+
+  .fulfillment-note {
+    font-size: 6.5pt;
+    color: #555;
+    font-style: italic;
+    margin-top: 1pt;
+  }
+
+  /* ── Qty columns ─────────────────────────────────────────────────────────── */
+  .qty-em {
+    color: #333;
+    font-size: 7.5pt;
+  }
+
+  .qty-backorder {
+    font-weight: 700;
+    font-size: 7.5pt;
+  }
+}
