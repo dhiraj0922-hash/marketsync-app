@@ -2800,6 +2800,8 @@ const mapRequisitionToFrontend = (db: any) => ({
     location: db.location,
     requestedBy: db.requestedby,
     date: db.date,
+    createdAt: db.created_at ?? null,
+    created_at: db.created_at ?? null,
     status: db.status,
     items: db.items,
     notes: db.notes,

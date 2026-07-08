@@ -103,6 +103,27 @@ const COMMISSARY_COLORS: Record<string, string> = {
   "Veggie Paradise": "bg-success-50  text-success-700  border-success-200",
 };
 
+type RequisitionDatePreset = "custom" | "today" | "yesterday" | "last24" | "nextDay";
+
+function toDateInputValue(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function toTimeInputValue(date: Date): string {
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${hours}:${minutes}`;
+}
+
+function buildLocalDateTime(dateValue: string, timeValue: string, fallbackTime: string): Date | null {
+  if (!dateValue) return null;
+  const date = new Date(`${dateValue}T${timeValue || fallbackTime}:00`);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
 const stockIqDarkShellCss = `
   body .flex.bg-neutral-50.text-neutral-900.min-h-screen {
     background: #070707 !important;
@@ -1649,7 +1670,10 @@ function HQAdminView({
   const [filterStatus, setFilterStatus] = useState("all");
   const [filterLocation, setFilterLocation] = useState("All"); // stores location.id or "All"
   const [filterFromDate, setFilterFromDate] = useState("");    // ISO date string "YYYY-MM-DD" or ""
+  const [filterFromTime, setFilterFromTime] = useState("");    // HH:mm local time or ""
   const [filterToDate, setFilterToDate] = useState("");        // ISO date string "YYYY-MM-DD" or ""
+  const [filterToTime, setFilterToTime] = useState("");        // HH:mm local time or ""
+  const [filterDatePreset, setFilterDatePreset] = useState<RequisitionDatePreset>("custom");
   const [selectedReq, setSelectedReq] = useState<any>(null);
   const [selectedReqIds, setSelectedReqIds] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState<"overview" | "hq-production" | "backorders">("overview");
@@ -2026,6 +2050,46 @@ function HQAdminView({
   // Build a quick lookup: location.id → location.name for search and display.
   const locationById = new Map(locations.map((l) => [l.id, l.name]));
 
+  const applyDatePreset = (preset: RequisitionDatePreset) => {
+    setFilterDatePreset(preset);
+
+    const now = new Date();
+    let from = new Date(now);
+    let to = new Date(now);
+
+    if (preset === "custom") return;
+
+    if (preset === "today") {
+      from = new Date(now);
+      from.setHours(0, 0, 0, 0);
+      to = new Date(now);
+      to.setHours(23, 59, 0, 0);
+    } else if (preset === "yesterday") {
+      from = new Date(now);
+      from.setDate(from.getDate() - 1);
+      from.setHours(0, 0, 0, 0);
+      to = new Date(from);
+      to.setHours(23, 59, 0, 0);
+    } else if (preset === "last24") {
+      from = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      to = new Date(now);
+    } else if (preset === "nextDay") {
+      from = new Date(now);
+      from.setDate(from.getDate() - 1);
+      from.setHours(17, 0, 0, 0);
+      to = new Date(now);
+      to.setHours(14, 0, 0, 0);
+    }
+
+    setFilterFromDate(toDateInputValue(from));
+    setFilterFromTime(toTimeInputValue(from));
+    setFilterToDate(toDateInputValue(to));
+    setFilterToTime(toTimeInputValue(to));
+  };
+
+  const fromDateTime = buildLocalDateTime(filterFromDate, filterFromTime, "00:00");
+  const toDateTime = buildLocalDateTime(filterToDate, filterToTime, "23:59");
+
   const filteredReqs = requisitions.filter((r) => {
     // ── Status ────────────────────────────────────────────────────────────────
     if (filterStatus !== "all" && String(r.status || "").toLowerCase() !== filterStatus) return false;
@@ -2033,18 +2097,13 @@ function HQAdminView({
     // ── Location — compare against location_id (r.location stores the FK) ────
     if (filterLocation !== "All" && r.location_id !== filterLocation) return false;
 
-    // ── Date range ────────────────────────────────────────────────────────────
-    if (filterFromDate || filterToDate) {
-      // r.date may be "May 10, 2025" (locale string) or ISO — parse both
-      const rDate = new Date(r.date ?? "");
-      if (isNaN(rDate.getTime())) {
-        // Unparseable date — exclude from date-filtered results
-        if (filterFromDate || filterToDate) return false;
-      } else {
-        const rDateOnly = rDate.toISOString().slice(0, 10); // "YYYY-MM-DD"
-        if (filterFromDate && rDateOnly < filterFromDate) return false;
-        if (filterToDate   && rDateOnly > filterToDate)   return false;
-      }
+    // ── Submitted/created timestamp window ───────────────────────────────────
+    if (fromDateTime || toDateTime) {
+      const rawTimestamp = r.createdAt ?? r.created_at;
+      const reqDateTime = rawTimestamp ? new Date(rawTimestamp) : null;
+      if (!reqDateTime || Number.isNaN(reqDateTime.getTime())) return false;
+      if (fromDateTime && reqDateTime < fromDateTime) return false;
+      if (toDateTime && reqDateTime > toDateTime) return false;
     }
 
     // ── Search: id, location_id, location name, requester, status ─────────────
@@ -2603,19 +2662,60 @@ function HQAdminView({
                     {profile.locationId}
                   </div>
                 )}
-                {/* Date range filters */}
-                <label className="flex items-center gap-1.5 text-xs font-medium text-zinc-500">
-                  From
-                  <input type="date" value={filterFromDate} onChange={(e) => setFilterFromDate(e.target.value)}
-                    className="rounded-lg border border-white/10 bg-[#171717] px-2 py-2 text-sm text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500" />
+                {/* Date/time range filters */}
+                <select
+                  value={filterDatePreset}
+                  onChange={(e) => applyDatePreset(e.target.value as RequisitionDatePreset)}
+                  className="rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm font-medium text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500"
+                  title="Quick date/time presets"
+                >
+                  <option value="custom">Custom window</option>
+                  <option value="today">Today</option>
+                  <option value="yesterday">Yesterday</option>
+                  <option value="last24">Last 24 hours</option>
+                  <option value="nextDay">Next-day fulfillment window</option>
+                </select>
+                <label className="flex flex-wrap items-center gap-1.5 text-xs font-medium text-zinc-500">
+                  From:
+                  <input
+                    type="date"
+                    value={filterFromDate}
+                    onChange={(e) => { setFilterDatePreset("custom"); setFilterFromDate(e.target.value); }}
+                    className="rounded-lg border border-white/10 bg-[#171717] px-2 py-2 text-sm text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500"
+                  />
+                  <input
+                    type="time"
+                    value={filterFromTime}
+                    onChange={(e) => { setFilterDatePreset("custom"); setFilterFromTime(e.target.value); }}
+                    className="rounded-lg border border-white/10 bg-[#171717] px-2 py-2 text-sm text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500"
+                  />
                 </label>
-                <label className="flex items-center gap-1.5 text-xs font-medium text-zinc-500">
-                  To
-                  <input type="date" value={filterToDate} onChange={(e) => setFilterToDate(e.target.value)}
-                    className="rounded-lg border border-white/10 bg-[#171717] px-2 py-2 text-sm text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500" />
+                <label className="flex flex-wrap items-center gap-1.5 text-xs font-medium text-zinc-500">
+                  To:
+                  <input
+                    type="date"
+                    value={filterToDate}
+                    onChange={(e) => { setFilterDatePreset("custom"); setFilterToDate(e.target.value); }}
+                    className="rounded-lg border border-white/10 bg-[#171717] px-2 py-2 text-sm text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500"
+                  />
+                  <input
+                    type="time"
+                    value={filterToTime}
+                    onChange={(e) => { setFilterDatePreset("custom"); setFilterToTime(e.target.value); }}
+                    className="rounded-lg border border-white/10 bg-[#171717] px-2 py-2 text-sm text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500"
+                  />
                 </label>
-                {(filterStatus !== "all" || filterLocation !== "All" || filterFromDate || filterToDate || searchQuery) && (
-                  <button onClick={() => { setFilterStatus("all"); setFilterLocation("All"); setFilterFromDate(""); setFilterToDate(""); setSearchQuery(""); }}
+                {(filterStatus !== "all" || filterLocation !== "All" || filterFromDate || filterFromTime || filterToDate || filterToTime || filterDatePreset !== "custom" || searchQuery) && (
+                  <button onClick={() => {
+                    setFilterStatus("all");
+                    setFilterLocation("All");
+                    setFilterFromDate("");
+                    setFilterFromTime("");
+                    setFilterToDate("");
+                    setFilterToTime("");
+                    setFilterDatePreset("custom");
+                    setSearchQuery("");
+                  }}
                     className="rounded-lg border border-white/10 bg-[#151515] px-3 py-2 text-xs font-medium text-zinc-400 transition-colors hover:bg-[#202020] hover:text-white">
                     Clear filters
                   </button>
