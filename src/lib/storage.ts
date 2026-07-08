@@ -5251,8 +5251,9 @@ export type RequisitionPrintData = {
     notes: string | null;
     approvedAt: string | null;
     approvedBy: string | null;
-    fulfilledAt: string | null;
-    fulfilledBy: string | null;
+    // fulfilledAt / fulfilledBy intentionally omitted:
+    // those columns do not exist on public.requisitions in production.
+    // Per-line quantity_fulfilled and backorder_qty cover the pick list.
     createdAt: string | null;
   };
   items: PrintLineItem[];
@@ -5363,7 +5364,7 @@ export async function getRequisitionForPrint(
     data: {
       requisition: {
         id:          req.id,
-        location:    req.location   ?? null,
+        location:    req.location    ?? null,
         locationId:  req.location_id ?? null,
         requestedBy: req.requestedby ?? null,
         date:        req.date        ?? null,
@@ -5371,8 +5372,7 @@ export async function getRequisitionForPrint(
         notes:       req.notes       ?? null,
         approvedAt:  req.approved_at ?? null,
         approvedBy:  req.approved_by ?? null,
-        fulfilledAt: req.fulfilled_at ?? null,
-        fulfilledBy: req.fulfilled_by ?? null,
+        // fulfilledAt / fulfilledBy: not read from RPC — columns absent in production.
         createdAt:   req.created_at  ?? null,
       },
       items,
@@ -8648,9 +8648,12 @@ export interface Invoice {
   id: string;
   invoiceNumber: string;
   locationId: string;
+  locationNameSnapshot: string | null;
   invoiceMonth: string;
   status: "draft" | "finalized" | "sent" | "paid" | "void";
   subtotal: number;
+  taxRate: number;
+  taxName: string;
   taxAmount: number;
   totalAmount: number;
   generatedAt: string;
@@ -8663,6 +8666,8 @@ export interface Invoice {
   billingFrequency: "daily" | "biweekly" | "monthly";
   periodStart: string;
   periodEnd: string;
+  voidReason: string | null;
+  voidedAt: string | null;
 }
 
 export interface InvoiceItem {
@@ -8682,6 +8687,7 @@ export interface MonthlyInvoiceSummary {
   invoiceId: string;
   invoiceNumber: string;
   locationId: string;
+  locationName: string | null;
   invoiceMonth: string;
   subtotal: number;
   taxAmount: number;
@@ -8690,13 +8696,34 @@ export interface MonthlyInvoiceSummary {
   itemCount: number;
 }
 
+/** Row returned by get_invoice_eligibility_audit RPC */
+export interface InvoiceEligibilityRow {
+  requisitionId: string;
+  locationId: string;
+  locationName: string;
+  requestDate: string;
+  status: string;
+  fulfillmentDate: string | null;
+  fulfillmentSource: string;
+  fulfilledQty: number;
+  fulfilledValue: number;
+  existingInvoiceId: string | null;
+  existingInvoiceNo: string | null;
+  existingInvStatus: string | null;
+  result: 'Eligible' | 'Excluded';
+  exclusionReason: string | null;
+}
+
 const mapInvoiceToFrontend = (db: any): Invoice => ({
   id: db.id,
   invoiceNumber: db.invoice_number,
   locationId: db.location_id,
+  locationNameSnapshot: db.location_name_snapshot ?? null,
   invoiceMonth: db.invoice_month,
   status: db.status,
   subtotal: Number(db.subtotal ?? 0),
+  taxRate: Number(db.tax_rate ?? 0.13),
+  taxName: db.tax_name ?? 'HST',
   taxAmount: Number(db.tax_amount ?? 0),
   totalAmount: Number(db.total_amount ?? 0),
   generatedAt: db.generated_at,
@@ -8709,6 +8736,8 @@ const mapInvoiceToFrontend = (db: any): Invoice => ({
   billingFrequency: db.billing_frequency ?? 'monthly',
   periodStart: db.period_start ?? db.invoice_month,
   periodEnd: db.period_end ?? db.invoice_month,
+  voidReason: db.void_reason ?? null,
+  voidedAt: db.voided_at ?? null,
 });
 
 const mapInvoiceItemToFrontend = (db: any): InvoiceItem => ({
@@ -8801,15 +8830,16 @@ export async function generateInvoices(
   }
 
   const summaries: MonthlyInvoiceSummary[] = (Array.isArray(data) ? data : []).map((row: any) => ({
-    invoiceId: row.invoice_id,
-    invoiceNumber: row.invoice_number,
-    locationId: row.location_id,
-    invoiceMonth: row.invoice_month,
-    subtotal: Number(row.subtotal ?? 0),
-    taxAmount: Number(row.tax_amount ?? 0),
-    totalAmount: Number(row.total_amount ?? 0),
+    invoiceId:        row.invoice_id,
+    invoiceNumber:    row.invoice_number,
+    locationId:       row.location_id,
+    locationName:     row.location_name ?? null,
+    invoiceMonth:     row.invoice_month,
+    subtotal:         Number(row.subtotal ?? 0),
+    taxAmount:        Number(row.tax_amount ?? 0),
+    totalAmount:      Number(row.total_amount ?? 0),
     requisitionCount: Number(row.requisition_count ?? 0),
-    itemCount: Number(row.item_count ?? 0),
+    itemCount:        Number(row.item_count ?? 0),
   }));
 
   return { success: true, data: summaries };
@@ -8847,6 +8877,75 @@ export async function markInvoicePaid(invoiceId: string): Promise<{ success: boo
   if (error) {
     console.error('[markInvoicePaid]', error);
     return { success: false, error };
+  }
+  return { success: true };
+}
+
+/**
+ * Fetches a per-requisition eligibility audit for a billing period.
+ * Calls the get_invoice_eligibility_audit SECURITY DEFINER RPC.
+ * HQ admin only — enforced at DB level.
+ */
+export async function getInvoiceEligibilityAudit(
+  billingFrequency: 'daily' | 'biweekly' | 'monthly',
+  periodStart: string,  // YYYY-MM-DD
+  periodEnd: string,    // YYYY-MM-DD (inclusive)
+  locationId?: string | null
+): Promise<{ success: boolean; data?: InvoiceEligibilityRow[]; error?: string }> {
+  const { data, error } = await supabase.rpc('get_invoice_eligibility_audit', {
+    p_billing_frequency: billingFrequency,
+    p_period_start:      periodStart,
+    p_period_end:        periodEnd,
+    p_location_id:       locationId ?? null,
+  } as any);
+
+  if (error) {
+    console.error('[getInvoiceEligibilityAudit]', error);
+    return { success: false, error: error.message };
+  }
+
+  const rows: InvoiceEligibilityRow[] = (Array.isArray(data) ? data : []).map((row: any) => ({
+    requisitionId:    row.requisition_id,
+    locationId:       row.location_id,
+    locationName:     row.location_name,
+    requestDate:      row.request_date,
+    status:           row.status,
+    fulfillmentDate:  row.fulfillment_date ?? null,
+    fulfillmentSource: row.fulfillment_source,
+    fulfilledQty:     Number(row.fulfilled_qty ?? 0),
+    fulfilledValue:   Number(row.fulfilled_value ?? 0),
+    existingInvoiceId: row.existing_invoice_id ?? null,
+    existingInvoiceNo: row.existing_invoice_no ?? null,
+    existingInvStatus: row.existing_inv_status ?? null,
+    result:           row.result as 'Eligible' | 'Excluded',
+    exclusionReason:  row.exclusion_reason ?? null,
+  }));
+
+  return { success: true, data: rows };
+}
+
+/**
+ * Voids an invoice via the void_invoice SECURITY DEFINER RPC.
+ * Unlinks requisitions so they can be re-invoiced.
+ * HQ admin only — enforced at DB level.
+ */
+export async function voidInvoice(
+  invoiceId: string,
+  voidReason: string
+): Promise<{ success: boolean; error?: string }> {
+  const { data, error } = await supabase.rpc('void_invoice', {
+    p_invoice_id:   invoiceId,
+    p_void_reason:  voidReason,
+  } as any);
+
+  if (error) {
+    console.error('[voidInvoice]', error);
+    return { success: false, error: error.message };
+  }
+
+  const result = data as any;
+  if (!result?.success) {
+    return { success: false, error: 'Void did not complete successfully.' };
   }
   return { success: true };
 }
