@@ -615,6 +615,17 @@ function MonthlyInvoicesContent() {
 
   // ── Run audit ──────────────────────────────────────────────────────────────
   async function handleRunAudit() {
+    // DIAGNOSTIC — confirm location UUID is being passed, not name/code/"all"
+    const auditLocationId = genLocationId === 'all' ? null : genLocationId;
+    console.log('[Audit] invoking get_invoice_eligibility_audit with:', {
+      genFrequency,
+      periodStart: genPeriod.periodStart,
+      periodEnd: genPeriod.periodEnd,
+      genLocationId,               // raw dropdown value
+      auditLocationId,             // what RPC will receive: null or UUID
+      selectedGenLocation: locationNameById.get(genLocationId) ?? (genLocationId === 'all' ? 'All Locations' : genLocationId),
+    });
+
     setAuditLoading(true);
     setAuditError(null);
     setShowAudit(true);
@@ -622,11 +633,11 @@ function MonthlyInvoicesContent() {
       genFrequency,
       genPeriod.periodStart,
       genPeriod.periodEnd,
-      selectedGenLocationFilter
+      auditLocationId  // always null when 'all', UUID otherwise
     );
     setAuditLoading(false);
     if (!result.success) {
-      setAuditError(result.error ?? "Audit failed.");
+      setAuditError(result.error ?? 'Audit failed.');
       return;
     }
     setAuditRows(result.data ?? []);
@@ -634,6 +645,16 @@ function MonthlyInvoicesContent() {
 
   // ── Generate ───────────────────────────────────────────────────────────────
   async function handleGenerate() {
+    // DIAGNOSTIC — confirm location UUID is being passed, not name/code/"all"
+    const generateLocationId = genLocationId === 'all' ? null : genLocationId;
+    console.log('[Generate] invoking generate_invoices with:', {
+      genFrequency,
+      periodStart: genPeriod.periodStart,
+      genLocationId,               // raw dropdown value
+      generateLocationId,          // what RPC will receive: null or UUID
+      selectedGenLocation: locationNameById.get(genLocationId) ?? (genLocationId === 'all' ? 'All Locations' : genLocationId),
+    });
+
     setIsGenerating(true);
     setNotice(null);
     setLastSummary([]);
@@ -641,10 +662,10 @@ function MonthlyInvoicesContent() {
       const result = await generateInvoices(
         genFrequency,
         genPeriod.periodStart,
-        selectedGenLocationFilter
+        generateLocationId  // always null when 'all', UUID otherwise
       );
       if (!result.success) {
-        setNotice({ type: "error", message: result.error?.message ?? "Invoice generation failed." });
+        setNotice({ type: 'error', message: result.error?.message ?? 'Invoice generation failed.' });
         return;
       }
       const generated = result.data ?? [];
@@ -653,24 +674,28 @@ function MonthlyInvoicesContent() {
       if (generated.length > 0) {
         // Sync summary filters to the generated period so invoices appear immediately
         setFilterFrequency(genFrequency);
-        if (genFrequency === "monthly") {
+        if (genFrequency === 'monthly') {
           setFilterMonth(genMonth);
         } else {
+          // For biweekly/daily: store the derived period start so filter loads correctly
           setFilterDate(genPeriod.periodStart);
         }
+        // If only one location was invoiced, auto-focus summary on that location
         if (generated.length === 1) {
           setFilterLocationId(generated[0].locationId);
         } else {
-          setFilterLocationId("all");
+          setFilterLocationId(generateLocationId ?? 'all');
         }
         setNotice({
-          type: "success",
-          message: `Generated ${generated.length} draft invoice${generated.length === 1 ? "" : "s"} for ${formatPeriodFromDates(genPeriod.periodStart, genPeriod.periodEnd)}.`,
+          type: 'success',
+          message: `Generated ${generated.length} draft invoice${generated.length === 1 ? '' : 's'} for ${formatPeriodFromDates(genPeriod.periodStart, genPeriod.periodEnd)}.`,
         });
       } else {
         setNotice({
-          type: "warning",
-          message: `No eligible fulfilled requisitions found for ${formatPeriodFromDates(genPeriod.periodStart, genPeriod.periodEnd)}. Run the Eligibility Audit below to see why.`,
+          type: 'warning',
+          message: `No eligible fulfilled requisitions found for ${formatPeriodFromDates(genPeriod.periodStart, genPeriod.periodEnd)}${
+            generateLocationId ? ` at ${locationNameById.get(generateLocationId) ?? generateLocationId}` : ''
+          }. Run the Eligibility Audit to see why.`,
         });
       }
 
@@ -738,6 +763,22 @@ function MonthlyInvoicesContent() {
     [genPeriod]
   );
 
+  // Derived filter period for biweekly summary — shows "Jul 1–15, 2026" not raw date
+  const filterPeriod = useMemo(() => {
+    if (filterFrequency === 'biweekly') {
+      const start = biweeklyStart(filterDate);
+      return { periodStart: start, periodEnd: biweeklyEnd(start) };
+    }
+    if (filterFrequency === 'daily') return { periodStart: filterDate, periodEnd: filterDate };
+    return null;  // monthly uses filterMonth
+  }, [filterFrequency, filterDate]);
+
+  const filterPeriodLabel = useMemo(() => {
+    if (filterFrequency === 'monthly') return monthLabel(filterMonth);
+    if (filterPeriod) return formatPeriodFromDates(filterPeriod.periodStart, filterPeriod.periodEnd);
+    return filterDate;
+  }, [filterFrequency, filterMonth, filterDate, filterPeriod]);
+
   return (
     <div className="-m-6 min-h-[calc(100vh-4rem)] bg-slate-50 p-4 text-slate-900 sm:p-6">
       <div className="mx-auto max-w-[1440px] space-y-6">
@@ -774,17 +815,29 @@ function MonthlyInvoicesContent() {
               {/* Period Picker */}
               <label className="block">
                 <span className="text-xs font-bold uppercase tracking-wider text-emerald-800">
-                  {genFrequency === "monthly" ? "Invoice Month" : "Period Start Date"}
+                  {genFrequency === 'monthly'
+                    ? 'Invoice Month'
+                    : genFrequency === 'biweekly'
+                    ? 'Period Half (pick any date in half)'
+                    : 'Date'}
                 </span>
                 <input
-                  type={genFrequency === "monthly" ? "month" : "date"}
-                  value={genFrequency === "monthly" ? genMonth : genDate}
-                  onChange={(e) => genFrequency === "monthly" ? setGenMonth(e.target.value) : setGenDate(e.target.value)}
+                  type={genFrequency === 'monthly' ? 'month' : 'date'}
+                  value={genFrequency === 'monthly' ? genMonth : genDate}
+                  onChange={(e) =>
+                    genFrequency === 'monthly' ? setGenMonth(e.target.value) : setGenDate(e.target.value)
+                  }
                   className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none ring-emerald-600 focus:ring-2"
                 />
-                <span className="mt-1 text-[11px] text-slate-400">
+                {/* Always show derived period range so user sees Jul 1–15 not raw date */}
+                <span className="mt-1 block text-[11px] font-semibold text-emerald-700">
                   Period: {genPeriodLabel}
                 </span>
+                {genFrequency === 'biweekly' && (
+                  <span className="mt-0.5 block text-[10px] text-slate-400">
+                    Picks 1st–15th if day ≤ 15, else 16th–EOM
+                  </span>
+                )}
               </label>
 
               {/* Generator Location (separate from filter) */}
@@ -953,9 +1006,9 @@ function MonthlyInvoicesContent() {
             <div>
               <h2 className="text-lg font-semibold text-slate-950">Invoice Summary</h2>
               <p className="mt-1 text-sm text-slate-500">
-                {filterFrequency === "all" ? "All Cycles" : filterFrequency.toUpperCase()} ·{" "}
-                {filterFrequency === "daily" || filterFrequency === "biweekly" ? filterDate : monthLabel(filterMonth)} ·{" "}
-                {filterLocationId === "all" ? "All Locations" : locationNameById.get(filterLocationId) ?? filterLocationId}
+                {filterFrequency === 'all' ? 'All Cycles' : filterFrequency.charAt(0).toUpperCase() + filterFrequency.slice(1)} ·{' '}
+                {filterPeriodLabel} ·{' '}
+                {filterLocationId === 'all' ? 'All Locations' : (locationNameById.get(filterLocationId) ?? filterLocationId)}
               </p>
             </div>
             <div className="inline-flex items-center gap-2 text-sm text-slate-500">
