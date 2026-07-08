@@ -5,42 +5,81 @@
 ───────────────────────────────────────────────────────────────────────────── */
 
 @media print {
-  /* ── Page setup ───────────────────────────────────────────────────────────── */
   @page {
     size: letter portrait;
-    margin: 0.45in 0.4in 0.5in 0.4in;
+    margin: 0.5in;
   }
 
-  /* ── Reset: white page, black text, no background images ─────────────────── */
   html,
-  body,
-  #__next,
-  main {
+  body {
     background: #ffffff !important;
     color: #000000 !important;
-    overflow: visible !important;
+    width: auto !important;
     height: auto !important;
-    max-height: none !important;
+    overflow: visible !important;
   }
 
-  /* ── Hide all screen chrome ──────────────────────────────────────────────── */
-  nav,
-  aside,
-  header,
-  [data-sidebar],
-  [data-radix-popper-content-wrapper],
-  .no-print,
-  .print-hide,
-  button {
+  .no-print {
     display: none !important;
   }
 
-  /* ── Show only the print document ───────────────────────────────────────── */
-  .print-container {
-    display: block !important;
-    width: 100%;
+  .print-page {
+    background: #ffffff !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+    min-height: auto !important;
     overflow: visible !important;
-    height: auto !important;
+  }
+
+  .print-document-shell {
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+    overflow: visible !important;
+  }
+
+  .print-document-shell > p {
+    display: none !important;
+  }
+
+  .print-document {
+    display: block !important;
+    visibility: visible !important;
+    position: static !important;
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+    border: none !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+    overflow: visible !important;
+    transform: none !important;
+  }
+
+  table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    page-break-inside: auto;
+  }
+
+  thead {
+    display: table-header-group;
+  }
+
+  tr {
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+
+  th,
+  td {
+    color: #000000 !important;
+    border-color: #000000 !important;
   }
 
   /* ── Document header ─────────────────────────────────────────────────────── */

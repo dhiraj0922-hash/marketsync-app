@@ -214,7 +214,7 @@ function PrintDocument({
   });
 
   return (
-    <div className="print-container font-sans text-black bg-white">
+    <div className="print-document font-sans text-black bg-white rounded-xl shadow-sm border border-zinc-200 p-10">
       {/* ── Header ─────────────────────────────────────────────────────────── */}
       <div className="print-doc-header flex items-start justify-between gap-4 border-b-2 border-black pb-2 mb-3">
         <div>
@@ -399,7 +399,7 @@ export default function RequisitionPrintPage() {
           </h1>
           <p className="text-sm text-zinc-600 mb-6">{error}</p>
           <button
-            onClick={() => router.back()}
+            onClick={() => router.push("/requisitions")}
             className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-zinc-100 text-sm font-semibold text-zinc-700 hover:bg-zinc-200 transition-colors"
           >
             <ArrowLeft className="h-4 w-4" /> Go Back
@@ -419,12 +419,12 @@ export default function RequisitionPrintPage() {
     "—";
 
   return (
-    <div className="bg-zinc-100 min-h-screen">
+    <div className="print-page bg-zinc-100 min-h-screen">
       {/* ── Screen toolbar (hidden in print) ──────────────────────────────── */}
       <div className="no-print sticky top-0 z-50 bg-white border-b border-zinc-200 shadow-sm px-6 py-3 flex items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <button
-            onClick={() => router.back()}
+            onClick={() => router.push("/requisitions")}
             className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-zinc-100 text-sm font-medium text-zinc-700 hover:bg-zinc-200 transition-colors"
           >
             <ArrowLeft className="h-4 w-4" /> Back
@@ -454,18 +454,11 @@ export default function RequisitionPrintPage() {
       </div>
 
       {/* ── Screen preview card ─────────────────────────────────────────────── */}
-      <div className="no-print max-w-5xl mx-auto px-4 py-8">
-        <div className="bg-white rounded-xl shadow-sm border border-zinc-200 p-10">
-          <PrintDocument data={printData} printedBy={printedBy} />
-        </div>
+      <div className="max-w-5xl mx-auto px-4 py-8 print-document-shell">
+        <PrintDocument data={printData} printedBy={printedBy} />
         <p className="mt-4 text-center text-xs text-zinc-400">
           Print preview — click <strong>Print</strong> to send to printer or save as PDF.
         </p>
-      </div>
-
-      {/* ── Actual print target (full-bleed, no card wrapper) ────────────── */}
-      <div className="print-only hidden">
-        <PrintDocument data={printData} printedBy={printedBy} />
       </div>
     </div>
   );
