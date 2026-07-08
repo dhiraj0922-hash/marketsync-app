@@ -11,6 +11,7 @@ export function AppLayoutWrapper({ children }: { children: React.ReactNode }) {
   const isPrintPage =
     pathname?.startsWith("/deliveries/tickets/") && pathname.endsWith("/print") ||
     pathname?.startsWith("/deliveries/runs/") && pathname.endsWith("/print") ||
+    pathname?.startsWith("/requisitions/") && pathname.endsWith("/print") ||
     pathname === "/requisitions/fulfillment/print";
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
