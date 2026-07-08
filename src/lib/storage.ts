@@ -8909,7 +8909,7 @@ export async function getInvoiceEligibilityAudit(
     locationId:       row.location_id,
     locationName:     row.location_name,
     requestDate:      row.request_date,
-    status:           row.status,
+    status:           row.header_status ?? row.status,  // DB column renamed: status→header_status
     fulfillmentDate:  row.fulfillment_date ?? null,
     fulfillmentSource: row.fulfillment_source,
     fulfilledQty:     Number(row.fulfilled_qty ?? 0),
