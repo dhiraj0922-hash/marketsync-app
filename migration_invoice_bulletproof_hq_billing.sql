@@ -41,14 +41,12 @@ CREATE INDEX IF NOT EXISTS idx_invoice_items_requisition_item_id
 
 -- Older monthly-only guard blocks daily/biweekly invoices in the same month.
 DROP INDEX IF EXISTS public.invoices_location_month_active_idx;
-
-CREATE UNIQUE INDEX IF NOT EXISTS invoices_location_period_frequency_active_idx
-  ON public.invoices(location_id, period_start, period_end, billing_frequency)
-  WHERE status <> 'void';
+DROP INDEX IF EXISTS public.invoices_location_period_frequency_active_idx;
 
 -- ── Replace old public RPCs/views with the new shared-source contract ────────
 DROP FUNCTION IF EXISTS public.get_billable_requisition_candidates(TEXT, DATE, DATE, TEXT);
 DROP FUNCTION IF EXISTS public.get_invoice_eligibility_audit(TEXT, DATE, DATE, TEXT);
+DROP FUNCTION IF EXISTS public.get_invoice_overlap_audit(TEXT, DATE, DATE);
 DROP FUNCTION IF EXISTS public.generate_invoices(TEXT, DATE, TEXT);
 DROP FUNCTION IF EXISTS public.generate_monthly_invoices(DATE, TEXT);
 
@@ -75,6 +73,9 @@ RETURNS TABLE (
   existing_invoice_id TEXT,
   existing_invoice_number TEXT,
   existing_invoice_status TEXT,
+  existing_invoice_cycle TEXT,
+  existing_invoice_period_start DATE,
+  existing_invoice_period_end DATE,
   is_eligible BOOLEAN,
   exclusion_reason TEXT
 )
@@ -161,7 +162,7 @@ AS $$
       AND lr.anchor_at < (b.period_end_exclusive::timestamp AT TIME ZONE 'America/Toronto')
   ),
   active_invoice AS (
-    SELECT id, invoice_number, status
+    SELECT id, invoice_number, status, billing_frequency, period_start, period_end
     FROM public.invoices
     WHERE status IN ('draft', 'issued', 'sent', 'paid', 'finalized')
   )
@@ -179,6 +180,9 @@ AS $$
     ai.id::text AS existing_invoice_id,
     ai.invoice_number::text AS existing_invoice_number,
     ai.status::text AS existing_invoice_status,
+    ai.billing_frequency::text AS existing_invoice_cycle,
+    ai.period_start AS existing_invoice_period_start,
+    ai.period_end AS existing_invoice_period_end,
     (
       lower(COALESCE(s.req_status, '')) IN ('fulfilled', 'partially_fulfilled', 'partial', 'partial_fulfilled', 'backordered')
       AND ai.id IS NULL
@@ -234,6 +238,9 @@ RETURNS TABLE (
   existing_invoice_id TEXT,
   existing_invoice_no TEXT,
   existing_inv_status TEXT,
+  existing_invoice_cycle TEXT,
+  existing_invoice_period_start DATE,
+  existing_invoice_period_end DATE,
   result TEXT,
   exclusion_reason TEXT
 )
@@ -256,6 +263,9 @@ AS $$
     c.existing_invoice_id,
     c.existing_invoice_number AS existing_invoice_no,
     c.existing_invoice_status AS existing_inv_status,
+    c.existing_invoice_cycle,
+    c.existing_invoice_period_start,
+    c.existing_invoice_period_end,
     CASE WHEN c.is_eligible THEN 'Eligible' ELSE 'Excluded' END AS result,
     c.exclusion_reason
   FROM public.get_billable_requisition_candidates(p_billing_frequency, p_period_start, p_period_end, p_location_id) c;
@@ -263,6 +273,100 @@ $$;
 
 REVOKE ALL ON FUNCTION public.get_invoice_eligibility_audit(TEXT, DATE, DATE, TEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.get_invoice_eligibility_audit(TEXT, DATE, DATE, TEXT) TO authenticated;
+
+-- ============================================================
+-- Cross-cycle overlap audit
+-- Shows mixed-cycle active invoices in a date range and flags true duplicate
+-- requisition billing if any requisition appears on more than one active invoice.
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.get_invoice_overlap_audit(
+  p_location_id TEXT DEFAULT NULL,
+  p_period_start DATE DEFAULT NULL,
+  p_period_end DATE DEFAULT NULL
+)
+RETURNS TABLE (
+  location_id TEXT,
+  location_name TEXT,
+  invoice_number TEXT,
+  billing_frequency TEXT,
+  period_start DATE,
+  period_end DATE,
+  status TEXT,
+  requisition_id TEXT,
+  duplicate_invoice_count INTEGER,
+  duplicate_warning TEXT
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  WITH scoped_invoices AS (
+    SELECT
+      i.id,
+      i.invoice_number,
+      i.location_id,
+      COALESCE(i.location_name_snapshot, l.name, i.location_id) AS location_name,
+      COALESCE(i.billing_frequency, 'monthly') AS billing_frequency,
+      COALESCE(i.period_start, i.invoice_month) AS period_start,
+      COALESCE(i.period_end, (i.invoice_month + interval '1 month - 1 day')::date) AS period_end,
+      i.status
+    FROM public.invoices i
+    LEFT JOIN public.locations l ON l.id = i.location_id
+    WHERE public.is_hq_admin_profile()
+      AND i.status IN ('draft', 'issued', 'sent', 'paid', 'finalized')
+      AND (p_location_id IS NULL OR i.location_id = p_location_id)
+      AND (p_period_start IS NULL OR COALESCE(i.period_end, (i.invoice_month + interval '1 month' - interval '1 day')::date) >= p_period_start)
+      AND (p_period_end IS NULL OR COALESCE(i.period_start, i.invoice_month) <= p_period_end)
+  ),
+  linked_requisitions AS (
+    SELECT
+      si.*,
+      COALESCE(ii.requisition_id, r.id)::text AS requisition_id
+    FROM scoped_invoices si
+    LEFT JOIN public.invoice_items ii ON ii.invoice_id = si.id
+    LEFT JOIN public.requisitions r ON r.invoice_id = si.id
+  ),
+  duplicate_counts AS (
+    SELECT
+      requisition_id,
+      COUNT(DISTINCT id)::integer AS duplicate_invoice_count
+    FROM linked_requisitions
+    WHERE requisition_id IS NOT NULL
+    GROUP BY requisition_id
+  ),
+  mixed_cycle_locations AS (
+    SELECT
+      location_id,
+      COUNT(DISTINCT billing_frequency) AS cycle_count
+    FROM scoped_invoices
+    GROUP BY location_id
+  )
+  SELECT DISTINCT
+    lr.location_id::text,
+    lr.location_name::text,
+    lr.invoice_number::text,
+    lr.billing_frequency::text,
+    lr.period_start,
+    lr.period_end,
+    lr.status::text,
+    lr.requisition_id::text,
+    COALESCE(dc.duplicate_invoice_count, 0)::integer AS duplicate_invoice_count,
+    CASE
+      WHEN COALESCE(dc.duplicate_invoice_count, 0) > 1
+        THEN 'CRITICAL: requisition appears on more than one active invoice'
+      WHEN COALESCE(mcl.cycle_count, 0) > 1
+        THEN 'Mixed billing cycles in overlapping date range; already invoiced requisitions will be excluded'
+      ELSE NULL
+    END::text AS duplicate_warning
+  FROM linked_requisitions lr
+  LEFT JOIN duplicate_counts dc ON dc.requisition_id = lr.requisition_id
+  LEFT JOIN mixed_cycle_locations mcl ON mcl.location_id = lr.location_id
+  ORDER BY lr.location_name, lr.period_start, lr.invoice_number, lr.requisition_id;
+$$;
+
+REVOKE ALL ON FUNCTION public.get_invoice_overlap_audit(TEXT, DATE, DATE) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.get_invoice_overlap_audit(TEXT, DATE, DATE) TO authenticated;
 
 -- ============================================================
 -- Generation RPC: consumes shared source, locks requisitions, snapshots lines
@@ -368,18 +472,6 @@ BEGIN
       v_base_invoice_number := 'INV-B-' || to_char(v_period_start, 'YYYYMMDD') || '-' || regexp_replace(v_location.location_id, '[^A-Za-z0-9]+', '', 'g');
     ELSE
       v_base_invoice_number := 'INV-' || to_char(v_period_start, 'YYYYMM') || '-' || regexp_replace(v_location.location_id, '[^A-Za-z0-9]+', '', 'g');
-    END IF;
-
-    -- Non-void invoice for the same location/period/frequency already exists: skip.
-    IF EXISTS (
-      SELECT 1 FROM public.invoices i
-      WHERE i.location_id = v_location.location_id
-        AND i.period_start = v_period_start
-        AND i.period_end = v_period_end
-        AND i.billing_frequency = p_billing_frequency
-        AND i.status <> 'void'
-    ) THEN
-      CONTINUE;
     END IF;
 
     SELECT COUNT(*) INTO v_existing_number_count

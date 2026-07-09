@@ -8719,9 +8719,25 @@ export interface InvoiceEligibilityRow {
   existingInvoiceId: string | null;
   existingInvoiceNo: string | null;
   existingInvStatus: string | null;
+  existingInvoiceCycle: string | null;
+  existingInvoicePeriodStart: string | null;
+  existingInvoicePeriodEnd: string | null;
   result: 'Eligible' | 'Excluded';
   isEligible: boolean;
   exclusionReason: string | null;
+}
+
+export interface InvoiceOverlapAuditRow {
+  locationId: string;
+  locationName: string;
+  invoiceNumber: string;
+  billingFrequency: string;
+  periodStart: string;
+  periodEnd: string;
+  status: string;
+  requisitionId: string | null;
+  duplicateInvoiceCount: number;
+  duplicateWarning: string | null;
 }
 
 const mapInvoiceToFrontend = (db: any): Invoice => ({
@@ -8934,6 +8950,9 @@ export async function getBillableRequisitionCandidates(
     existingInvoiceId: row.existing_invoice_id ?? null,
     existingInvoiceNo: row.existing_invoice_number ?? row.existing_invoice_no ?? null,
     existingInvStatus: row.existing_invoice_status ?? row.existing_inv_status ?? null,
+    existingInvoiceCycle: row.existing_invoice_cycle ?? null,
+    existingInvoicePeriodStart: row.existing_invoice_period_start ?? null,
+    existingInvoicePeriodEnd: row.existing_invoice_period_end ?? null,
     result:           (row.is_eligible ?? row.result === 'Eligible') ? 'Eligible' : 'Excluded',
     isEligible:       Boolean(row.is_eligible ?? row.result === 'Eligible'),
     exclusionReason:  row.exclusion_reason ?? null,
@@ -8949,6 +8968,38 @@ export async function getInvoiceEligibilityAudit(
   locationId?: string | null
 ): Promise<{ success: boolean; data?: InvoiceEligibilityRow[]; error?: string }> {
   return getBillableRequisitionCandidates(billingFrequency, periodStart, periodEnd, locationId);
+}
+
+export async function getInvoiceOverlapAudit(
+  periodStart: string,
+  periodEnd: string,
+  locationId?: string | null
+): Promise<{ success: boolean; data?: InvoiceOverlapAuditRow[]; error?: string }> {
+  const { data, error } = await supabase.rpc('get_invoice_overlap_audit', {
+    p_location_id: locationId ?? null,
+    p_period_start: periodStart,
+    p_period_end: periodEnd,
+  } as any);
+
+  if (error) {
+    console.error('[getInvoiceOverlapAudit]', error);
+    return { success: false, error: error.message };
+  }
+
+  const rows: InvoiceOverlapAuditRow[] = (Array.isArray(data) ? data : []).map((row: any) => ({
+    locationId: row.location_id,
+    locationName: row.location_name,
+    invoiceNumber: row.invoice_number,
+    billingFrequency: row.billing_frequency,
+    periodStart: row.period_start,
+    periodEnd: row.period_end,
+    status: row.status,
+    requisitionId: row.requisition_id ?? null,
+    duplicateInvoiceCount: Number(row.duplicate_invoice_count ?? 0),
+    duplicateWarning: row.duplicate_warning ?? null,
+  }));
+
+  return { success: true, data: rows };
 }
 
 /**

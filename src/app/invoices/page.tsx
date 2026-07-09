@@ -24,6 +24,7 @@ import {
   generateInvoices,
   generateMonthlyInvoices,
   getInvoiceEligibilityAudit,
+  getInvoiceOverlapAudit,
   loadInvoiceItems,
   loadInvoices,
   loadLocations,
@@ -31,6 +32,7 @@ import {
   voidInvoice,
   type Invoice,
   type InvoiceEligibilityRow,
+  type InvoiceOverlapAuditRow,
   type InvoiceItem,
   type MonthlyInvoiceSummary,
   getLocationBillingProfile,
@@ -325,8 +327,12 @@ async function saveInvoicePdf(
 
 function EligibilityAuditTable({
   rows,
+  billingCycle,
+  selectedPeriod,
 }: {
   rows: InvoiceEligibilityRow[];
+  billingCycle: string;
+  selectedPeriod: string;
 }) {
   const eligibleCount = rows.filter((r) => r.isEligible || r.result === "Eligible").length;
   const excludedCount = rows.length - eligibleCount;
@@ -358,11 +364,15 @@ function EligibilityAuditTable({
               <th className="px-3 py-2 text-left">Location</th>
               <th className="px-3 py-2 text-left">Status</th>
               <th className="px-3 py-2 text-left">Fulfillment Anchor</th>
+              <th className="px-3 py-2 text-left">Preview Cycle</th>
+              <th className="px-3 py-2 text-left">Selected Period</th>
               <th className="px-3 py-2 text-left">Source</th>
               <th className="px-3 py-2 text-right">Fulfilled Qty</th>
               <th className="px-3 py-2 text-right">Backorder Qty</th>
               <th className="px-3 py-2 text-right">Fulfilled Value</th>
               <th className="px-3 py-2 text-left">Existing Invoice</th>
+              <th className="px-3 py-2 text-left">Existing Cycle</th>
+              <th className="px-3 py-2 text-left">Existing Period</th>
               <th className="px-3 py-2 text-left">Result</th>
               <th className="px-3 py-2 text-left">Exclusion Reason</th>
             </tr>
@@ -391,6 +401,8 @@ function EligibilityAuditTable({
                       <div className="text-[9px] text-slate-400 mt-0.5">{row.fulfillmentSource}</div>
                     )}
                   </td>
+                  <td className="px-3 py-2 text-slate-500 capitalize">{billingCycle}</td>
+                  <td className="px-3 py-2 text-slate-500">{selectedPeriod}</td>
                   <td className="px-3 py-2 text-slate-500">{row.sourceTypeSummary || "—"}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{row.fulfilledQty}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{row.backorderQty || "—"}</td>
@@ -400,6 +412,12 @@ function EligibilityAuditTable({
                     {row.existingInvStatus && (
                       <div className="text-[9px] text-slate-400">{row.existingInvStatus}</div>
                     )}
+                  </td>
+                  <td className="px-3 py-2 text-slate-500 capitalize">{row.existingInvoiceCycle ?? "—"}</td>
+                  <td className="px-3 py-2 text-slate-500">
+                    {row.existingInvoicePeriodStart && row.existingInvoicePeriodEnd
+                      ? formatPeriodFromDates(row.existingInvoicePeriodStart, row.existingInvoicePeriodEnd)
+                      : "—"}
                   </td>
                   <td className="px-3 py-2">
                     {isEligible ? (
@@ -418,7 +436,7 @@ function EligibilityAuditTable({
             })}
             {sorted.length === 0 && (
               <tr>
-                <td colSpan={11} className="px-4 py-8 text-center text-slate-400">
+                <td colSpan={15} className="px-4 py-8 text-center text-slate-400">
                   No requisitions found for this period and location.
                 </td>
               </tr>
@@ -531,6 +549,7 @@ function MonthlyInvoicesContent() {
   // ── Eligibility audit state ────────────────────────────────────────────────
   const [showAudit, setShowAudit] = useState(false);
   const [auditRows, setAuditRows] = useState<InvoiceEligibilityRow[]>([]);
+  const [overlapRows, setOverlapRows] = useState<InvoiceOverlapAuditRow[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditError, setAuditError] = useState<string | null>(null);
   const [auditScopeKey, setAuditScopeKey] = useState<string | null>(null);
@@ -557,6 +576,7 @@ function MonthlyInvoicesContent() {
 
   const resetAuditForScopeChange = useCallback(() => {
     setAuditRows([]);
+    setOverlapRows([]);
     setAuditError(null);
     setAuditScopeKey(null);
     setLastSummary([]);
@@ -632,19 +652,28 @@ function MonthlyInvoicesContent() {
     setAuditLoading(true);
     setAuditError(null);
     setShowAudit(true);
-    const result = await getInvoiceEligibilityAudit(
-      genFrequency,
-      genPeriod.periodStart,
-      genPeriod.periodEnd,
-      auditLocationId  // always null when 'all', UUID otherwise
-    );
+    const [result, overlapResult] = await Promise.all([
+      getInvoiceEligibilityAudit(
+        genFrequency,
+        genPeriod.periodStart,
+        genPeriod.periodEnd,
+        auditLocationId  // always null when 'all', UUID otherwise
+      ),
+      getInvoiceOverlapAudit(genPeriod.periodStart, genPeriod.periodEnd, auditLocationId),
+    ]);
     setAuditLoading(false);
     if (!result.success) {
       setAuditError(result.error ?? 'Audit failed.');
       setAuditScopeKey(null);
       return;
     }
+    if (!overlapResult.success) {
+      setAuditError(overlapResult.error ?? 'Overlap audit failed.');
+      setAuditScopeKey(null);
+      return;
+    }
     setAuditRows(result.data ?? []);
+    setOverlapRows(overlapResult.data ?? []);
     setAuditScopeKey(currentScopeKey);
   }
 
@@ -811,11 +840,25 @@ function MonthlyInvoicesContent() {
         const reason = String(row.exclusionReason ?? "").toLowerCase();
         return ["cancelled", "canceled", "rejected", "void"].some((word) => status.includes(word) || reason.includes(word));
       }).length,
+      backorderQtyExcluded: eligibleRows.reduce((sum, row) => sum + Number(row.backorderQty || 0), 0),
       subtotal,
       hst: Math.round(subtotal * 0.13 * 100) / 100,
       total: subtotal + Math.round(subtotal * 0.13 * 100) / 100,
     };
   }, [auditRows]);
+
+  const overlapSummary = useMemo(() => {
+    const warnings = overlapRows.filter((row) => row.duplicateWarning);
+    const critical = warnings.filter((row) => row.duplicateInvoiceCount > 1);
+    const activeInvoiceNumbers = Array.from(new Set(overlapRows.map((row) => row.invoiceNumber).filter(Boolean)));
+    const mixedCycleWarnings = warnings.filter((row) => row.duplicateInvoiceCount <= 1);
+    return {
+      warnings,
+      critical,
+      mixedCycleWarnings,
+      activeInvoiceNumbers,
+    };
+  }, [overlapRows]);
 
   const hasFreshAudit = auditScopeKey === currentScopeKey;
   const canGenerateFromPreview = hasFreshAudit && auditSummary.eligible > 0 && !auditLoading && !isGenerating;
@@ -1044,6 +1087,7 @@ function MonthlyInvoicesContent() {
                     ["Local vendor excluded", auditSummary.localVendorExcluded],
                     ["No fulfilled qty excluded", auditSummary.noFulfilledQtyExcluded],
                     ["Cancelled/rejected excluded", auditSummary.cancelledRejectedExcluded],
+                    ["Backorder qty excluded", auditSummary.backorderQtyExcluded],
                     ["Estimated total", money(auditSummary.total)],
                   ].map(([label, value]) => (
                     <div key={label} className="rounded-xl border border-amber-100 bg-white p-3 shadow-sm">
@@ -1062,7 +1106,40 @@ function MonthlyInvoicesContent() {
                     This preview is generated by the same shared candidate source used by invoice generation.
                   </p>
                 </div>
-                <EligibilityAuditTable rows={auditRows} />
+                {overlapSummary.warnings.length > 0 && (
+                  <div className={`rounded-xl border p-4 text-sm ${
+                    overlapSummary.critical.length > 0
+                      ? "border-rose-200 bg-rose-50 text-rose-800"
+                      : "border-amber-200 bg-amber-50 text-amber-800"
+                  }`}>
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                      <div>
+                        <p className="font-semibold">
+                          {overlapSummary.critical.length > 0
+                            ? "Critical duplicate invoice overlap detected"
+                            : "Mixed billing cycles detected in this date range"}
+                        </p>
+                        <p className="mt-1">
+                          {overlapSummary.critical.length > 0
+                            ? "At least one requisition appears on more than one active invoice. Do not rely on these invoices until the duplicate is investigated."
+                            : "This location has active invoices from mixed billing cycles in the selected range. Already invoiced requisitions are excluded from this generation."}
+                        </p>
+                        {overlapSummary.activeInvoiceNumbers.length > 0 && (
+                          <p className="mt-2 text-xs font-semibold">
+                            Active invoices: {overlapSummary.activeInvoiceNumbers.slice(0, 8).join(", ")}
+                            {overlapSummary.activeInvoiceNumbers.length > 8 ? "..." : ""}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+                <EligibilityAuditTable
+                  rows={auditRows}
+                  billingCycle={genFrequency}
+                  selectedPeriod={genPeriodLabel}
+                />
               </>
             )}
           </section>
