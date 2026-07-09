@@ -8686,7 +8686,21 @@ export interface InvoiceItem {
   quantity: number;
   unitPrice: number;
   lineTotal: number;
+  adjustedQuantity: number | null;
+  adjustedUnitPrice: number | null;
+  adjustmentReason: string | null;
+  adjustedBy: string | null;
+  adjustedAt: string | null;
+  originalQuantitySnapshot: number | null;
+  originalUnitPriceSnapshot: number | null;
+  originalLineTotalSnapshot: number | null;
+  isAdjusted: boolean;
   createdAt: string;
+}
+
+export interface InvoiceRequisitionReview {
+  requisition: any;
+  items: any[];
 }
 
 export interface MonthlyInvoiceSummary {
@@ -8780,6 +8794,15 @@ const mapInvoiceItemToFrontend = (db: any): InvoiceItem => ({
   quantity: Number(db.quantity ?? 0),
   unitPrice: Number(db.unit_price ?? 0),
   lineTotal: Number(db.line_total ?? 0),
+  adjustedQuantity: db.adjusted_quantity != null ? Number(db.adjusted_quantity) : null,
+  adjustedUnitPrice: db.adjusted_unit_price != null ? Number(db.adjusted_unit_price) : null,
+  adjustmentReason: db.adjustment_reason ?? null,
+  adjustedBy: db.adjusted_by ?? null,
+  adjustedAt: db.adjusted_at ?? null,
+  originalQuantitySnapshot: db.original_quantity_snapshot != null ? Number(db.original_quantity_snapshot) : null,
+  originalUnitPriceSnapshot: db.original_unit_price_snapshot != null ? Number(db.original_unit_price_snapshot) : null,
+  originalLineTotalSnapshot: db.original_line_total_snapshot != null ? Number(db.original_line_total_snapshot) : null,
+  isAdjusted: Boolean(db.is_adjusted ?? false),
   createdAt: db.created_at,
 });
 
@@ -8841,6 +8864,58 @@ export async function loadInvoiceItems(invoiceId: string): Promise<InvoiceItem[]
     return [];
   }
   return Array.isArray(data) ? data.map(mapInvoiceItemToFrontend) : [];
+}
+
+export async function loadInvoiceRequisitionReview(
+  requisitionId: string
+): Promise<{ success: boolean; data?: InvoiceRequisitionReview; error?: string }> {
+  const { data: requisition, error } = await supabase
+    .from('requisitions')
+    .select('*')
+    .eq('id', requisitionId)
+    .maybeSingle();
+
+  if (error) {
+    console.error('[loadInvoiceRequisitionReview]', error);
+    return { success: false, error: error.message };
+  }
+  if (!requisition) {
+    return { success: false, error: 'Requisition not found.' };
+  }
+
+  const itemsRes = await loadRequisitionItems(requisitionId);
+  if (!itemsRes.success) {
+    return { success: false, error: itemsRes.error?.message ?? 'Could not load requisition items.' };
+  }
+
+  return {
+    success: true,
+    data: {
+      requisition: mapRequisitionToFrontend(requisition),
+      items: itemsRes.data ?? [],
+    },
+  };
+}
+
+export async function updateDraftInvoiceItem(
+  invoiceItemId: string,
+  newQuantity: number,
+  newUnitPrice: number,
+  reason: string
+): Promise<{ success: boolean; data?: any; error?: string }> {
+  const { data, error } = await supabase.rpc('update_draft_invoice_item', {
+    p_invoice_item_id: invoiceItemId,
+    p_new_quantity: newQuantity,
+    p_new_unit_price: newUnitPrice,
+    p_reason: reason,
+  } as any);
+
+  if (error) {
+    console.error('[updateDraftInvoiceItem]', error);
+    return { success: false, error: error.message };
+  }
+
+  return { success: true, data };
 }
 
 export async function generateInvoices(

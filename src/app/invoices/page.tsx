@@ -25,15 +25,18 @@ import {
   generateMonthlyInvoices,
   getInvoiceEligibilityAudit,
   getInvoiceOverlapAudit,
+  loadInvoiceRequisitionReview,
   loadInvoiceItems,
   loadInvoices,
   loadLocations,
   markInvoicePaid,
+  updateDraftInvoiceItem,
   voidInvoice,
   type Invoice,
   type InvoiceEligibilityRow,
   type InvoiceOverlapAuditRow,
   type InvoiceItem,
+  type InvoiceRequisitionReview,
   type MonthlyInvoiceSummary,
   getLocationBillingProfile,
   type LocationBillingProfile,
@@ -551,6 +554,16 @@ function MonthlyInvoicesContent() {
   const [notice, setNotice] = useState<{ type: "success" | "warning" | "error"; message: string } | null>(null);
   const [lastSummary, setLastSummary] = useState<MonthlyInvoiceSummary[]>([]);
   const [voidingInvoice, setVoidingInvoice] = useState<Invoice | null>(null);
+  const [reviewRequisitionId, setReviewRequisitionId] = useState<string | null>(null);
+  const [reviewRequisition, setReviewRequisition] = useState<InvoiceRequisitionReview | null>(null);
+  const [isReviewLoading, setIsReviewLoading] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [editingLine, setEditingLine] = useState<InvoiceItem | null>(null);
+  const [editQty, setEditQty] = useState("");
+  const [editUnitPrice, setEditUnitPrice] = useState("");
+  const [editReason, setEditReason] = useState("");
+  const [editError, setEditError] = useState<string | null>(null);
+  const [isSavingLineEdit, setIsSavingLineEdit] = useState(false);
 
   // ── Eligibility audit state ────────────────────────────────────────────────
   const [showAudit, setShowAudit] = useState(false);
@@ -628,6 +641,28 @@ function MonthlyInvoicesContent() {
     });
     return () => { cancelled = true; };
   }, [selectedInvoice]);
+
+  useEffect(() => {
+    if (!reviewRequisitionId) {
+      setReviewRequisition(null);
+      setReviewError(null);
+      return;
+    }
+    let cancelled = false;
+    setIsReviewLoading(true);
+    setReviewError(null);
+    loadInvoiceRequisitionReview(reviewRequisitionId).then((res) => {
+      if (cancelled) return;
+      if (!res.success) {
+        setReviewError(res.error ?? "Could not load requisition.");
+        setReviewRequisition(null);
+      } else {
+        setReviewRequisition(res.data ?? null);
+      }
+      setIsReviewLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [reviewRequisitionId]);
 
   const totals = useMemo(
     () => invoices.reduce(
@@ -817,6 +852,69 @@ function MonthlyInvoicesContent() {
     } finally {
       setPdfLoadingId(null);
     }
+  }
+
+  function openLineEditor(item: InvoiceItem) {
+    setEditingLine(item);
+    setEditQty(String(item.quantity));
+    setEditUnitPrice(String(item.unitPrice));
+    setEditReason(item.adjustmentReason ?? "");
+    setEditError(null);
+  }
+
+  async function refreshSelectedInvoice(invoiceId: string) {
+    const [items, refreshed] = await Promise.all([
+      loadInvoiceItems(invoiceId),
+      loadInvoices({
+        month: filterMonth,
+        date: filterDate,
+        locationId: selectedSummaryLocationFilter,
+        billingFrequency: filterFrequency === "all" ? "all" : filterFrequency,
+      }),
+    ]);
+    setInvoiceItems(items);
+    setInvoices(refreshed);
+    setSelectedInvoice(refreshed.find((row) => row.id === invoiceId) ?? selectedInvoice);
+  }
+
+  async function handleSaveLineEdit() {
+    if (!editingLine || !selectedInvoice) return;
+    const qty = Number(editQty);
+    const price = Number(editUnitPrice);
+    const reason = editReason.trim();
+
+    if (!Number.isFinite(qty) || qty < 0) {
+      setEditError("Invoice quantity must be a number greater than or equal to 0.");
+      return;
+    }
+    if (!Number.isFinite(price) || price < 0) {
+      setEditError("Unit price must be a number greater than or equal to 0.");
+      return;
+    }
+    if (!reason) {
+      setEditError("Adjustment reason is required.");
+      return;
+    }
+    const fulfilledQty = editingLine.quantityFulfilledSnapshot ?? editingLine.originalQuantitySnapshot ?? editingLine.quantity;
+    if (qty > fulfilledQty) {
+      const confirmed = window.confirm(
+        "Adjusted invoice quantity exceeds fulfilled quantity. This is a billing override and will not change inventory. Continue?"
+      );
+      if (!confirmed) return;
+    }
+
+    setIsSavingLineEdit(true);
+    setEditError(null);
+    const result = await updateDraftInvoiceItem(editingLine.id, qty, price, reason);
+    setIsSavingLineEdit(false);
+    if (!result.success) {
+      setEditError(result.error ?? "Could not update invoice line.");
+      return;
+    }
+
+    setNotice({ type: "success", message: "Draft invoice line adjusted. Invoice subtotal, HST, and total were recalculated." });
+    setEditingLine(null);
+    await refreshSelectedInvoice(selectedInvoice.id);
   }
 
   async function handleVoided() {
@@ -1429,7 +1527,12 @@ function MonthlyInvoicesContent() {
         {/* ── Invoice Detail Drawer ──────────────────────────────────────── */}
         <Drawer
           isOpen={!!selectedInvoice}
-          onClose={() => { setSelectedInvoice(null); setVoidingInvoice(null); }}
+          onClose={() => {
+            setSelectedInvoice(null);
+            setVoidingInvoice(null);
+            setReviewRequisitionId(null);
+            setEditingLine(null);
+          }}
           title={selectedInvoice ? `Invoice ${selectedInvoice.invoiceNumber}` : "Invoice"}
           description={selectedInvoice
             ? `${selectedInvoice.locationNameSnapshot ?? locationNameById.get(selectedInvoice.locationId) ?? selectedInvoice.locationId} · ${selectedInvoice.billingFrequency.toUpperCase()} (${formatPeriod(selectedInvoice)})`
@@ -1502,11 +1605,96 @@ function MonthlyInvoicesContent() {
                 <div className="mt-2 flex flex-wrap gap-2">
                   {requisitionNumbers.length > 0
                     ? requisitionNumbers.map((reqId) => (
-                        <span key={reqId} className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-700">{reqId}</span>
+                        <button
+                          key={reqId}
+                          type="button"
+                          onClick={() => setReviewRequisitionId(reqId)}
+                          className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100"
+                        >
+                          {reqId}
+                        </button>
                       ))
                     : <span className="text-sm text-slate-400">Loading...</span>}
                 </div>
               </div>
+
+              {(isReviewLoading || reviewError || reviewRequisition) && (
+                <div className="rounded-xl border border-blue-100 bg-blue-50/60 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-bold uppercase tracking-[0.14em] text-blue-700">Source Requisition</p>
+                      <p className="mt-1 text-sm font-semibold text-slate-900">{reviewRequisitionId}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setReviewRequisitionId(null)}
+                      className="rounded-lg px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100"
+                    >
+                      Close
+                    </button>
+                  </div>
+                  {isReviewLoading ? (
+                    <div className="mt-3 flex items-center gap-2 text-sm text-blue-700">
+                      <Loader2 className="h-4 w-4 animate-spin" /> Loading requisition...
+                    </div>
+                  ) : reviewError ? (
+                    <p className="mt-3 text-sm font-semibold text-rose-700">{reviewError}</p>
+                  ) : reviewRequisition ? (
+                    <div className="mt-4 space-y-4">
+                      <div className="grid gap-3 text-sm md:grid-cols-3">
+                        <div>
+                          <p className="text-xs font-semibold uppercase text-slate-500">Location</p>
+                          <p className="font-semibold text-slate-900">{reviewRequisition.requisition.location}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs font-semibold uppercase text-slate-500">Requested By</p>
+                          <p className="font-semibold text-slate-900">{reviewRequisition.requisition.requestedBy ?? "—"}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs font-semibold uppercase text-slate-500">Status</p>
+                          <p className="font-semibold capitalize text-slate-900">{reviewRequisition.requisition.status}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs font-semibold uppercase text-slate-500">Date</p>
+                          <p className="font-semibold text-slate-900">{reviewRequisition.requisition.date ?? reviewRequisition.requisition.createdAt ?? "—"}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs font-semibold uppercase text-slate-500">Existing Invoice</p>
+                          <p className="font-semibold text-slate-900">{selectedInvoice.invoiceNumber}</p>
+                        </div>
+                      </div>
+                      <div className="overflow-x-auto rounded-lg border border-blue-100 bg-white">
+                        <table className="w-full text-xs">
+                          <thead className="bg-blue-50 text-[10px] font-bold uppercase tracking-wider text-blue-700">
+                            <tr>
+                              <th className="px-3 py-2 text-left">Item</th>
+                              <th className="px-3 py-2 text-left">Source</th>
+                              <th className="px-3 py-2 text-right">Requested</th>
+                              <th className="px-3 py-2 text-right">Approved</th>
+                              <th className="px-3 py-2 text-right">Fulfilled</th>
+                              <th className="px-3 py-2 text-right">Backorder</th>
+                              <th className="px-3 py-2 text-right">Fulfilled Value</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-blue-50">
+                            {reviewRequisition.items.map((line) => (
+                              <tr key={line.id}>
+                                <td className="px-3 py-2 font-semibold text-slate-800">{line.itemName}</td>
+                                <td className="px-3 py-2 text-slate-500">{line.sourceType ?? "hq_supplied"}</td>
+                                <td className="px-3 py-2 text-right tabular-nums">{line.quantityRequested}</td>
+                                <td className="px-3 py-2 text-right tabular-nums">{line.quantityApproved ?? "—"}</td>
+                                <td className="px-3 py-2 text-right tabular-nums">{line.quantityFulfilled ?? "—"}</td>
+                                <td className="px-3 py-2 text-right tabular-nums">{line.backorderQty ?? 0}</td>
+                                <td className="px-3 py-2 text-right tabular-nums">{money(Number(line.fulfilledValue ?? 0))}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              )}
 
               <div>
                 <p className="text-xs font-bold uppercase tracking-[0.14em] text-slate-500 mb-2">Line Items</p>
@@ -1522,16 +1710,33 @@ function MonthlyInvoicesContent() {
                           <th className="px-3 py-2 text-left">Item</th>
                           <th className="px-3 py-2 text-left">Requisition</th>
                           <th className="px-3 py-2 text-right">Fulfilled Qty</th>
+                          <th className="px-3 py-2 text-right">Invoice Qty</th>
                           <th className="px-3 py-2 text-left">Source</th>
                           <th className="px-3 py-2 text-right">Unit Price</th>
                           <th className="px-3 py-2 text-right">Line Total</th>
+                          <th className="px-3 py-2 text-left">Adjusted?</th>
+                          <th className="px-3 py-2 text-right">Actions</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
                         {invoiceItems.map((item) => (
                           <tr key={item.id}>
                             <td className="px-3 py-2 font-medium text-slate-800">{item.itemName}</td>
-                            <td className="px-3 py-2 font-mono text-slate-500">{item.requisitionId ?? "—"}</td>
+                            <td className="px-3 py-2 font-mono text-slate-500">
+                              {item.requisitionId ? (
+                                <button
+                                  type="button"
+                                  onClick={() => setReviewRequisitionId(item.requisitionId)}
+                                  className="font-mono font-semibold text-blue-700 underline-offset-2 hover:underline"
+                                >
+                                  {item.requisitionId}
+                                </button>
+                              ) : "—"}
+                            </td>
+                            <td className="px-3 py-2 text-right tabular-nums">
+                              {item.quantityFulfilledSnapshot ?? item.originalQuantitySnapshot ?? item.quantity}
+                              {item.unitSnapshot ? ` ${item.unitSnapshot}` : ""}
+                            </td>
                             <td className="px-3 py-2 text-right tabular-nums">
                               {item.quantity}{item.unitSnapshot ? ` ${item.unitSnapshot}` : ""}
                             </td>
@@ -1541,6 +1746,45 @@ function MonthlyInvoicesContent() {
                             </td>
                             <td className="px-3 py-2 text-right tabular-nums">{money(item.unitPrice)}</td>
                             <td className="px-3 py-2 text-right tabular-nums font-semibold">{money(item.lineTotal)}</td>
+                            <td className="px-3 py-2">
+                              {item.isAdjusted ? (
+                                <div>
+                                  <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-bold text-amber-700">
+                                    Adjusted
+                                  </span>
+                                  <div className="mt-1 max-w-[220px] text-[10px] text-slate-500">
+                                    Original: {item.originalQuantitySnapshot ?? "—"} @ {money(item.originalUnitPriceSnapshot ?? item.unitPrice)}
+                                    <br />
+                                    {item.adjustmentReason ?? "No reason saved"}
+                                    {item.adjustedAt ? <><br />{new Date(item.adjustedAt).toLocaleString()}</> : null}
+                                  </div>
+                                </div>
+                              ) : (
+                                <span className="text-slate-400">—</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-right">
+                              <div className="flex justify-end gap-2">
+                                {item.requisitionId && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setReviewRequisitionId(item.requisitionId)}
+                                    className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[10px] font-semibold text-slate-600 hover:bg-slate-50"
+                                  >
+                                    View Req
+                                  </button>
+                                )}
+                                {selectedInvoice.status === "draft" && (
+                                  <button
+                                    type="button"
+                                    onClick={() => openLineEditor(item)}
+                                    className="rounded-lg border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-700 hover:bg-emerald-100"
+                                  >
+                                    Edit Line
+                                  </button>
+                                )}
+                              </div>
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -1549,8 +1793,99 @@ function MonthlyInvoicesContent() {
                 )}
               </div>
 
+              {editingLine && selectedInvoice.status === "draft" && (
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-bold uppercase tracking-[0.14em] text-emerald-700">Edit Draft Line</p>
+                      <p className="mt-1 font-semibold text-slate-950">{editingLine.itemName}</p>
+                      <p className="mt-1 text-xs text-slate-600">
+                        Fulfilled qty remains {editingLine.quantityFulfilledSnapshot ?? editingLine.quantity}
+                        {editingLine.unitSnapshot ? ` ${editingLine.unitSnapshot}` : ""}. This edit changes billing only.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setEditingLine(null)}
+                      className="rounded-lg px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  <div className="mt-4 grid gap-3 md:grid-cols-3">
+                    <label className="block">
+                      <span className="text-xs font-bold uppercase tracking-wider text-emerald-800">Invoice Quantity</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.0001"
+                        value={editQty}
+                        onChange={(e) => setEditQty(e.target.value)}
+                        className="mt-1.5 min-h-10 w-full rounded-lg border border-emerald-200 bg-white px-3 text-sm outline-none ring-emerald-600 focus:ring-2"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="text-xs font-bold uppercase tracking-wider text-emerald-800">Unit Price</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={editUnitPrice}
+                        onChange={(e) => setEditUnitPrice(e.target.value)}
+                        className="mt-1.5 min-h-10 w-full rounded-lg border border-emerald-200 bg-white px-3 text-sm outline-none ring-emerald-600 focus:ring-2"
+                      />
+                    </label>
+                    <div className="rounded-lg border border-emerald-100 bg-white p-3">
+                      <p className="text-xs font-bold uppercase tracking-wider text-slate-500">New Line Total</p>
+                      <p className="mt-1 text-lg font-semibold text-slate-950">
+                        {money((Number(editQty) || 0) * (Number(editUnitPrice) || 0))}
+                      </p>
+                    </div>
+                  </div>
+                  {Number(editQty) > Number(editingLine.quantityFulfilledSnapshot ?? editingLine.quantity) && (
+                    <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">
+                      Adjusted invoice quantity exceeds fulfilled quantity. This is a billing override and will not change inventory.
+                    </div>
+                  )}
+                  <label className="mt-3 block">
+                    <span className="text-xs font-bold uppercase tracking-wider text-emerald-800">Adjustment Reason *</span>
+                    <textarea
+                      value={editReason}
+                      onChange={(e) => setEditReason(e.target.value)}
+                      rows={3}
+                      placeholder="Pricing correction, damaged item not billable, goodwill credit, manual billing correction..."
+                      className="mt-1.5 w-full rounded-lg border border-emerald-200 bg-white px-3 py-2 text-sm outline-none ring-emerald-600 focus:ring-2"
+                    />
+                  </label>
+                  {editError && <p className="mt-2 text-sm font-semibold text-rose-700">{editError}</p>}
+                  <div className="mt-4 flex justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setEditingLine(null)}
+                      className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSaveLineEdit}
+                      disabled={isSavingLineEdit}
+                      className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:opacity-50"
+                    >
+                      {isSavingLineEdit ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                      Save Billing Adjustment
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Totals */}
               <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-1 text-sm">
+                {invoiceItems.some((item) => item.isAdjusted) && (
+                  <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">
+                    This draft invoice contains manual billing adjustments.
+                  </div>
+                )}
                 <div className="flex justify-between">
                   <span className="text-slate-500">Subtotal</span>
                   <span className="font-semibold tabular-nums">{money(selectedInvoice.subtotal)}</span>

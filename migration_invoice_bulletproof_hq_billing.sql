@@ -309,7 +309,7 @@ AS $$
       COALESCE(i.location_name_snapshot, l.name, i.location_id) AS location_name,
       COALESCE(i.billing_frequency, 'monthly') AS billing_frequency,
       COALESCE(i.period_start, i.invoice_month) AS period_start,
-      COALESCE(i.period_end, (i.invoice_month + interval '1 month - 1 day')::date) AS period_end,
+      COALESCE(i.period_end, (i.invoice_month + interval '1 month' - interval '1 day')::date) AS period_end,
       i.status
     FROM public.invoices i
     LEFT JOIN public.locations l ON l.id = i.location_id
