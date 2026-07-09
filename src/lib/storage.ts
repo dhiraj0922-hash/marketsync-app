@@ -8679,6 +8679,10 @@ export interface InvoiceItem {
   requisitionItemId: string | null;
   itemId: string | null;
   itemName: string;
+  unitSnapshot: string | null;
+  packQtySnapshot: number | null;
+  quantityFulfilledSnapshot: number | null;
+  sourceTypeSnapshot: string | null;
   quantity: number;
   unitPrice: number;
   lineTotal: number;
@@ -8701,18 +8705,22 @@ export interface MonthlyInvoiceSummary {
 /** Row returned by get_invoice_eligibility_audit RPC */
 export interface InvoiceEligibilityRow {
   requisitionId: string;
+  requestId: string;
   locationId: string;
   locationName: string;
   requestDate: string;
   status: string;
   fulfillmentDate: string | null;
   fulfillmentSource: string;
+  sourceTypeSummary: string;
   fulfilledQty: number;
   fulfilledValue: number;
+  backorderQty: number;
   existingInvoiceId: string | null;
   existingInvoiceNo: string | null;
   existingInvStatus: string | null;
   result: 'Eligible' | 'Excluded';
+  isEligible: boolean;
   exclusionReason: string | null;
 }
 
@@ -8749,6 +8757,10 @@ const mapInvoiceItemToFrontend = (db: any): InvoiceItem => ({
   requisitionItemId: db.requisition_item_id ?? null,
   itemId: db.item_id ?? null,
   itemName: db.item_name,
+  unitSnapshot: db.unit_snapshot ?? null,
+  packQtySnapshot: db.pack_qty_snapshot != null ? Number(db.pack_qty_snapshot) : null,
+  quantityFulfilledSnapshot: db.quantity_fulfilled_snapshot != null ? Number(db.quantity_fulfilled_snapshot) : null,
+  sourceTypeSnapshot: db.source_type_snapshot ?? null,
   quantity: Number(db.quantity ?? 0),
   unitPrice: Number(db.unit_price ?? 0),
   lineTotal: Number(db.line_total ?? 0),
@@ -8884,17 +8896,17 @@ export async function markInvoicePaid(invoiceId: string): Promise<{ success: boo
 }
 
 /**
- * Fetches a per-requisition eligibility audit for a billing period.
- * Calls the get_invoice_eligibility_audit SECURITY DEFINER RPC.
+ * Fetches the shared per-requisition billable candidate set for a billing period.
+ * This is the single source used by audit/preview and mirrored by generation.
  * HQ admin only — enforced at DB level.
  */
-export async function getInvoiceEligibilityAudit(
+export async function getBillableRequisitionCandidates(
   billingFrequency: 'daily' | 'biweekly' | 'monthly',
   periodStart: string,  // YYYY-MM-DD
   periodEnd: string,    // YYYY-MM-DD (inclusive)
   locationId?: string | null
 ): Promise<{ success: boolean; data?: InvoiceEligibilityRow[]; error?: string }> {
-  const { data, error } = await supabase.rpc('get_invoice_eligibility_audit', {
+  const { data, error } = await supabase.rpc('get_billable_requisition_candidates', {
     p_billing_frequency: billingFrequency,
     p_period_start:      periodStart,
     p_period_end:        periodEnd,
@@ -8902,28 +8914,41 @@ export async function getInvoiceEligibilityAudit(
   } as any);
 
   if (error) {
-    console.error('[getInvoiceEligibilityAudit]', error);
+    console.error('[getBillableRequisitionCandidates]', error);
     return { success: false, error: error.message };
   }
 
   const rows: InvoiceEligibilityRow[] = (Array.isArray(data) ? data : []).map((row: any) => ({
     requisitionId:    row.requisition_id,
+    requestId:        row.request_id ?? row.requisition_id,
     locationId:       row.location_id,
     locationName:     row.location_name,
-    requestDate:      row.request_date,
-    status:           row.header_status ?? row.status,  // DB column renamed: status→header_status
-    fulfillmentDate:  row.fulfillment_date ?? null,
-    fulfillmentSource: row.fulfillment_source,
-    fulfilledQty:     Number(row.fulfilled_qty ?? 0),
-    fulfilledValue:   Number(row.fulfilled_value ?? 0),
+    requestDate:      row.request_date ?? row.request_id ?? row.requisition_id,
+    status:           row.header_status ?? row.status,
+    fulfillmentDate:  row.fulfillment_anchor_at ?? row.fulfillment_date ?? null,
+    fulfillmentSource: row.fulfillment_source ?? 'shared billable candidate source',
+    sourceTypeSummary: row.source_type_summary ?? '',
+    fulfilledQty:     Number(row.fulfilled_qty_total ?? row.fulfilled_qty ?? 0),
+    fulfilledValue:   Number(row.fulfilled_value_total ?? row.fulfilled_value ?? 0),
+    backorderQty:     Number(row.backorder_qty_total ?? row.backorder_qty ?? 0),
     existingInvoiceId: row.existing_invoice_id ?? null,
-    existingInvoiceNo: row.existing_invoice_no ?? null,
-    existingInvStatus: row.existing_inv_status ?? null,
-    result:           row.result as 'Eligible' | 'Excluded',
+    existingInvoiceNo: row.existing_invoice_number ?? row.existing_invoice_no ?? null,
+    existingInvStatus: row.existing_invoice_status ?? row.existing_inv_status ?? null,
+    result:           (row.is_eligible ?? row.result === 'Eligible') ? 'Eligible' : 'Excluded',
+    isEligible:       Boolean(row.is_eligible ?? row.result === 'Eligible'),
     exclusionReason:  row.exclusion_reason ?? null,
   }));
 
   return { success: true, data: rows };
+}
+
+export async function getInvoiceEligibilityAudit(
+  billingFrequency: 'daily' | 'biweekly' | 'monthly',
+  periodStart: string,
+  periodEnd: string,
+  locationId?: string | null
+): Promise<{ success: boolean; data?: InvoiceEligibilityRow[]; error?: string }> {
+  return getBillableRequisitionCandidates(billingFrequency, periodStart, periodEnd, locationId);
 }
 
 /**

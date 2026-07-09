@@ -295,7 +295,7 @@ async function saveInvoicePdf(
       setBodyStyle(9);
       itemLines.forEach((line, index) => { doc.text(line, left, y + index * 11); });
       doc.text(clipText(item.requisitionId ?? "-", 18), 246, y);
-      doc.text(String(item.quantity), 356, y, { align: "right" });
+      doc.text(`${item.quantity}${item.unitSnapshot ? ` ${item.unitSnapshot}` : ""}`, 356, y, { align: "right" });
       doc.text(money(item.unitPrice), 448, y, { align: "right" });
       doc.text(money(item.lineTotal), 570, y, { align: "right" });
       y += rowHeight;
@@ -325,21 +325,18 @@ async function saveInvoicePdf(
 
 function EligibilityAuditTable({
   rows,
-  targetIds,
 }: {
   rows: InvoiceEligibilityRow[];
-  targetIds?: string[];
 }) {
-  const eligibleCount = rows.filter((r) => r.result === "Eligible").length;
-  const excludedCount = rows.filter((r) => r.result === "Excluded").length;
+  const eligibleCount = rows.filter((r) => r.isEligible || r.result === "Eligible").length;
+  const excludedCount = rows.length - eligibleCount;
 
-  // Sort: target IDs first, then eligible, then excluded
+  // Sort eligible requisitions first, then by fulfillment anchor.
   const sorted = [...rows].sort((a, b) => {
-    const aTarget = targetIds?.includes(a.requisitionId) ? 0 : 1;
-    const bTarget = targetIds?.includes(b.requisitionId) ? 0 : 1;
-    if (aTarget !== bTarget) return aTarget - bTarget;
-    if (a.result !== b.result) return a.result === "Eligible" ? -1 : 1;
-    return 0;
+    const aEligible = a.isEligible || a.result === "Eligible";
+    const bEligible = b.isEligible || b.result === "Eligible";
+    if (aEligible !== bEligible) return aEligible ? -1 : 1;
+    return new Date(b.fulfillmentDate ?? 0).getTime() - new Date(a.fulfillmentDate ?? 0).getTime();
   });
 
   return (
@@ -359,10 +356,11 @@ function EligibilityAuditTable({
             <tr>
               <th className="px-3 py-2 text-left">Requisition ID</th>
               <th className="px-3 py-2 text-left">Location</th>
-              <th className="px-3 py-2 text-left">Req Date</th>
               <th className="px-3 py-2 text-left">Status</th>
-              <th className="px-3 py-2 text-left">Fulfillment Date</th>
+              <th className="px-3 py-2 text-left">Fulfillment Anchor</th>
+              <th className="px-3 py-2 text-left">Source</th>
               <th className="px-3 py-2 text-right">Fulfilled Qty</th>
+              <th className="px-3 py-2 text-right">Backorder Qty</th>
               <th className="px-3 py-2 text-right">Fulfilled Value</th>
               <th className="px-3 py-2 text-left">Existing Invoice</th>
               <th className="px-3 py-2 text-left">Result</th>
@@ -371,20 +369,17 @@ function EligibilityAuditTable({
           </thead>
           <tbody className="divide-y divide-slate-100">
             {sorted.map((row) => {
-              const isTarget = targetIds?.includes(row.requisitionId);
+              const isEligible = row.isEligible || row.result === "Eligible";
               return (
                 <tr
                   key={row.requisitionId}
-                  className={`${isTarget ? "bg-amber-50/50" : ""} ${
-                    row.result === "Eligible" ? "hover:bg-emerald-50/30" : "hover:bg-rose-50/20"
-                  }`}
+                  className={isEligible ? "hover:bg-emerald-50/30" : "hover:bg-rose-50/20"}
                 >
                   <td className="px-3 py-2 font-mono text-[11px] font-semibold text-slate-800">
-                    {row.requisitionId}
-                    {isTarget && <span className="ml-1 text-amber-600">★</span>}
+                    {row.requestId || row.requisitionId}
+                    <div className="text-[9px] font-normal text-slate-400">{row.requisitionId}</div>
                   </td>
                   <td className="px-3 py-2 text-slate-600">{row.locationName}</td>
-                  <td className="px-3 py-2 text-slate-500">{row.requestDate}</td>
                   <td className="px-3 py-2">
                     <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600">{row.status}</span>
                   </td>
@@ -396,7 +391,9 @@ function EligibilityAuditTable({
                       <div className="text-[9px] text-slate-400 mt-0.5">{row.fulfillmentSource}</div>
                     )}
                   </td>
+                  <td className="px-3 py-2 text-slate-500">{row.sourceTypeSummary || "—"}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{row.fulfilledQty}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{row.backorderQty || "—"}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{money(row.fulfilledValue)}</td>
                   <td className="px-3 py-2 font-mono text-[10px] text-slate-500">
                     {row.existingInvoiceNo ?? "—"}
@@ -405,7 +402,7 @@ function EligibilityAuditTable({
                     )}
                   </td>
                   <td className="px-3 py-2">
-                    {row.result === "Eligible" ? (
+                    {isEligible ? (
                       <span className="inline-flex items-center gap-1 text-emerald-700 font-semibold">
                         <CheckCircle2 className="h-3.5 w-3.5" /> Eligible
                       </span>
@@ -421,7 +418,7 @@ function EligibilityAuditTable({
             })}
             {sorted.length === 0 && (
               <tr>
-                <td colSpan={10} className="px-4 py-8 text-center text-slate-400">
+                <td colSpan={11} className="px-4 py-8 text-center text-slate-400">
                   No requisitions found for this period and location.
                 </td>
               </tr>
@@ -536,13 +533,7 @@ function MonthlyInvoicesContent() {
   const [auditRows, setAuditRows] = useState<InvoiceEligibilityRow[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditError, setAuditError] = useState<string | null>(null);
-
-  const JUNE_TARGET_IDS = [
-    "REQ-1782829211228", "REQ-1782730883660", "REQ-1782564416819",
-    "REQ-1782476814905", "REQ-1782388914267", "REQ-1782158634026",
-    "REQ-178157261742",  "REQ-1782138880158", "REQ-1781977321928",
-    "REQ-1781015928620",
-  ];
+  const [auditScopeKey, setAuditScopeKey] = useState<string | null>(null);
 
   const locationNameById = useMemo(() => {
     const map = new Map<string, string>();
@@ -558,6 +549,18 @@ function MonthlyInvoicesContent() {
     () => computePeriod(genFrequency, genMonth, genDate),
     [genFrequency, genMonth, genDate]
   );
+
+  const currentScopeKey = useMemo(
+    () => `${genFrequency}|${genPeriod.periodStart}|${genPeriod.periodEnd}|${selectedGenLocationFilter ?? "all"}`,
+    [genFrequency, genPeriod.periodStart, genPeriod.periodEnd, selectedGenLocationFilter]
+  );
+
+  const resetAuditForScopeChange = useCallback(() => {
+    setAuditRows([]);
+    setAuditError(null);
+    setAuditScopeKey(null);
+    setLastSummary([]);
+  }, []);
 
   // ── Fetch invoices using SUMMARY filter state ──────────────────────────────
   const fetchInvoices = useCallback(async () => {
@@ -638,13 +641,26 @@ function MonthlyInvoicesContent() {
     setAuditLoading(false);
     if (!result.success) {
       setAuditError(result.error ?? 'Audit failed.');
+      setAuditScopeKey(null);
       return;
     }
     setAuditRows(result.data ?? []);
+    setAuditScopeKey(currentScopeKey);
   }
 
   // ── Generate ───────────────────────────────────────────────────────────────
   async function handleGenerate() {
+    const hasFreshEligiblePreview = auditScopeKey === currentScopeKey
+      && auditRows.some((row) => row.isEligible || row.result === "Eligible");
+    if (!hasFreshEligiblePreview) {
+      setNotice({
+        type: "warning",
+        message: "Run Preview Billable Requisitions first. Generate is only enabled from a fresh eligibility preview for the selected period and location.",
+      });
+      setShowAudit(true);
+      return;
+    }
+
     // DIAGNOSTIC — confirm location UUID is being passed, not name/code/"all"
     const generateLocationId = genLocationId === 'all' ? null : genLocationId;
     console.log('[Generate] invoking generate_invoices with:', {
@@ -700,12 +716,21 @@ function MonthlyInvoicesContent() {
       }
 
       await fetchInvoices();
+      await handleRunAudit();
     } finally {
       setIsGenerating(false);
     }
   }
 
   async function runInvoiceAction(invoice: Invoice, action: "finalize" | "paid") {
+    if (invoice.subtotal > 0 && invoice.taxAmount <= 0) {
+      setNotice({
+        type: "error",
+        message: `${invoice.invoiceNumber} cannot be ${action === "finalize" ? "finalized" : "marked paid"} because HST is CA$0.00 on a positive subtotal. Run the HST repair migration and regenerate/repair this draft first.`,
+      });
+      return;
+    }
+
     setActionLoadingId(invoice.id);
     try {
       const result = action === "finalize" ? await finalizeInvoice(invoice.id) : await markInvoicePaid(invoice.id);
@@ -763,6 +788,38 @@ function MonthlyInvoicesContent() {
     [genPeriod]
   );
 
+  const auditSummary = useMemo(() => {
+    const eligibleRows = auditRows.filter((row) => row.isEligible || row.result === "Eligible");
+    const excludedRows = auditRows.filter((row) => !(row.isEligible || row.result === "Eligible"));
+    const excludedByReason = (needle: string) =>
+      excludedRows.filter((row) => (row.exclusionReason ?? "").toLowerCase().includes(needle)).length;
+    const subtotal = eligibleRows.reduce((sum, row) => sum + Number(row.fulfilledValue || 0), 0);
+    const partialIncluded = eligibleRows.filter((row) => {
+      const status = String(row.status ?? "").toLowerCase();
+      return row.backorderQty > 0 || status.includes("partial") || status.includes("backorder");
+    }).length;
+
+    return {
+      reviewed: auditRows.length,
+      eligible: eligibleRows.length,
+      partialIncluded,
+      alreadyInvoicedExcluded: excludedRows.filter((row) => row.existingInvoiceId || (row.exclusionReason ?? "").toLowerCase().includes("already invoiced")).length,
+      localVendorExcluded: excludedByReason("local vendor"),
+      noFulfilledQtyExcluded: excludedByReason("no fulfilled"),
+      cancelledRejectedExcluded: excludedRows.filter((row) => {
+        const status = String(row.status ?? "").toLowerCase();
+        const reason = String(row.exclusionReason ?? "").toLowerCase();
+        return ["cancelled", "canceled", "rejected", "void"].some((word) => status.includes(word) || reason.includes(word));
+      }).length,
+      subtotal,
+      hst: Math.round(subtotal * 0.13 * 100) / 100,
+      total: subtotal + Math.round(subtotal * 0.13 * 100) / 100,
+    };
+  }, [auditRows]);
+
+  const hasFreshAudit = auditScopeKey === currentScopeKey;
+  const canGenerateFromPreview = hasFreshAudit && auditSummary.eligible > 0 && !auditLoading && !isGenerating;
+
   // Derived filter period for biweekly summary — shows "Jul 1–15, 2026" not raw date
   const filterPeriod = useMemo(() => {
     if (filterFrequency === 'biweekly') {
@@ -796,14 +853,17 @@ function MonthlyInvoicesContent() {
           </div>
 
           <div className="border-t border-emerald-100/50 pt-5 mt-5">
-            <p className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3">Generate Invoices</p>
+            <p className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3">Step 1 — Select Billing Scope</p>
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
               {/* Billing Cycle */}
               <label className="block">
                 <span className="text-xs font-bold uppercase tracking-wider text-emerald-800">Billing Cycle</span>
                 <select
                   value={genFrequency}
-                  onChange={(e) => setGenFrequency(e.target.value as any)}
+                  onChange={(e) => {
+                    setGenFrequency(e.target.value as any);
+                    resetAuditForScopeChange();
+                  }}
                   className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none ring-emerald-600 focus:ring-2"
                 >
                   <option value="daily">Daily</option>
@@ -824,9 +884,11 @@ function MonthlyInvoicesContent() {
                 <input
                   type={genFrequency === 'monthly' ? 'month' : 'date'}
                   value={genFrequency === 'monthly' ? genMonth : genDate}
-                  onChange={(e) =>
-                    genFrequency === 'monthly' ? setGenMonth(e.target.value) : setGenDate(e.target.value)
-                  }
+                  onChange={(e) => {
+                    if (genFrequency === 'monthly') setGenMonth(e.target.value);
+                    else setGenDate(e.target.value);
+                    resetAuditForScopeChange();
+                  }}
                   className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none ring-emerald-600 focus:ring-2"
                 />
                 {/* Always show derived period range so user sees Jul 1–15 not raw date */}
@@ -845,7 +907,10 @@ function MonthlyInvoicesContent() {
                 <span className="text-xs font-bold uppercase tracking-wider text-emerald-800">Generate For</span>
                 <select
                   value={genLocationId}
-                  onChange={(e) => setGenLocationId(e.target.value)}
+                  onChange={(e) => {
+                    setGenLocationId(e.target.value);
+                    resetAuditForScopeChange();
+                  }}
                   className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none ring-emerald-600 focus:ring-2"
                 >
                   <option value="all">All Locations</option>
@@ -858,23 +923,52 @@ function MonthlyInvoicesContent() {
               {/* Actions */}
               <div className="flex flex-col gap-2 justify-end">
                 <button
-                  onClick={handleGenerate}
-                  disabled={isGenerating}
-                  className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-800 disabled:opacity-60"
-                >
-                  {isGenerating ? <Loader2 className="h-4 w-4 animate-spin" /> : <ReceiptText className="h-4 w-4" />}
-                  {isGenerating ? "Generating..." : `Generate ${genFrequency.charAt(0).toUpperCase() + genFrequency.slice(1)}`}
-                </button>
-                <button
                   onClick={handleRunAudit}
                   disabled={auditLoading}
-                  className="inline-flex min-h-9 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-60"
+                  className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-emerald-200 bg-white px-4 text-sm font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-60"
                 >
-                  {auditLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
-                  Eligibility Audit
+                  {auditLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+                  Step 2 — Preview Billable Requisitions
+                </button>
+                <button
+                  onClick={handleGenerate}
+                  disabled={!canGenerateFromPreview}
+                  className="inline-flex min-h-9 items-center justify-center gap-2 rounded-lg bg-emerald-700 px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isGenerating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ReceiptText className="h-3.5 w-3.5" />}
+                  Step 4 — Generate Draft Invoice
                 </button>
               </div>
             </div>
+            <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <div className="rounded-xl border border-slate-200 bg-white p-3">
+                <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Selected Period</p>
+                <p className="mt-1 text-sm font-semibold text-slate-900">{genPeriodLabel}</p>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-white p-3">
+                <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Selected Location</p>
+                <p className="mt-1 text-sm font-semibold text-slate-900">
+                  {selectedGenLocationFilter ? locationNameById.get(selectedGenLocationFilter) ?? selectedGenLocationFilter : "All Locations"}
+                </p>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-white p-3">
+                <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Preview Status</p>
+                <p className={`mt-1 text-sm font-semibold ${hasFreshAudit ? "text-emerald-700" : "text-amber-700"}`}>
+                  {hasFreshAudit ? `${auditSummary.eligible} eligible of ${auditSummary.reviewed} reviewed` : "Run preview before generating"}
+                </p>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-white p-3">
+                <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Estimated Total</p>
+                <p className="mt-1 text-sm font-semibold text-slate-900">
+                  {money(auditSummary.subtotal)} + HST {money(auditSummary.hst)} = {money(auditSummary.total)}
+                </p>
+              </div>
+            </div>
+            {!canGenerateFromPreview && (
+              <p className="mt-3 text-xs font-medium text-amber-700">
+                Generate is locked until Step 2 returns at least one eligible requisition for the exact selected period and location.
+              </p>
+            )}
           </div>
         </section>
 
@@ -916,7 +1010,7 @@ function MonthlyInvoicesContent() {
           <section className="rounded-2xl border border-amber-200 bg-amber-50/40 p-5 space-y-4">
             <div className="flex items-center justify-between">
               <div>
-                <h2 className="text-base font-semibold text-amber-900">Invoice Eligibility Audit</h2>
+                <h2 className="text-base font-semibold text-amber-900">Step 2 / Step 3 — Preview and Detail Audit</h2>
                 <p className="text-xs text-amber-700 mt-0.5">
                   {genFrequency.charAt(0).toUpperCase() + genFrequency.slice(1)} · {genPeriodLabel}
                   {selectedGenLocationFilter ? ` · ${locationNameById.get(selectedGenLocationFilter) ?? selectedGenLocationFilter}` : " · All Locations"}
@@ -940,7 +1034,36 @@ function MonthlyInvoicesContent() {
               </div>
             )}
             {!auditLoading && !auditError && (
-              <EligibilityAuditTable rows={auditRows} targetIds={JUNE_TARGET_IDS} />
+              <>
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                  {[
+                    ["Requisitions reviewed", auditSummary.reviewed],
+                    ["Eligible fulfilled requisitions", auditSummary.eligible],
+                    ["Partial fulfilled included", auditSummary.partialIncluded],
+                    ["Already invoiced excluded", auditSummary.alreadyInvoicedExcluded],
+                    ["Local vendor excluded", auditSummary.localVendorExcluded],
+                    ["No fulfilled qty excluded", auditSummary.noFulfilledQtyExcluded],
+                    ["Cancelled/rejected excluded", auditSummary.cancelledRejectedExcluded],
+                    ["Estimated total", money(auditSummary.total)],
+                  ].map(([label, value]) => (
+                    <div key={label} className="rounded-xl border border-amber-100 bg-white p-3 shadow-sm">
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">{label}</p>
+                      <p className="mt-1 text-lg font-semibold text-slate-900">{value}</p>
+                    </div>
+                  ))}
+                </div>
+                <div className="rounded-xl border border-emerald-100 bg-white p-4 text-sm text-slate-700">
+                  <div className="flex flex-wrap gap-x-6 gap-y-2">
+                    <span><strong>Estimated subtotal:</strong> {money(auditSummary.subtotal)}</span>
+                    <span><strong>Estimated HST:</strong> {money(auditSummary.hst)}</span>
+                    <span><strong>Estimated total:</strong> {money(auditSummary.total)}</span>
+                  </div>
+                  <p className="mt-2 text-xs text-slate-500">
+                    This preview is generated by the same shared candidate source used by invoice generation.
+                  </p>
+                </div>
+                <EligibilityAuditTable rows={auditRows} />
+              </>
             )}
           </section>
         )}
@@ -1228,7 +1351,8 @@ function MonthlyInvoicesContent() {
                         <tr>
                           <th className="px-3 py-2 text-left">Item</th>
                           <th className="px-3 py-2 text-left">Requisition</th>
-                          <th className="px-3 py-2 text-right">Qty</th>
+                          <th className="px-3 py-2 text-right">Fulfilled Qty</th>
+                          <th className="px-3 py-2 text-left">Source</th>
                           <th className="px-3 py-2 text-right">Unit Price</th>
                           <th className="px-3 py-2 text-right">Line Total</th>
                         </tr>
@@ -1238,7 +1362,13 @@ function MonthlyInvoicesContent() {
                           <tr key={item.id}>
                             <td className="px-3 py-2 font-medium text-slate-800">{item.itemName}</td>
                             <td className="px-3 py-2 font-mono text-slate-500">{item.requisitionId ?? "—"}</td>
-                            <td className="px-3 py-2 text-right tabular-nums">{item.quantity}</td>
+                            <td className="px-3 py-2 text-right tabular-nums">
+                              {item.quantity}{item.unitSnapshot ? ` ${item.unitSnapshot}` : ""}
+                            </td>
+                            <td className="px-3 py-2 text-slate-500">
+                              {item.sourceTypeSnapshot ?? "hq_supplied"}
+                              {item.packQtySnapshot ? <div className="text-[10px] text-slate-400">Pack {item.packQtySnapshot}</div> : null}
+                            </td>
                             <td className="px-3 py-2 text-right tabular-nums">{money(item.unitPrice)}</td>
                             <td className="px-3 py-2 text-right tabular-nums font-semibold">{money(item.lineTotal)}</td>
                           </tr>
