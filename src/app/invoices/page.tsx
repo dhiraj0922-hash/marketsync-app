@@ -409,8 +409,14 @@ function EligibilityAuditTable({
                   <td className="px-3 py-2 text-right tabular-nums">{money(row.fulfilledValue)}</td>
                   <td className="px-3 py-2 font-mono text-[10px] text-slate-500">
                     {row.existingInvoiceNo ?? "—"}
-                    {row.existingInvStatus && (
-                      <div className="text-[9px] text-slate-400">{row.existingInvStatus}</div>
+                    {row.existingInvoiceNo && (
+                      <div className="mt-0.5 space-y-0.5 font-sans text-[9px] text-slate-400">
+                        {row.existingInvoiceCycle && <div className="capitalize">{row.existingInvoiceCycle}</div>}
+                        {row.existingInvoicePeriodStart && row.existingInvoicePeriodEnd && (
+                          <div>{formatPeriodFromDates(row.existingInvoicePeriodStart, row.existingInvoicePeriodEnd)}</div>
+                        )}
+                        {row.existingInvStatus && <div className="capitalize">{row.existingInvStatus}</div>}
+                      </div>
                     )}
                   </td>
                   <td className="px-3 py-2 text-slate-500 capitalize">{row.existingInvoiceCycle ?? "—"}</td>
@@ -636,6 +642,28 @@ function MonthlyInvoicesContent() {
     [invoiceItems]
   );
 
+  async function syncSummaryToGeneratorScope(locationId: string | null) {
+    setFilterFrequency(genFrequency);
+    if (genFrequency === "monthly") {
+      setFilterMonth(genMonth);
+    } else {
+      setFilterDate(genPeriod.periodStart);
+    }
+    setFilterLocationId(locationId ?? "all");
+    setIsLoading(true);
+    try {
+      const scopedInvoices = await loadInvoices({
+        month: genMonth,
+        date: genPeriod.periodStart,
+        locationId,
+        billingFrequency: genFrequency,
+      });
+      setInvoices(scopedInvoices);
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
   // ── Run audit ──────────────────────────────────────────────────────────────
   async function handleRunAudit() {
     // DIAGNOSTIC — confirm location UUID is being passed, not name/code/"all"
@@ -652,29 +680,33 @@ function MonthlyInvoicesContent() {
     setAuditLoading(true);
     setAuditError(null);
     setShowAudit(true);
-    const [result, overlapResult] = await Promise.all([
-      getInvoiceEligibilityAudit(
-        genFrequency,
-        genPeriod.periodStart,
-        genPeriod.periodEnd,
-        auditLocationId  // always null when 'all', UUID otherwise
-      ),
-      getInvoiceOverlapAudit(genPeriod.periodStart, genPeriod.periodEnd, auditLocationId),
-    ]);
-    setAuditLoading(false);
-    if (!result.success) {
-      setAuditError(result.error ?? 'Audit failed.');
-      setAuditScopeKey(null);
-      return;
+    try {
+      const [result, overlapResult] = await Promise.all([
+        getInvoiceEligibilityAudit(
+          genFrequency,
+          genPeriod.periodStart,
+          genPeriod.periodEnd,
+          auditLocationId  // always null when 'all', UUID otherwise
+        ),
+        getInvoiceOverlapAudit(genPeriod.periodStart, genPeriod.periodEnd, auditLocationId),
+      ]);
+      if (!result.success) {
+        setAuditError(result.error ?? 'Audit failed.');
+        setAuditScopeKey(null);
+        return;
+      }
+      if (!overlapResult.success) {
+        setAuditError(overlapResult.error ?? 'Overlap audit failed.');
+        setAuditScopeKey(null);
+        return;
+      }
+      setAuditRows(result.data ?? []);
+      setOverlapRows(overlapResult.data ?? []);
+      setAuditScopeKey(currentScopeKey);
+      await syncSummaryToGeneratorScope(auditLocationId);
+    } finally {
+      setAuditLoading(false);
     }
-    if (!overlapResult.success) {
-      setAuditError(overlapResult.error ?? 'Overlap audit failed.');
-      setAuditScopeKey(null);
-      return;
-    }
-    setAuditRows(result.data ?? []);
-    setOverlapRows(overlapResult.data ?? []);
-    setAuditScopeKey(currentScopeKey);
   }
 
   // ── Generate ───────────────────────────────────────────────────────────────
@@ -717,20 +749,7 @@ function MonthlyInvoicesContent() {
       setLastSummary(generated);
 
       if (generated.length > 0) {
-        // Sync summary filters to the generated period so invoices appear immediately
-        setFilterFrequency(genFrequency);
-        if (genFrequency === 'monthly') {
-          setFilterMonth(genMonth);
-        } else {
-          // For biweekly/daily: store the derived period start so filter loads correctly
-          setFilterDate(genPeriod.periodStart);
-        }
-        // If only one location was invoiced, auto-focus summary on that location
-        if (generated.length === 1) {
-          setFilterLocationId(generated[0].locationId);
-        } else {
-          setFilterLocationId(generateLocationId ?? 'all');
-        }
+        await syncSummaryToGeneratorScope(generated.length === 1 ? generated[0].locationId : generateLocationId);
         setNotice({
           type: 'success',
           message: `Generated ${generated.length} draft invoice${generated.length === 1 ? '' : 's'} for ${formatPeriodFromDates(genPeriod.periodStart, genPeriod.periodEnd)}.`,
@@ -744,7 +763,6 @@ function MonthlyInvoicesContent() {
         });
       }
 
-      await fetchInvoices();
       await handleRunAudit();
     } finally {
       setIsGenerating(false);
@@ -860,7 +878,21 @@ function MonthlyInvoicesContent() {
     };
   }, [overlapRows]);
 
+  const auditExistingInvoiceNumbers = useMemo(
+    () => Array.from(new Set(auditRows.map((row) => row.existingInvoiceNo).filter(Boolean))) as string[],
+    [auditRows]
+  );
+
+  const auditExistingInvoices = useMemo(() => {
+    const numbers = new Set(auditExistingInvoiceNumbers);
+    return invoices.filter((invoice) => numbers.has(invoice.invoiceNumber));
+  }, [auditExistingInvoiceNumbers, invoices]);
+
   const hasFreshAudit = auditScopeKey === currentScopeKey;
+  const allReviewedAlreadyInvoiced = hasFreshAudit
+    && auditSummary.reviewed > 0
+    && auditSummary.eligible === 0
+    && auditSummary.alreadyInvoicedExcluded === auditSummary.reviewed;
   const canGenerateFromPreview = hasFreshAudit && auditSummary.eligible > 0 && !auditLoading && !isGenerating;
 
   // Derived filter period for biweekly summary — shows "Jul 1–15, 2026" not raw date
@@ -997,8 +1029,16 @@ function MonthlyInvoicesContent() {
               <div className="rounded-xl border border-slate-200 bg-white p-3">
                 <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Preview Status</p>
                 <p className={`mt-1 text-sm font-semibold ${hasFreshAudit ? "text-emerald-700" : "text-amber-700"}`}>
-                  {hasFreshAudit ? `${auditSummary.eligible} eligible of ${auditSummary.reviewed} reviewed` : "Run preview before generating"}
+                  {hasFreshAudit
+                    ? `${auditSummary.reviewed} reviewed · ${auditSummary.eligible} new billable · ${auditSummary.alreadyInvoicedExcluded} already invoiced`
+                    : "Run preview before generating"}
                 </p>
+                {hasFreshAudit && auditExistingInvoiceNumbers.length > 0 && (
+                  <p className="mt-1 text-[11px] font-semibold text-slate-500">
+                    Existing invoice: {auditExistingInvoiceNumbers.slice(0, 2).join(", ")}
+                    {auditExistingInvoiceNumbers.length > 2 ? "..." : ""}
+                  </p>
+                )}
               </div>
               <div className="rounded-xl border border-slate-200 bg-white p-3">
                 <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Estimated Total</p>
@@ -1106,6 +1146,59 @@ function MonthlyInvoicesContent() {
                     This preview is generated by the same shared candidate source used by invoice generation.
                   </p>
                 </div>
+                {allReviewedAlreadyInvoiced && (
+                  <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
+                    <p className="font-semibold">No new invoice can be generated for this scope.</p>
+                    <p className="mt-1">
+                      All {auditSummary.reviewed} fulfilled requisition{auditSummary.reviewed === 1 ? "" : "s"} for{" "}
+                      {selectedGenLocationFilter ? locationNameById.get(selectedGenLocationFilter) ?? selectedGenLocationFilter : "the selected locations"} in{" "}
+                      {genPeriodLabel} {auditSummary.reviewed === 1 ? "is" : "are"} already included in:
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {auditExistingInvoiceNumbers.map((invoiceNo) => (
+                        <span key={invoiceNo} className="rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-bold text-blue-800">
+                          {invoiceNo}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {auditExistingInvoices.length > 0 && (
+                  <div className="space-y-3">
+                    {auditExistingInvoices.map((invoice) => (
+                      <div key={invoice.id} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                          <div>
+                            <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Existing invoice found</p>
+                            <p className="mt-1 text-lg font-semibold text-slate-950">{invoice.invoiceNumber}</p>
+                            <p className="mt-1 text-sm text-slate-600">
+                              <span className="capitalize">{invoice.billingFrequency}</span> · {formatPeriod(invoice)}
+                            </p>
+                            <p className="mt-1 text-sm text-slate-600">
+                              Subtotal {money(invoice.subtotal)} · HST {money(invoice.taxAmount)} · Total {money(invoice.totalAmount)}
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              onClick={() => setSelectedInvoice(invoice)}
+                              className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 text-xs font-semibold text-blue-700 hover:bg-blue-100"
+                            >
+                              <Eye className="h-3.5 w-3.5" /> View Invoice
+                            </button>
+                            <button
+                              onClick={() => handleDownloadPdf(invoice)}
+                              disabled={pdfLoadingId === invoice.id}
+                              className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                            >
+                              {pdfLoadingId === invoice.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                              Download PDF
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {overlapSummary.warnings.length > 0 && (
                   <div className={`rounded-xl border p-4 text-sm ${
                     overlapSummary.critical.length > 0
