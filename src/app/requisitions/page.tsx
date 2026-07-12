@@ -124,6 +124,101 @@ function buildLocalDateTime(dateValue: string, timeValue: string, fallbackTime: 
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+function to12HourParts(timeValue: string): { hour: string; minute: string; period: "AM" | "PM" } {
+  const [rawHour = "0", rawMinute = "00"] = (timeValue || "00:00").split(":");
+  const hour24 = Number(rawHour);
+  const minute = String(Number(rawMinute) || 0).padStart(2, "0");
+  const period = hour24 >= 12 ? "PM" : "AM";
+  const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
+  return { hour: String(hour12), minute, period };
+}
+
+function to24HourTime(hourValue: string, minuteValue: string, period: "AM" | "PM"): string {
+  let hour = Number(hourValue);
+  if (!Number.isFinite(hour) || hour < 1 || hour > 12) hour = 12;
+  const minute = String(Number(minuteValue) || 0).padStart(2, "0");
+  let hour24 = hour % 12;
+  if (period === "PM") hour24 += 12;
+  return `${String(hour24).padStart(2, "0")}:${minute}`;
+}
+
+function formatFilterDateTime(dateValue: string, timeValue: string, fallbackTime: string): string {
+  const date = buildLocalDateTime(dateValue, timeValue, fallbackTime);
+  if (!date) return "";
+  return date.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function Time12HourPicker({
+  value,
+  onChange,
+  onCustom,
+  label,
+}: {
+  value: string;
+  onChange: (nextValue: string) => void;
+  onCustom: () => void;
+  label: string;
+}) {
+  const parts = to12HourParts(value);
+  const baseMinuteOptions = ["00", "15", "30", "45"];
+  const minuteOptions = baseMinuteOptions.includes(parts.minute)
+    ? baseMinuteOptions
+    : [...baseMinuteOptions, parts.minute].sort((a, b) => Number(a) - Number(b));
+
+  const selectClass = "rounded-lg border border-white/10 bg-[#171717] px-2 py-2 text-sm font-medium text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500";
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span className="sr-only">{label}</span>
+      <select
+        aria-label={`${label} hour`}
+        value={parts.hour}
+        onChange={(e) => {
+          onCustom();
+          onChange(to24HourTime(e.target.value, parts.minute, parts.period));
+        }}
+        className={`${selectClass} w-[64px]`}
+      >
+        {Array.from({ length: 12 }, (_, index) => String(index + 1)).map((hour) => (
+          <option key={hour} value={hour}>{hour}</option>
+        ))}
+      </select>
+      <span className="text-zinc-500">:</span>
+      <select
+        aria-label={`${label} minute`}
+        value={parts.minute}
+        onChange={(e) => {
+          onCustom();
+          onChange(to24HourTime(parts.hour, e.target.value, parts.period));
+        }}
+        className={`${selectClass} w-[70px]`}
+      >
+        {minuteOptions.map((minute) => (
+          <option key={minute} value={minute}>{minute}</option>
+        ))}
+      </select>
+      <select
+        aria-label={`${label} AM or PM`}
+        value={parts.period}
+        onChange={(e) => {
+          onCustom();
+          onChange(to24HourTime(parts.hour, parts.minute, e.target.value as "AM" | "PM"));
+        }}
+        className={`${selectClass} w-[76px]`}
+      >
+        <option value="AM">AM</option>
+        <option value="PM">PM</option>
+      </select>
+    </div>
+  );
+}
+
 const stockIqDarkShellCss = `
   body .flex.bg-neutral-50.text-neutral-900.min-h-screen {
     background: #070707 !important;
@@ -2089,6 +2184,10 @@ function HQAdminView({
 
   const fromDateTime = buildLocalDateTime(filterFromDate, filterFromTime, "00:00");
   const toDateTime = buildLocalDateTime(filterToDate, filterToTime, "23:59");
+  const hasDateTimeWindow = Boolean(filterFromDate || filterToDate);
+  const activeDateTimeSummary = hasDateTimeWindow
+    ? `Showing requisitions from ${filterFromDate ? formatFilterDateTime(filterFromDate, filterFromTime, "00:00") : "the beginning"} to ${filterToDate ? formatFilterDateTime(filterToDate, filterToTime, "23:59") : "now"}`
+    : "";
 
   const filteredReqs = requisitions.filter((r) => {
     // ── Status ────────────────────────────────────────────────────────────────
@@ -2675,36 +2774,36 @@ function HQAdminView({
                   <option value="last24">Last 24 hours</option>
                   <option value="nextDay">Next-day fulfillment window</option>
                 </select>
-                <label className="flex flex-wrap items-center gap-1.5 text-xs font-medium text-zinc-500">
-                  From:
+                <div className="flex flex-col gap-1.5 rounded-xl border border-white/10 bg-[#121212] p-2 text-xs font-medium text-zinc-500 sm:flex-row sm:items-center">
+                  <span className="min-w-[38px] font-semibold text-zinc-400">From:</span>
                   <input
                     type="date"
                     value={filterFromDate}
                     onChange={(e) => { setFilterDatePreset("custom"); setFilterFromDate(e.target.value); }}
                     className="rounded-lg border border-white/10 bg-[#171717] px-2 py-2 text-sm text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500"
                   />
-                  <input
-                    type="time"
-                    value={filterFromTime}
-                    onChange={(e) => { setFilterDatePreset("custom"); setFilterFromTime(e.target.value); }}
-                    className="rounded-lg border border-white/10 bg-[#171717] px-2 py-2 text-sm text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500"
+                  <Time12HourPicker
+                    label="From time"
+                    value={filterFromTime || "00:00"}
+                    onChange={setFilterFromTime}
+                    onCustom={() => setFilterDatePreset("custom")}
                   />
-                </label>
-                <label className="flex flex-wrap items-center gap-1.5 text-xs font-medium text-zinc-500">
-                  To:
+                </div>
+                <div className="flex flex-col gap-1.5 rounded-xl border border-white/10 bg-[#121212] p-2 text-xs font-medium text-zinc-500 sm:flex-row sm:items-center">
+                  <span className="min-w-[38px] font-semibold text-zinc-400">To:</span>
                   <input
                     type="date"
                     value={filterToDate}
                     onChange={(e) => { setFilterDatePreset("custom"); setFilterToDate(e.target.value); }}
                     className="rounded-lg border border-white/10 bg-[#171717] px-2 py-2 text-sm text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500"
                   />
-                  <input
-                    type="time"
-                    value={filterToTime}
-                    onChange={(e) => { setFilterDatePreset("custom"); setFilterToTime(e.target.value); }}
-                    className="rounded-lg border border-white/10 bg-[#171717] px-2 py-2 text-sm text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500"
+                  <Time12HourPicker
+                    label="To time"
+                    value={filterToTime || "23:59"}
+                    onChange={setFilterToTime}
+                    onCustom={() => setFilterDatePreset("custom")}
                   />
-                </label>
+                </div>
                 {(filterStatus !== "all" || filterLocation !== "All" || filterFromDate || filterFromTime || filterToDate || filterToTime || filterDatePreset !== "custom" || searchQuery) && (
                   <button onClick={() => {
                     setFilterStatus("all");
@@ -2721,6 +2820,11 @@ function HQAdminView({
                   </button>
                 )}
               </div>
+              {activeDateTimeSummary && (
+                <div className="mt-3 rounded-lg border border-blue-500/20 bg-blue-500/10 px-3 py-2 text-xs font-semibold text-blue-200">
+                  {activeDateTimeSummary}
+                </div>
+              )}
             </CardHeader>
             <CardContent className="p-0">
               <Table>
