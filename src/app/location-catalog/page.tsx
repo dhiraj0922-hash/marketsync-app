@@ -26,7 +26,7 @@ function SrcBadge({ src }: { src: "hq_supplied" | "local_vendor" }) {
 
 const EMPTY_FORM: OutletCatalogItem = {
   itemId: "", name: "", category: "", uom: "", type: "Inventory item",
-  sourceType: "local_vendor", hqSaleItemId: null,
+  sourceType: "local_vendor", hqSaleItemId: null, hqInventoryItemId: null,
   supplier: "", supplierId: null,
   purchaseOption: null, productCode: null, scanBarcode: null,
   price: 0, taxRate: 0, packQty: 1, orderingEnabled: true,
@@ -113,6 +113,7 @@ function LocationCatalogContent() {
       itemId: item.itemId, name: item.name, category: item.category ?? "",
       uom: item.uom ?? "", type: item.type, sourceType: item.sourceType,
       hqSaleItemId: item.hqSaleItemId,
+      hqInventoryItemId: item.hqInventoryItemId ?? null,
       supplier: item.supplier ?? "", supplierId: item.supplierId ?? null,
       purchaseOption: item.purchaseOption, productCode: item.productCode,
       scanBarcode: item.scanBarcode, price: item.price, taxRate: item.taxRate,
@@ -126,6 +127,19 @@ function LocationCatalogContent() {
   const handleSave = async () => {
     if (!form.name.trim()) { setFormErr("Item name is required."); return; }
     if (!form.itemId.trim()) { setFormErr("Item ID is required."); return; }
+    // XOR validation for hq_supplied items
+    if (form.sourceType === 'hq_supplied') {
+      const hasFg  = !!(form.hqSaleItemId?.trim());
+      const hasInv = !!(form.hqInventoryItemId?.trim());
+      if (!hasFg && !hasInv) {
+        setFormErr('HQ Supplied items must have either an HQ Finished Good (hq_sale_item_id) or an HQ Inventory Item ID (hq_inventory_item_id). Set one.');
+        return;
+      }
+      if (hasFg && hasInv) {
+        setFormErr('Cannot set both HQ Finished Good and HQ Inventory Item ID. Choose one: finished good OR raw inventory.');
+        return;
+      }
+    }
     setSaving(true);
     const res = await upsertOutletCatalogItem(form);
     setSaving(false);
@@ -303,6 +317,7 @@ function LocationCatalogContent() {
           type:           String(r["Type"] ?? "Inventory item").trim() || "Inventory item",
           sourceType:     "local_vendor" as const,
           hqSaleItemId:   null,
+          hqInventoryItemId: null,
           supplier:       supplierRaw,
           supplierId:     suppId,
           purchaseOption: null,
@@ -374,8 +389,11 @@ function LocationCatalogContent() {
       <div className="flex items-start gap-2 bg-blue-50 border border-blue-200 rounded-lg px-4 py-2.5 text-xs text-blue-800">
         <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-blue-600" />
         <span>
-          <strong>Location Catalog is independent of HQ Inventory.</strong> HQ Supplied items link to HQ Finished Goods via hq_sale_item_id.
-          Local Vendor items have no connection to HQ Inventory. Changes here never affect <code>inventory_items</code>.
+          <strong>Location Catalog item types:</strong>{" "}
+          <strong className="text-violet-700">HQ Supplied / Finished Good</strong> — links to <code>hq_sale_items</code> via <code>hq_sale_item_id</code>. Stock deducted from finished-good inventory.{" "}
+          <strong className="text-violet-700">HQ Supplied / Raw Inventory</strong> — links to <code>inventory_items</code> (LOC-HQ row) via <code>hq_inventory_item_id</code>. Stock deducted from LOC-HQ raw inventory.{" "}
+          <strong className="text-teal-700">Local Vendor</strong> — no HQ link; outlet purchases directly.
+          Changes here never affect <code>inventory_items</code> directly.
         </span>
       </div>
 
@@ -664,7 +682,13 @@ function LocationCatalogContent() {
                 <div className="flex gap-2">
                   {(["local_vendor", "hq_supplied"] as const).map(src => (
                     <button key={src} type="button"
-                      onClick={() => setForm(prev => ({ ...prev, sourceType: src, hqSaleItemId: src === "local_vendor" ? null : prev.hqSaleItemId }))}
+                      onClick={() => setForm(prev => ({
+                        ...prev,
+                        sourceType: src,
+                        // Clear both HQ links when switching to local_vendor
+                        hqSaleItemId:      src === "local_vendor" ? null : prev.hqSaleItemId,
+                        hqInventoryItemId: src === "local_vendor" ? null : prev.hqInventoryItemId,
+                      }))}
                       className={`flex-1 py-2 text-xs font-semibold rounded-lg border transition-colors ${form.sourceType === src ? (src === "hq_supplied" ? "bg-violet-600 text-white border-violet-600" : "bg-teal-600 text-white border-teal-600") : "bg-white border-neutral-200 text-neutral-600 hover:bg-neutral-50"}`}>
                       {src === "hq_supplied" ? "HQ Supplied" : "Local Vendor"}
                     </button>
@@ -672,25 +696,56 @@ function LocationCatalogContent() {
                 </div>
               </div>
 
-              {/* If HQ supplied — seed from sale items */}
+              {/* If HQ supplied — choose link type: finished good OR raw inventory */}
               {form.sourceType === "hq_supplied" && (
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-neutral-600 uppercase tracking-wider">Seed from HQ Finished Good</label>
-                  <select
-                     value={form.hqSaleItemId ?? ""}
-                     onChange={e => {
-                       const si = saleItems.find(s => s.id === e.target.value);
-                       if (si) seedFromHQ(si);
-                       else setForm(prev => ({ ...prev, hqSaleItemId: e.target.value || null }));
-                     }}
-                     className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500">
-                     <option value="">Select HQ finished good…</option>
-                     {saleItems.filter(s => s.isActive && s.isRequisitionable).map(s => (
-                       <option key={s.id} value={s.id}>{s.name} ({s.baseUnit})</option>
-                     ))}
-                   </select>
-                   <p className="text-[11px] text-neutral-400">Selecting auto-fills name, category, UOM, price from hq_sale_items. Does not create a live link.</p>
-                </div>
+                <>
+                  {/* Option A: Finished Good link */}
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-neutral-600 uppercase tracking-wider">HQ Finished Good Link</label>
+                    <select
+                       value={form.hqSaleItemId ?? ""}
+                       onChange={e => {
+                         const si = saleItems.find(s => s.id === e.target.value);
+                         if (si) {
+                           // seedFromHQ fills name/category/uom/price AND sets hqSaleItemId
+                           seedFromHQ(si);
+                           // Clear raw inventory link (XOR)
+                           setForm(prev => ({ ...prev, hqInventoryItemId: null }));
+                         } else {
+                           setForm(prev => ({ ...prev, hqSaleItemId: e.target.value || null }));
+                         }
+                       }}
+                       className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500">
+                       <option value="">— None (leave blank for raw inventory items) —</option>
+                       {saleItems.filter(s => s.isActive && s.isRequisitionable).map(s => (
+                         <option key={s.id} value={s.id}>{s.name} ({s.baseUnit})</option>
+                       ))}
+                     </select>
+                     <p className="text-[11px] text-neutral-400">Set for Finished Goods only (e.g. VEG PUFF, Chocolate Pastry). Auto-fills name/UOM/price. Mutually exclusive with HQ Inventory Item ID below.</p>
+                  </div>
+
+                  {/* Option B: HQ raw inventory link */}
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-neutral-600 uppercase tracking-wider">HQ Inventory Item ID</label>
+                    <input
+                      type="text"
+                      value={form.hqInventoryItemId ?? ""}
+                      onChange={e => setForm(prev => ({
+                        ...prev,
+                        hqInventoryItemId: e.target.value.trim() || null,
+                        // Selecting raw inventory link clears FG link (XOR)
+                        hqSaleItemId: e.target.value.trim() ? null : prev.hqSaleItemId,
+                      }))}
+                      placeholder="inventory_items.id at LOC-HQ (TEXT)"
+                      className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-neutral-50 focus:outline-none focus:ring-1 focus:ring-brand-500 font-mono text-xs"
+                    />
+                    <p className="text-[11px] text-neutral-400">
+                      Set for HQ raw inventory items only (e.g. SALT, GINGER CS). Paste the <code>inventory_items.id</code> TEXT value of the LOC-HQ row.
+                      At order time this is saved to <code>requisition_items.item_id</code> so HQ fulfillment deducts LOC-HQ stock.
+                      Mutually exclusive with HQ Finished Good above.
+                    </p>
+                  </div>
+                </>
               )}
 
               {fld("itemId", "Item ID", "text", editing ? "Cannot change ID after creation." : "Auto-generated. Change only if needed.")}
