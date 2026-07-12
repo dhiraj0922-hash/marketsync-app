@@ -44,14 +44,14 @@ export function Drawer({ isOpen, onClose, title, description, children, footer, 
     return createPortal(
       // Dialog backdrop — centered, max-height constrained
       <div
-        className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-black/50 backdrop-blur-[2px] animate-in fade-in duration-200 p-4"
+        className="fixed inset-0 z-[100] flex items-stretch justify-center overflow-y-auto bg-black/50 backdrop-blur-[2px] animate-in fade-in duration-200 p-0 md:items-center md:p-4"
         onClick={onClose}
       >
         <div
           className={cn(
-            "relative flex w-full max-w-[1100px] flex-col overflow-hidden rounded-xl bg-white shadow-2xl",
+            "relative flex h-[100dvh] max-h-[100dvh] w-full max-w-[1100px] flex-col overflow-hidden rounded-none bg-white shadow-2xl md:h-auto md:rounded-xl",
             "border border-neutral-200",
-            "max-h-[85vh]",
+            "md:max-h-[85vh]",
             "animate-in zoom-in-95 duration-200"
           )}
           onClick={(e) => e.stopPropagation()}
@@ -71,13 +71,18 @@ export function Drawer({ isOpen, onClose, title, description, children, footer, 
           </div>
 
           {/* Scrollable body */}
-          <div className="flex-1 overflow-y-auto bg-neutral-50 p-3 sm:p-4 text-neutral-600 min-h-0">
+          <div className="flex-1 overflow-y-auto bg-neutral-50 p-3 pb-[max(1rem,env(safe-area-inset-bottom))] text-neutral-600 min-h-0 sm:p-4">
             {children}
+            {footer && (
+              <div className="mt-4 border-t border-neutral-100 bg-white px-3 py-3 pb-[max(1rem,env(safe-area-inset-bottom))] md:hidden">
+                {footer}
+              </div>
+            )}
           </div>
 
-          {/* Sticky footer */}
+          {/* Desktop/tablet footer. Mobile footer lives in scroll flow above. */}
           {footer && (
-            <div className="px-4 sm:px-5 py-3 border-t border-neutral-100 bg-white shrink-0 w-full">
+            <div className="hidden px-4 sm:px-5 py-3 border-t border-neutral-100 bg-white shrink-0 w-full md:block">
               {footer}
             </div>
           )}

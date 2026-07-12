@@ -2936,7 +2936,7 @@ function HQAdminView({
             title={`Requisition ${selectedReq?.id}`}
             description={`Submitted by ${selectedReq?.requestedBy || selectedReq?.requestedby || "—"} from ${selectedReq?.location} on ${selectedReq?.date}`}
             footer={
-              <div className="w-full flex flex-col gap-2">
+              <div className="w-full flex flex-col gap-3 pb-[max(0rem,env(safe-area-inset-bottom))]">
                 {(() => {
                   const status = (selectedReq?.status ?? "").toLowerCase();
                   if (!isFulfillmentLocked && !["fulfilled", "partial", "backordered"].includes(status)) return null;
@@ -2955,28 +2955,28 @@ function HQAdminView({
                     return sum + qty * Number(li.unitPrice ?? 0);
                   }, 0);
                   return (
-                    <div className="flex items-center gap-3 bg-neutral-50 border border-neutral-200 rounded-lg px-4 py-2.5">
+                    <div className="flex flex-col gap-2 bg-neutral-50 border border-neutral-200 rounded-lg px-4 py-3 md:flex-row md:items-center md:gap-3 md:py-2.5">
                       <StatusBadge status={finalStatus} />
                       <span className="text-sm text-neutral-600">Fulfillment finalized</span>
-                      <span className="ml-auto text-sm font-bold text-success-700">${fulfilledVal.toFixed(2)} supplied</span>
+                      <span className="text-sm font-bold text-success-700 md:ml-auto">${fulfilledVal.toFixed(2)} supplied</span>
                     </div>
                   );
                 })()}
-                <div className="flex items-center justify-between w-full border-t border-neutral-200 pt-4 mt-2">
-                  <div className="flex flex-col">
+                <div className="flex w-full flex-col gap-3 border-t border-neutral-200 pt-4 mt-1 md:flex-row md:items-center md:justify-between">
+                  <div className="flex flex-col rounded-lg bg-neutral-50 px-3 py-2 md:bg-transparent md:px-0 md:py-0">
                     <span className="text-xs font-semibold uppercase text-neutral-500 tracking-wider">Value Supplied</span>
-                    <span className="text-xl font-bold text-success-600 flex items-center gap-1">
+                    <span className="text-xl font-bold text-success-600 flex flex-wrap items-center gap-1">
                       <CircleDollarSign className="h-5 w-5" />
                       {selectedReq ? getReqValue(selectedReq).toFixed(2) : "0.00"}
                       <span className="text-sm font-medium text-neutral-400">/ ${selectedReq ? getReqRequestedValue(selectedReq).toFixed(2) : "0.00"}</span>
                     </span>
                   </div>
-                  <div className="flex items-center gap-3">
+                  <div className="flex w-full flex-col gap-2 md:w-auto md:flex-row md:items-center md:gap-3">
                     {/* Print Requisition — all print-allowed roles, any status */}
                     {canPrintRequisition(profile) && selectedReq && (
                       <button
                         onClick={() => window.open(`/requisitions/${selectedReq.id}/print`, '_blank', 'noopener,noreferrer')}
-                        className="px-4 py-2 text-sm font-medium bg-white border border-zinc-200 text-zinc-700 rounded-lg hover:bg-zinc-50 transition-colors shadow-sm flex items-center gap-2"
+                        className="order-2 flex min-h-11 w-full items-center justify-center gap-2 rounded-lg border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-700 shadow-sm transition-colors hover:bg-zinc-50 md:order-none md:w-auto"
                       >
                         <Printer className="h-4 w-4" /> Print Requisition
                       </button>
@@ -2987,7 +2987,7 @@ function HQAdminView({
                       <button
                         onClick={handleDeliveryTicketAction}
                         disabled={deliveryTicketLoading || dtLoading}
-                        className="px-4 py-2 text-sm font-medium bg-white border border-brand-200 text-brand-700 rounded-lg hover:bg-brand-50 transition-colors shadow-sm flex items-center gap-2 disabled:opacity-50"
+                        className="order-1 flex min-h-11 w-full items-center justify-center gap-2 rounded-lg border border-brand-200 bg-white px-4 py-2 text-sm font-medium text-brand-700 shadow-sm transition-colors hover:bg-brand-50 disabled:opacity-50 md:order-none md:w-auto"
                       >
                         <Truck className="h-4 w-4" />
                         {(deliveryTicketLoading || dtLoading)
@@ -3024,7 +3024,7 @@ function HQAdminView({
                       // Unknown/null source_type is treated as HQ (safe default).
                       if (isFF && allLv) {
                         return (
-                          <div className="px-3 py-1.5 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg">
+                          <div className="w-full px-3 py-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg md:w-auto">
                             Local-vendor requisition — HQ approval not required.
                           </div>
                         );
@@ -3033,7 +3033,7 @@ function HQAdminView({
                       return (
                         <>
                           {isMixed && (
-                            <div className="px-3 py-1.5 text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded-lg">
+                            <div className="w-full px-3 py-2 text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded-lg md:w-auto">
                               Mixed requisition — HQ items require HQ fulfillment; local-vendor items are excluded from HQ approval.
                             </div>
                           )}
@@ -3043,7 +3043,7 @@ function HQAdminView({
                               setRejectionReason("");
                             }}
                             disabled={rejectActionLoading || approveActionLoading}
-                            className="px-4 py-2 text-sm font-medium bg-white border border-danger-200 text-danger-700 rounded-lg hover:bg-danger-50 transition-colors shadow-sm flex items-center gap-2 disabled:opacity-50"
+                            className="order-3 flex min-h-11 w-full items-center justify-center gap-2 rounded-lg border border-danger-200 bg-white px-4 py-2 text-sm font-medium text-danger-700 shadow-sm transition-colors hover:bg-danger-50 disabled:opacity-50 md:order-none md:w-auto"
                           >
                             <XSquare className="h-4 w-4" /> Reject
                           </button>
@@ -3075,7 +3075,7 @@ function HQAdminView({
                               }
                             }}
                             disabled={approveActionLoading || rejectActionLoading}
-                            className="px-4 py-2 text-sm font-medium bg-brand-600 text-white rounded-lg hover:bg-brand-700 transition-colors shadow-sm flex items-center gap-2 disabled:opacity-50"
+                            className="order-4 flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-brand-700 disabled:opacity-50 md:order-none md:w-auto"
                           >
                             {approveActionLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
                             {approveActionLoading ? 'Approving...' : 'Approve'}
@@ -3085,7 +3085,7 @@ function HQAdminView({
                     })()}
                     {/* hq_fulfillment: read-only notice replaces Complete Fulfillment */}
                     {!canCompleteFulfillment && selectedReq && FULFILLABLE_STATUSES.has((selectedReq.status ?? "").toLowerCase()) && (
-                      <div className="flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+                      <div className="flex min-h-11 w-full items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800 md:w-auto">
                         <Info className="h-4 w-4 shrink-0" />
                         Fulfillment review only — contact hq_admin or hq_ops to complete this fulfillment.
                       </div>
@@ -3276,7 +3276,7 @@ function HQAdminView({
                             setIsFulfillmentLoading(false);
                           }
                         }}
-                        className="px-4 py-2 text-sm font-semibold bg-success-600 text-white rounded-lg hover:bg-success-700 disabled:opacity-50 transition-colors shadow-sm flex items-center gap-2"
+                        className="order-4 flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-success-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-success-700 disabled:opacity-50 md:order-none md:w-auto"
                       >
                         {isFulfillmentLoading ? (
                           <>
@@ -3293,7 +3293,7 @@ function HQAdminView({
                     })()}
                     {/* Completed badge — finalized requisitions */}
                     {selectedReq && ["fulfilled", "partially_fulfilled", "backordered"].includes((selectedReq.status ?? "").toLowerCase()) && (
-                      <span className="px-4 py-2 text-sm font-semibold text-success-700 flex items-center gap-2">
+                      <span className="order-4 flex min-h-11 w-full items-center justify-center gap-2 rounded-lg border border-success-200 bg-success-50 px-4 py-2 text-sm font-semibold text-success-700 md:order-none md:w-auto">
                         <CheckCircle2 className="h-4 w-4" /> Finalized ({(selectedReq.status ?? "").replace(/_/g, " ")})
                       </span>
                     )}
