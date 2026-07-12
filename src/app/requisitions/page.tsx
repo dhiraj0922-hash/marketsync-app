@@ -405,6 +405,44 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+function normalizeRequisitionStatus(status: unknown): string {
+  const raw = String(status ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_")
+    .replace(/-/g, "_");
+
+  if (raw === "partially_fulfilled" || raw === "partial_fulfilled" || raw === "partial") return "partial";
+  if (raw === "backorder" || raw === "back_ordered" || raw === "backordered") return "backordered";
+  if (raw === "submitted") return "submitted";
+  if (raw === "approved") return "approved";
+  if (raw === "fulfilled") return "fulfilled";
+  if (raw === "rejected") return "rejected";
+  if (raw === "draft") return "draft";
+  return raw;
+}
+
+function getRequisitionStatusBuckets(req: any, items?: any[] | null): Set<string> {
+  const buckets = new Set<string>();
+  const rawStatus = normalizeRequisitionStatus(req?.status);
+  if (rawStatus) buckets.add(rawStatus);
+  if (rawStatus === "partial") buckets.add("backordered");
+
+  if (items?.length) {
+    const anyFulfilled = items.some((li: any) => Number(li.quantityFulfilled ?? li.quantity_fulfilled ?? 0) > 0);
+    const allFulfilled = items.every((li: any) =>
+      Number(li.quantityFulfilled ?? li.quantity_fulfilled ?? 0) >= Number(li.quantityRequested ?? li.quantity_requested ?? 0)
+    );
+    const anyBackorder = items.some((li: any) => Number(li.backorderQty ?? li.backorder_qty ?? 0) > 0);
+
+    if (anyBackorder) buckets.add("backordered");
+    if (anyFulfilled && !allFulfilled) buckets.add("partial");
+    if (allFulfilled && anyFulfilled) buckets.add("fulfilled");
+  }
+
+  return buckets;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // LOCATION MANAGER VIEW
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -594,7 +632,7 @@ function LocationManagerView({
   }, [selectedReq]);
 
   const filtered = requisitions.filter((r) => {
-    if (filterStatus !== "all" && String(r.status || "").toLowerCase() !== filterStatus) return false;
+    if (filterStatus !== "all" && !getRequisitionStatusBuckets(r).has(normalizeRequisitionStatus(filterStatus))) return false;
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
       if (!String(r.id).toLowerCase().includes(q) && !String(r.notes || "").toLowerCase().includes(q)) return false;
@@ -2374,7 +2412,10 @@ function HQAdminView({
 
   const filteredReqs = requisitions.filter((r) => {
     // ── Status ────────────────────────────────────────────────────────────────
-    if (filterStatus !== "all" && String(r.status || "").toLowerCase() !== filterStatus) return false;
+    if (filterStatus !== "all") {
+      const items = reqItemsCache.get(r.id) ?? (r.id === selectedReq?.id ? hqReqItems : null);
+      if (!getRequisitionStatusBuckets(r, items).has(normalizeRequisitionStatus(filterStatus))) return false;
+    }
 
     // ── Location — compare against location_id (r.location stores the FK) ────
     if (filterLocation !== "All" && r.location_id !== filterLocation) return false;
