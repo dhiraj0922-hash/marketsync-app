@@ -2800,6 +2800,12 @@ const mapRequisitionToFrontend = (db: any) => ({
     location: db.location,
     requestedBy: db.requestedby,
     date: db.date,
+    hqRunDate: db.hq_run_date ?? null,
+    hq_run_date: db.hq_run_date ?? null,
+    fulfillmentMethod: db.fulfillment_method ?? null,
+    fulfillment_method: db.fulfillment_method ?? null,
+    fulfillmentWindow: db.fulfillment_window ?? null,
+    fulfillment_window: db.fulfillment_window ?? null,
     createdAt: db.created_at ?? null,
     created_at: db.created_at ?? null,
     status: db.status,
@@ -2827,6 +2833,9 @@ const mapRequisitionToDB = (req: any) => ({
     location: req.location || '',
     requestedby: req.requestedBy || '',
     date: req.date || '',
+    hq_run_date: req.hqRunDate ?? req.hq_run_date ?? null,
+    fulfillment_method: req.fulfillmentMethod ?? req.fulfillment_method ?? null,
+    fulfillment_window: req.fulfillmentWindow ?? req.fulfillment_window ?? null,
     status: req.status || '',
     items: isNaN(parseInt(req.items)) ? 0 : parseInt(req.items),
     notes: req.notes || '',
@@ -4583,6 +4592,9 @@ export async function saveNewRequisition(
     status: string;
     notes: string;
     date: string;
+    hq_run_date?: string | null;
+    fulfillment_method?: string | null;
+    fulfillment_window?: string | null;
   },
   lineItems: {
     item_id?:             string | null;
@@ -4635,6 +4647,9 @@ export async function saveNewRequisition(
     status:       header.status,
     notes:        header.notes || "",
     date:         header.date,
+    hq_run_date:  header.hq_run_date ?? null,
+    fulfillment_method: header.fulfillment_method ?? null,
+    fulfillment_window: header.fulfillment_window ?? null,
     items:        lineItems.length,
     total_amount: grandTotal,
     lineitems:    [],
@@ -4823,7 +4838,12 @@ function mapDraftLineForRpc(line: RequisitionDraftLineInput) {
 export async function saveRequisitionDraft(
   locationId: string,
   notes: string,
-  lineItems: RequisitionDraftLineInput[]
+  lineItems: RequisitionDraftLineInput[],
+  fulfillment?: {
+    hqRunDate?: string | null;
+    fulfillmentMethod?: string | null;
+    fulfillmentWindow?: string | null;
+  }
 ): Promise<{ success: boolean; data?: RequisitionDraftRpcResult; error?: any }> {
   if (!locationId) {
     return { success: false, error: { message: 'Location is required.' } };
@@ -4837,6 +4857,9 @@ export async function saveRequisitionDraft(
     p_location_id: locationId,
     p_notes: notes || '',
     p_line_items: payload,
+    p_hq_run_date: fulfillment?.hqRunDate || null,
+    p_fulfillment_method: fulfillment?.fulfillmentMethod || null,
+    p_fulfillment_window: fulfillment?.fulfillmentWindow || null,
   });
 
   if (error) {
@@ -5249,6 +5272,9 @@ export type RequisitionPrintData = {
     locationId: string | null;
     requestedBy: string | null;
     date: string | null;
+    hqRunDate: string | null;
+    fulfillmentMethod: string | null;
+    fulfillmentWindow: string | null;
     status: string;
     notes: string | null;
     approvedAt: string | null;
@@ -5370,6 +5396,9 @@ export async function getRequisitionForPrint(
         locationId:  req.location_id ?? null,
         requestedBy: req.requestedby ?? null,
         date:        req.date        ?? null,
+        hqRunDate:   req.hq_run_date ?? null,
+        fulfillmentMethod: req.fulfillment_method ?? null,
+        fulfillmentWindow: req.fulfillment_window ?? null,
         status:      req.status      ?? '',
         notes:       req.notes       ?? null,
         approvedAt:  req.approved_at ?? null,
@@ -5681,6 +5710,10 @@ export async function createDeliveryTicketFromRequisition(requisitionId: string)
   const reqStatus = String(req.status ?? '').toLowerCase();
   if (!['approved', 'fulfilled', 'partially_fulfilled'].includes(reqStatus)) {
     return { success: false, error: { message: 'Delivery tickets can only be generated from approved, fulfilled, or partially fulfilled requisitions.' } };
+  }
+
+  if (req.fulfillment_method === 'store_pickup') {
+    return { success: false, error: { message: 'Store pickup requisitions do not generate delivery tickets by default. Convert to HQ Delivery first if dispatch is required.' } };
   }
 
   const itemsRes = await loadRequisitionItems(requisitionId);
@@ -7910,45 +7943,55 @@ export async function bulkUpsertOutletInventory(
 // ────────────────────────────────────────────────────────────────────────────
 
 export interface OutletCatalogItem {
-  itemId:          string;
-  name:            string;
-  category:        string | null;
-  uom:             string | null;
-  type:            string;
-  sourceType:      'hq_supplied' | 'local_vendor';
-  hqSaleItemId:    string | null;
-  supplier:        string | null;
+  itemId:               string;
+  name:                 string;
+  category:             string | null;
+  uom:                  string | null;
+  type:                 string;
+  sourceType:           'hq_supplied' | 'local_vendor';
+  /** FK → hq_sale_items.id. Set for Finished Good catalog items. Mutually exclusive with hqInventoryItemId. */
+  hqSaleItemId:         string | null;
+  /**
+   * FK → inventory_items.id (TEXT PK of the LOC-HQ row).
+   * Set for HQ raw inventory catalog items (e.g. SALT, GINGER CS).
+   * Mutually exclusive with hqSaleItemId.
+   * Stored in requisition_items.item_id at order time so the fulfillment RPC
+   * can resolve the shared item_id and deduct LOC-HQ stock.
+   */
+  hqInventoryItemId:    string | null;
+  supplier:             string | null;
   /** FK to suppliers.id — null when supplier is free-text only (backward compat) */
-  supplierId:      number | null;
-  purchaseOption:  string | null;
-  productCode:     string | null;
-  scanBarcode:     string | null;
-  price:           number;
-  taxRate:         number;
-  packQty:         number;
-  orderingEnabled: boolean;
-  isActive:        boolean;
+  supplierId:           number | null;
+  purchaseOption:       string | null;
+  productCode:          string | null;
+  scanBarcode:          string | null;
+  price:                number;
+  taxRate:              number;
+  packQty:              number;
+  orderingEnabled:      boolean;
+  isActive:             boolean;
 }
 
 function mapCatalogItem(db: any): OutletCatalogItem {
   return {
-    itemId:          db.item_id,
-    name:            db.name,
-    category:        db.category  ?? null,
-    uom:             db.uom       ?? null,
-    type:            db.type      ?? 'Inventory item',
-    sourceType:      db.source_type === 'hq_supplied' ? 'hq_supplied' : 'local_vendor',
-    hqSaleItemId:    db.hq_sale_item_id ?? null,
-    supplier:        db.supplier  ?? null,
-    supplierId:      db.supplier_id != null ? Number(db.supplier_id) : null,
-    purchaseOption:  db.purchase_option ?? null,
-    productCode:     db.product_code    ?? null,
-    scanBarcode:     db.scan_barcode    ?? null,
-    price:           parseFloat(db.price)    || 0,
-    taxRate:         parseFloat(db.tax_rate) || 0,
-    packQty:         parseFloat(db.pack_qty) || 1,
-    orderingEnabled: db.ordering_enabled !== false,
-    isActive:        db.is_active !== false,
+    itemId:            db.item_id,
+    name:              db.name,
+    category:          db.category              ?? null,
+    uom:               db.uom                   ?? null,
+    type:              db.type                  ?? 'Inventory item',
+    sourceType:        db.source_type === 'hq_supplied' ? 'hq_supplied' : 'local_vendor',
+    hqSaleItemId:      db.hq_sale_item_id       ?? null,
+    hqInventoryItemId: db.hq_inventory_item_id  ?? null,
+    supplier:          db.supplier              ?? null,
+    supplierId:        db.supplier_id != null ? Number(db.supplier_id) : null,
+    purchaseOption:    db.purchase_option        ?? null,
+    productCode:       db.product_code           ?? null,
+    scanBarcode:       db.scan_barcode           ?? null,
+    price:             parseFloat(db.price)      || 0,
+    taxRate:           parseFloat(db.tax_rate)   || 0,
+    packQty:           parseFloat(db.pack_qty)   || 1,
+    orderingEnabled:   db.ordering_enabled !== false,
+    isActive:          db.is_active !== false,
   };
 }
 
@@ -8038,24 +8081,25 @@ export async function upsertOutletCatalogItem(
   const { error } = await supabase
     .from('outlet_catalog_items')
     .upsert({
-      item_id:          item.itemId,
-      name:             item.name,
-      category:         item.category         ?? null,
-      uom:              item.uom              ?? null,
-      type:             item.type,
-      source_type:      item.sourceType,
-      hq_sale_item_id:  item.hqSaleItemId     ?? null,
-      supplier:         item.supplier         ?? null,
-      supplier_id:      item.supplierId       ?? null,
-      purchase_option:  item.purchaseOption   ?? null,
-      product_code:     item.productCode      ?? null,
-      scan_barcode:     item.scanBarcode      ?? null,
-      price:            item.price,
-      tax_rate:         item.taxRate,
-      pack_qty:         item.packQty,
-      ordering_enabled: item.orderingEnabled,
-      is_active:        item.isActive ?? true,
-      updated_at:       new Date().toISOString(),
+      item_id:               item.itemId,
+      name:                  item.name,
+      category:              item.category              ?? null,
+      uom:                   item.uom                   ?? null,
+      type:                  item.type,
+      source_type:           item.sourceType,
+      hq_sale_item_id:       item.hqSaleItemId          ?? null,
+      hq_inventory_item_id:  item.hqInventoryItemId     ?? null,
+      supplier:              item.supplier              ?? null,
+      supplier_id:           item.supplierId            ?? null,
+      purchase_option:       item.purchaseOption        ?? null,
+      product_code:          item.productCode           ?? null,
+      scan_barcode:          item.scanBarcode           ?? null,
+      price:                 item.price,
+      tax_rate:              item.taxRate,
+      pack_qty:              item.packQty,
+      ordering_enabled:      item.orderingEnabled,
+      is_active:             item.isActive              ?? true,
+      updated_at:            new Date().toISOString(),
     }, { onConflict: 'item_id' });
   if (error) {
     console.error('[upsertOutletCatalogItem] error:', error);
@@ -9278,7 +9322,7 @@ export async function getFulfillmentSummary(): Promise<any[]> {
 
   const { data: reqs, error: reqsError } = await supabase
     .from('requisitions')
-    .select('id, location, status, date, location_id')
+    .select('id, location, status, date, location_id, hq_run_date, fulfillment_method, fulfillment_window')
     .in('status', OPEN_STATUSES);
     
   if (reqsError || !reqs || reqs.length === 0) return [];
@@ -9332,6 +9376,9 @@ export async function getFulfillmentSummary(): Promise<any[]> {
       requisitionId: item.requisitionId,
       requisitionNumber: req?.id || item.requisitionId,
       requisitionDate: req?.date,
+      hqRunDate: req?.hq_run_date ?? null,
+      fulfillmentMethod: req?.fulfillment_method ?? null,
+      fulfillmentWindow: req?.fulfillment_window ?? null,
       requisitionStatus: req?.status,
       locationName: req?.location || 'Unknown Location',
       locationId: req?.location_id,

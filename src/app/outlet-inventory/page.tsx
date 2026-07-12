@@ -24,6 +24,22 @@ import {
 
 type SourceFilter = "all" | "hq_supplied" | "local_vendor";
 type ViewMode = "active" | "catalog" | "disabled" | "suggested";
+type FulfillmentMethod = "hq_delivery" | "store_pickup";
+type FulfillmentWindow = "morning" | "afternoon" | "evening" | "next_hq_run" | "asap_pickup";
+
+const FULFILLMENT_WINDOW_LABELS: Record<FulfillmentWindow, string> = {
+  morning: "Morning",
+  afternoon: "Afternoon",
+  evening: "Evening",
+  next_hq_run: "Next HQ Run",
+  asap_pickup: "ASAP Pickup / Call HQ",
+};
+
+function validWindowsForMethod(method: FulfillmentMethod): FulfillmentWindow[] {
+  return method === "hq_delivery"
+    ? ["morning", "afternoon", "evening", "next_hq_run"]
+    : ["morning", "afternoon", "evening", "asap_pickup"];
+}
 const HQ_VIEW_MODES: [ViewMode, string][] = [
   ["active",    "Active"],
   ["catalog",   "Add"],
@@ -114,6 +130,9 @@ export default function OutletInventoryPage() {
   // Requisition Modal State
   const [reqModalOpen, setReqModalOpen] = useState(false);
   const [reqNotes,     setReqNotes]     = useState("");
+  const [reqHqRunDate, setReqHqRunDate] = useState("");
+  const [reqFulfillmentMethod, setReqFulfillmentMethod] = useState<FulfillmentMethod>("hq_delivery");
+  const [reqFulfillmentWindow, setReqFulfillmentWindow] = useState<FulfillmentWindow>("morning");
   const [reqSaving,    setReqSaving]    = useState(false);
 
   // Physical Count Modal State
@@ -539,6 +558,14 @@ export default function OutletInventoryPage() {
 
   const handleSubmitRequisition = async () => {
     if (hqRequisitionLines.length === 0) return;
+    if (!reqHqRunDate) {
+      setToast("Choose the HQ Run Date before submitting.");
+      return;
+    }
+    if (!validWindowsForMethod(reqFulfillmentMethod).includes(reqFulfillmentWindow)) {
+      setToast("Choose a valid delivery/pickup window for the selected fulfillment method.");
+      return;
+    }
     setReqSaving(true);
     try {
       const reqId = `REQ-${Date.now()}`;
@@ -548,6 +575,9 @@ export default function OutletInventoryPage() {
         created_by:  user?.id || "System",
         status:      "submitted",
         notes:       reqNotes.trim(),
+        hq_run_date: reqHqRunDate,
+        fulfillment_method: reqFulfillmentMethod,
+        fulfillment_window: reqFulfillmentWindow,
         date:        new Date().toLocaleDateString("en-US", {
           month: "short",
           day: "numeric",
@@ -585,6 +615,9 @@ export default function OutletInventoryPage() {
         }
         setReqModalOpen(false);
         setReqNotes("");
+        setReqHqRunDate("");
+        setReqFulfillmentMethod("hq_delivery");
+        setReqFulfillmentWindow("morning");
         // Reload all stock levels
         await loadAll(activeLoc);
       } else {
@@ -1553,6 +1586,46 @@ export default function OutletInventoryPage() {
 
             {/* Sticky footer — always visible */}
             <div className="px-6 pb-6 pt-4 border-t border-neutral-100 space-y-3">
+              <div className="grid gap-3 rounded-xl border border-brand-100 bg-brand-50/40 p-3 sm:grid-cols-3">
+                <label className="block">
+                  <span className="text-xs font-semibold text-neutral-700 block">Needed for</span>
+                  <input
+                    type="date"
+                    value={reqHqRunDate}
+                    onChange={(e) => setReqHqRunDate(e.target.value)}
+                    className="mt-1 h-10 w-full rounded-lg border border-neutral-200 bg-white px-3 text-xs outline-none focus:ring-2 focus:ring-brand-500"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-xs font-semibold text-neutral-700 block">Fulfillment method</span>
+                  <select
+                    value={reqFulfillmentMethod}
+                    onChange={(e) => {
+                      const method = e.target.value as FulfillmentMethod;
+                      setReqFulfillmentMethod(method);
+                      setReqFulfillmentWindow("morning");
+                    }}
+                    className="mt-1 h-10 w-full rounded-lg border border-neutral-200 bg-white px-3 text-xs outline-none focus:ring-2 focus:ring-brand-500"
+                  >
+                    <option value="hq_delivery">HQ Delivery</option>
+                    <option value="store_pickup">Store Pickup from HQ</option>
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="text-xs font-semibold text-neutral-700 block">
+                    {reqFulfillmentMethod === "hq_delivery" ? "Delivery window" : "Pickup window"}
+                  </span>
+                  <select
+                    value={reqFulfillmentWindow}
+                    onChange={(e) => setReqFulfillmentWindow(e.target.value as FulfillmentWindow)}
+                    className="mt-1 h-10 w-full rounded-lg border border-neutral-200 bg-white px-3 text-xs outline-none focus:ring-2 focus:ring-brand-500"
+                  >
+                    {validWindowsForMethod(reqFulfillmentMethod).map((windowValue) => (
+                      <option key={windowValue} value={windowValue}>{FULFILLMENT_WINDOW_LABELS[windowValue]}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
               <div className="space-y-1">
                 <label className="text-xs font-semibold text-neutral-700 block">Requisition Notes / Instructions:</label>
                 <textarea

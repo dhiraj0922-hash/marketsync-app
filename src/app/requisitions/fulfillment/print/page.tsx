@@ -14,6 +14,9 @@ type FulfillmentRow = {
   requisitionId: string;
   requisitionNumber: string;
   requisitionDate: string;
+  hqRunDate?: string | null;
+  fulfillmentMethod?: string | null;
+  fulfillmentWindow?: string | null;
   requisitionStatus: string;
   locationName: string;
   locationId: string;
@@ -151,8 +154,8 @@ function getSection(g: FulfillmentGroup): string {
 
 // ─── Date filter helpers (mirrors fulfillment screen) ────────────────────────
 //
-// The `date` field on requisitions is the submission/requisition date.
-// We normalise any format (ISO or locale string) to YYYY-MM-DD for comparison.
+// The primary operational filter is requisitions.hq_run_date. Legacy rows that
+// predate it fall back to requisitions.date so they remain printable.
 
 type DateFilterMode = "today" | "tomorrow" | "this_week" | "custom" | "range" | "all";
 
@@ -178,6 +181,27 @@ function fmtDisplayDate(iso: string): string {
   return d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 }
 
+function fmtRunDate(value?: string | null): string {
+  return value ? fmtDisplayDate(String(value).slice(0, 10)) : "Not specified";
+}
+
+function fulfillmentMethodLabel(value?: string | null): string {
+  if (value === "hq_delivery") return "HQ Delivery";
+  if (value === "store_pickup") return "Store Pickup";
+  return "Not specified";
+}
+
+function fulfillmentWindowLabel(value?: string | null): string {
+  const labels: Record<string, string> = {
+    morning: "Morning",
+    afternoon: "Afternoon",
+    evening: "Evening",
+    next_hq_run: "Next HQ Run",
+    asap_pickup: "ASAP Pickup / Call HQ",
+  };
+  return value ? labels[value] ?? "Not specified" : "Not specified";
+}
+
 function resolveActiveDateRange(params: URLSearchParams): [string | null, string | null] {
   const mode = (params.get("dateMode") || "all") as DateFilterMode;
   const t = todayIso();
@@ -197,15 +221,15 @@ function dateFilterLabel(params: URLSearchParams): string {
   const extra = includeOverdue ? " + Overdue Open" : "";
   const t = todayIso();
   switch (mode) {
-    case "today":     return `Today — submitted ${fmtDisplayDate(t)}${extra}`;
-    case "tomorrow":  return `Tomorrow — submitted ${fmtDisplayDate(tomorrowIso())}${extra}`;
-    case "this_week": return `This Week — submitted this week${extra}`;
-    case "custom":    { const d = params.get("customDate") || t; return `submitted on ${fmtDisplayDate(d)}${extra}`; }
+    case "today":     return `Today — HQ run ${fmtDisplayDate(t)}${extra}`;
+    case "tomorrow":  return `Tomorrow — HQ run ${fmtDisplayDate(tomorrowIso())}${extra}`;
+    case "this_week": return `This Week — HQ run this week${extra}`;
+    case "custom":    { const d = params.get("customDate") || t; return `HQ run ${fmtDisplayDate(d)}${extra}`; }
     case "range":     {
       const f = params.get("rangeFrom") || t, to = params.get("rangeTo") || t;
-      return `submitted ${fmtDisplayDate(f)} – ${fmtDisplayDate(to)}${extra}`;
+      return `HQ run ${fmtDisplayDate(f)} – ${fmtDisplayDate(to)}${extra}`;
     }
-    case "all":       return "All Open Requisitions (any submission date)";
+    case "all":       return "All Open Requisitions (any HQ run date)";
   }
 }
 
@@ -222,18 +246,8 @@ function batchRef(params: URLSearchParams): string | null {
 }
 
 // ─── Architecture note ────────────────────────────────────────────────────────
-// The `date` field on requisitions is the SUBMISSION date only.
-// It does not represent when the goods are actually needed for delivery.
-//
-// TODO (future): Add a `required_by_date` (or `requested_delivery_date`) column
-// to the requisitions table. Once that field exists:
-//   - Fulfillment batching should filter by required_by_date, not date.
-//   - Delivery planning and dispatch scheduling should also use required_by_date.
-//   - The UI label can then say "Fulfillment Date" or "Required Delivery Date".
-//   - filterSummary below filters item.requisitionDate which maps to req.date;
-//     swap the source field here when the column is available.
-// Until then, all filtering is by requisition SUBMISSION date and is labelled
-// accordingly as "Requisition Date Batch".
+// Fulfillment print batching is based on hq_run_date, with a legacy fallback
+// to requisitionDate only for old rows that do not have hq_run_date.
 
 // ─── Filter logic (mirrors fulfillment screen) ────────────────────────────────
 
@@ -271,7 +285,7 @@ function filterSummary(
       const items = group.items.filter((item) => {
         if (!groupMatchesSearch || !groupSelected) return false;
         // Date filter applies to every item regardless of scope
-        if (!reqDateInBatch(item.requisitionDate)) return false;
+        if (!reqDateInBatch(item.hqRunDate ?? item.requisitionDate)) return false;
         if (scope === "visible") {
           if (location !== "all" && item.locationName !== location) return false;
           if (status !== "all" && item.requisitionStatus !== status) return false;
@@ -1205,7 +1219,13 @@ export default function FulfillmentPickListPrintPage() {
                               {item.locationName}
                             </div>
                             <div style={{ fontSize: 9, color: "#6b7280" }}>
-                              {item.requisitionDate || ""}
+                              HQ Run: {fmtRunDate(item.hqRunDate)}
+                            </div>
+                            <div style={{ fontSize: 9, color: "#6b7280" }}>
+                              {fulfillmentMethodLabel(item.fulfillmentMethod)} · {fulfillmentWindowLabel(item.fulfillmentWindow)}
+                            </div>
+                            <div style={{ fontSize: 9, color: "#9ca3af" }}>
+                              Submitted: {item.requisitionDate || ""}
                             </div>
                           </td>
                           <td style={{ fontFamily: "monospace", fontSize: 10 }}>

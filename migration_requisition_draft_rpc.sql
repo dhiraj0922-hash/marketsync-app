@@ -174,10 +174,15 @@ $$;
 REVOKE ALL ON FUNCTION public._validate_requisition_draft_line(JSONB, TEXT) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public._validate_requisition_draft_line(JSONB, TEXT) FROM anon;
 
+DROP FUNCTION IF EXISTS public.save_requisition_draft(TEXT, TEXT, JSONB);
+
 CREATE OR REPLACE FUNCTION public.save_requisition_draft(
   p_location_id TEXT,
   p_notes TEXT DEFAULT '',
-  p_line_items JSONB DEFAULT '[]'::JSONB
+  p_line_items JSONB DEFAULT '[]'::JSONB,
+  p_hq_run_date DATE DEFAULT NULL,
+  p_fulfillment_method TEXT DEFAULT NULL,
+  p_fulfillment_window TEXT DEFAULT NULL
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -191,6 +196,8 @@ DECLARE
   v_line_count INTEGER := 0;
   v_total NUMERIC := 0;
   v_now TIMESTAMPTZ := now();
+  v_method TEXT := NULLIF(btrim(p_fulfillment_method), '');
+  v_window TEXT := NULLIF(btrim(p_fulfillment_window), '');
 BEGIN
   v_user_id := public._assert_requisition_draft_access(p_location_id);
 
@@ -200,6 +207,22 @@ BEGIN
 
   IF jsonb_typeof(p_line_items) IS DISTINCT FROM 'array' THEN
     RAISE EXCEPTION 'p_line_items must be a JSON array.';
+  END IF;
+
+  IF v_method IS NOT NULL AND v_method NOT IN ('hq_delivery', 'store_pickup') THEN
+    RAISE EXCEPTION 'Invalid fulfillment_method "%".', v_method;
+  END IF;
+
+  IF v_window IS NOT NULL AND v_window NOT IN ('morning', 'afternoon', 'evening', 'next_hq_run', 'asap_pickup') THEN
+    RAISE EXCEPTION 'Invalid fulfillment_window "%".', v_window;
+  END IF;
+
+  IF v_method = 'hq_delivery' AND v_window = 'asap_pickup' THEN
+    RAISE EXCEPTION 'ASAP Pickup is only available for store pickup requisitions.';
+  END IF;
+
+  IF v_method = 'store_pickup' AND v_window = 'next_hq_run' THEN
+    RAISE EXCEPTION 'Next HQ Run is only available for HQ delivery requisitions.';
   END IF;
 
   SELECT COUNT(*)
@@ -242,6 +265,9 @@ BEGIN
       status,
       notes,
       date,
+      hq_run_date,
+      fulfillment_method,
+      fulfillment_window,
       items,
       total_amount,
       lineitems,
@@ -257,6 +283,9 @@ BEGIN
       'draft',
       COALESCE(p_notes, ''),
       to_char(v_now AT TIME ZONE 'America/Toronto', 'Mon DD, YYYY'),
+      p_hq_run_date,
+      v_method,
+      v_window,
       v_line_count,
       round(v_total, 2),
       '[]'::JSONB,
@@ -267,6 +296,9 @@ BEGIN
     UPDATE public.requisitions
     SET
       notes = COALESCE(p_notes, ''),
+      hq_run_date = p_hq_run_date,
+      fulfillment_method = v_method,
+      fulfillment_window = v_window,
       items = v_line_count,
       total_amount = round(v_total, 2),
       updated_at = v_now
@@ -322,15 +354,18 @@ BEGIN
     'success', true,
     'requisition_id', v_draft_id,
     'status', 'draft',
+    'hq_run_date', p_hq_run_date,
+    'fulfillment_method', v_method,
+    'fulfillment_window', v_window,
     'items', v_line_count,
     'total_amount', round(v_total, 2)
   );
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.save_requisition_draft(TEXT, TEXT, JSONB) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.save_requisition_draft(TEXT, TEXT, JSONB) FROM anon;
-GRANT EXECUTE ON FUNCTION public.save_requisition_draft(TEXT, TEXT, JSONB) TO authenticated;
+REVOKE ALL ON FUNCTION public.save_requisition_draft(TEXT, TEXT, JSONB, DATE, TEXT, TEXT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.save_requisition_draft(TEXT, TEXT, JSONB, DATE, TEXT, TEXT) FROM anon;
+GRANT EXECUTE ON FUNCTION public.save_requisition_draft(TEXT, TEXT, JSONB, DATE, TEXT, TEXT) TO authenticated;
 
 CREATE OR REPLACE FUNCTION public.submit_requisition_draft(
   p_requisition_id TEXT,
@@ -348,6 +383,8 @@ DECLARE
   v_line_count INTEGER := 0;
   v_total NUMERIC := 0;
   v_now TIMESTAMPTZ := now();
+  v_method TEXT;
+  v_window TEXT;
 BEGIN
   v_user_id := public._assert_requisition_draft_access(p_location_id);
 
@@ -366,6 +403,25 @@ BEGIN
 
   IF v_req.id IS NULL THEN
     RAISE EXCEPTION 'Active draft requisition not found.';
+  END IF;
+
+  v_method := NULLIF(btrim(v_req.fulfillment_method), '');
+  v_window := NULLIF(btrim(v_req.fulfillment_window), '');
+
+  IF v_req.hq_run_date IS NULL THEN
+    RAISE EXCEPTION 'HQ run date is required before submitting a requisition.';
+  END IF;
+
+  IF v_method NOT IN ('hq_delivery', 'store_pickup') THEN
+    RAISE EXCEPTION 'Valid fulfillment method is required before submitting a requisition.';
+  END IF;
+
+  IF v_method = 'hq_delivery' AND v_window NOT IN ('morning', 'afternoon', 'evening', 'next_hq_run') THEN
+    RAISE EXCEPTION 'Valid HQ delivery window is required before submitting a requisition.';
+  END IF;
+
+  IF v_method = 'store_pickup' AND v_window NOT IN ('morning', 'afternoon', 'evening', 'asap_pickup') THEN
+    RAISE EXCEPTION 'Valid store pickup window is required before submitting a requisition.';
   END IF;
 
   FOR v_line IN
@@ -408,6 +464,9 @@ BEGIN
     'success', true,
     'requisition_id', p_requisition_id,
     'status', 'submitted',
+    'hq_run_date', v_req.hq_run_date,
+    'fulfillment_method', v_method,
+    'fulfillment_window', v_window,
     'items', v_line_count,
     'total_amount', round(v_total, 2)
   );

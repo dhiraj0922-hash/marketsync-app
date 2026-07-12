@@ -16,7 +16,9 @@ type DateFilterMode = "today" | "tomorrow" | "this_week" | "custom" | "range" | 
 type CompletedDateMode = "today" | "yesterday" | "this_week" | "custom" | "range" | "all_time";
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
-// Requisitions store `date` as the submission date (locale or ISO string).
+// Requisitions store `hq_run_date` as the operational HQ run date.
+// Legacy rows may only have `date` (submission date), so filtering falls back
+// to date when hq_run_date is missing.
 // We normalise to YYYY-MM-DD for comparison.
 
 function toIso(d: Date): string {
@@ -59,14 +61,31 @@ function fmtDisplayDate(iso: string): string {
   return d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 }
 
+function fulfillmentMethodLabel(value?: string | null): string {
+  if (value === "hq_delivery") return "HQ Delivery";
+  if (value === "store_pickup") return "Store Pickup";
+  return "Not specified";
+}
+
+function fulfillmentWindowLabel(value?: string | null): string {
+  const labels: Record<string, string> = {
+    morning: "Morning",
+    afternoon: "Afternoon",
+    evening: "Evening",
+    next_hq_run: "Next HQ Run",
+    asap_pickup: "ASAP Pickup / Call HQ",
+  };
+  return value ? labels[value] ?? "Not specified" : "Not specified";
+}
+
 function modeLabel(mode: DateFilterMode, customDate: string, rangeFrom: string, rangeTo: string): string {
   switch (mode) {
-    case "today":     return `Today — submitted ${fmtDisplayDate(todayIso())}`;
-    case "tomorrow":  return `Tomorrow — submitted ${fmtDisplayDate(tomorrowIso())}`;
-    case "this_week": return `This Week — submitted this week`;
-    case "custom":    return customDate ? `submitted on ${fmtDisplayDate(customDate)}` : "Custom Date";
-    case "range":     return (rangeFrom && rangeTo) ? `submitted ${fmtDisplayDate(rangeFrom)} – ${fmtDisplayDate(rangeTo)}` : "Date Range";
-    case "all":       return "All Open Requisitions (any submission date)";
+    case "today":     return `Today — HQ run ${fmtDisplayDate(todayIso())}`;
+    case "tomorrow":  return `Tomorrow — HQ run ${fmtDisplayDate(tomorrowIso())}`;
+    case "this_week": return `This Week — HQ run this week`;
+    case "custom":    return customDate ? `HQ run ${fmtDisplayDate(customDate)}` : "Custom Date";
+    case "range":     return (rangeFrom && rangeTo) ? `HQ run ${fmtDisplayDate(rangeFrom)} – ${fmtDisplayDate(rangeTo)}` : "Date Range";
+    case "all":       return "All Open Requisitions (any HQ run date)";
   }
 }
 
@@ -80,18 +99,9 @@ function batchRef(mode: DateFilterMode, customDate: string, rangeFrom: string): 
 }
 
 // ─── Architecture note ────────────────────────────────────────────────────────
-// The `date` field on requisitions is the SUBMISSION date only.
-// It does not represent when the goods are actually needed for delivery.
-//
-// TODO (future): Add a `required_by_date` (or `requested_delivery_date`) column
-// to the requisitions table. Once that field exists:
-//   - Fulfillment batching should filter by required_by_date, not date.
-//   - Delivery planning and dispatch scheduling should also use required_by_date.
-//   - The UI label can then truthfully say "Fulfillment Date" or "Delivery Date".
-//   - This file's activeDateRange logic filters item.requisitionDate which maps
-//     to req.date — swap the source field here when the column is available.
-// Until then, all filtering is by requisition SUBMISSION date and is labelled
-// accordingly as "Requisition Date Batch".
+// Fulfillment batching is now based on requisitions.hq_run_date. Legacy rows
+// that predate the field fall back to requisitions.date so they remain visible
+// and fulfillable.
 
 /** Tiny inline stat for the batch summary strip. */
 function Stat({ label, value, color }: { label: string; value: number; color?: string }) {
@@ -364,8 +374,8 @@ export default function FulfillmentPage() {
       const filteredItems = group.items.filter((item: any) => {
         const matchLocation = locationFilter === "all" || item.locationName === locationFilter;
         const matchStatus = statusFilter === "all" || item.requisitionStatus === statusFilter;
-        // Date filter: match item's requisitionDate against the active batch
-        const matchDate = reqDateInBatch(item.requisitionDate);
+        // Date filter: match HQ run date first; legacy rows fall back to submission date.
+        const matchDate = reqDateInBatch(item.hqRunDate ?? item.requisitionDate);
         return matchLocation && matchStatus && matchDate;
       });
 
@@ -744,8 +754,8 @@ export default function FulfillmentPage() {
           }`}>
             <Calendar className="h-3.5 w-3.5" />
             {dateMode === "all"
-              ? "Showing all open requisitions (any submission date)"
-              : <>Showing requisitions submitted on: <strong className="ml-1">{modeLabel(dateMode, customDate, rangeFrom, rangeTo)}</strong></>}
+              ? "Showing all open requisitions (any HQ run date)"
+              : <>Showing requisitions for: <strong className="ml-1">{modeLabel(dateMode, customDate, rangeFrom, rangeTo)}</strong></>}
           </div>
           {dateMode !== "all" && (
             <label className="inline-flex items-center gap-2 cursor-pointer">
@@ -765,8 +775,7 @@ export default function FulfillmentPage() {
           <div className="mt-2 flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
             <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" />
             <p className="text-xs font-semibold text-amber-800">
-              You are viewing <strong>all open requisitions regardless of submission date.</strong> Allocating or printing in this mode may mix batches from different submission dates. Select a specific date for operational safety.
-              <span className="block mt-0.5 font-normal text-amber-700">Note: this filter uses <code className="bg-amber-100 px-1 rounded">requisitions.date</code> (submission date). A future <code className="bg-amber-100 px-1 rounded">required_by_date</code> field will enable true delivery-date batching.</span>
+              You are viewing <strong>all open requisitions regardless of HQ run date.</strong> Allocating or printing in this mode may mix operational batches. Select a specific HQ run date for operational safety.
             </p>
           </div>
         )}
@@ -1154,6 +1163,12 @@ export default function FulfillmentPage() {
                               {req.submittedDate && (
                                 <div className="text-[10px] text-neutral-400 mt-0.5">Submitted: {req.submittedDate}</div>
                               )}
+                              <div className="text-[10px] text-brand-700 mt-0.5">
+                                HQ Run: {req.hqRunDate ? fmtDisplayDate(String(req.hqRunDate).slice(0, 10)) : "Not specified"}
+                              </div>
+                              <div className="text-[10px] text-neutral-400 mt-0.5">
+                                {fulfillmentMethodLabel(req.fulfillmentMethod)} · {fulfillmentWindowLabel(req.fulfillmentWindow)}
+                              </div>
                             </TableCell>
                             <TableCell className="py-3 text-sm text-neutral-600 hidden sm:table-cell">
                               {req.fulfilledBy ?? <span className="text-neutral-300 italic text-xs">—</span>}
@@ -1565,7 +1580,7 @@ export default function FulfillmentPage() {
                                               </div>
                                             ) : (
                                               /* Safeguard: no ticket button for rejected reqs */
-                                              item.requisitionStatus !== 'rejected' ? (
+                                              item.requisitionStatus !== 'rejected' && item.fulfillmentMethod !== 'store_pickup' ? (
                                                 /* Only hq_master / hq_ops can create tickets; hq_fulfillment cannot */
                                                 !isHqFulfillment(user) ? (
                                                   <>
@@ -1584,7 +1599,9 @@ export default function FulfillmentPage() {
                                                   <span className="text-xs text-neutral-500 italic">No delivery ticket created yet</span>
                                                 )
                                               ) : (
-                                                <span className="text-xs text-danger-500 font-semibold">Rejected</span>
+                                                <span className="text-xs text-danger-500 font-semibold">
+                                                  {item.requisitionStatus === 'rejected' ? 'Rejected' : 'Store pickup'}
+                                                </span>
                                               )
                                             )}
                                           </>

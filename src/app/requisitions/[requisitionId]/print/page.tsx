@@ -52,6 +52,23 @@ function fmtDate(raw: string | null | undefined): string {
   }
 }
 
+function fulfillmentMethodLabel(value?: string | null): string {
+  if (value === "hq_delivery") return "HQ Delivery";
+  if (value === "store_pickup") return "Store Pickup from HQ";
+  return "Not specified";
+}
+
+function fulfillmentWindowLabel(value?: string | null): string {
+  const labels: Record<string, string> = {
+    morning: "Morning",
+    afternoon: "Afternoon",
+    evening: "Evening",
+    next_hq_run: "Next HQ Run",
+    asap_pickup: "ASAP Pickup / Call HQ",
+  };
+  return value ? labels[value] ?? "Not specified" : "Not specified";
+}
+
 function statusLabel(status: string): string {
   const map: Record<string, string> = {
     draft: "Draft",
@@ -253,6 +270,18 @@ function PrintDocument({
         <div>
           <span className="print-meta-label text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Request Date</span>
           <span className="ml-2">{fmtDate(requisition.date)}</span>
+        </div>
+        <div>
+          <span className="print-meta-label text-[10px] font-semibold uppercase tracking-wider text-zinc-500">HQ Run Date</span>
+          <span className="ml-2 font-semibold">{fmtDate(requisition.hqRunDate)}</span>
+        </div>
+        <div>
+          <span className="print-meta-label text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Fulfillment Method</span>
+          <span className="ml-2">{fulfillmentMethodLabel(requisition.fulfillmentMethod)}</span>
+        </div>
+        <div>
+          <span className="print-meta-label text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Window</span>
+          <span className="ml-2">{fulfillmentWindowLabel(requisition.fulfillmentWindow)}</span>
         </div>
         <div>
           <span className="print-meta-label text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Items</span>

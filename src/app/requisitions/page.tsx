@@ -104,6 +104,46 @@ const COMMISSARY_COLORS: Record<string, string> = {
 };
 
 type RequisitionDatePreset = "custom" | "today" | "yesterday" | "last24" | "nextDay";
+type FulfillmentMethod = "hq_delivery" | "store_pickup";
+type FulfillmentWindow = "morning" | "afternoon" | "evening" | "next_hq_run" | "asap_pickup";
+
+const FULFILLMENT_METHOD_LABELS: Record<FulfillmentMethod, string> = {
+  hq_delivery: "HQ Delivery",
+  store_pickup: "Store Pickup from HQ",
+};
+
+const FULFILLMENT_WINDOW_LABELS: Record<FulfillmentWindow, string> = {
+  morning: "Morning",
+  afternoon: "Afternoon",
+  evening: "Evening",
+  next_hq_run: "Next HQ Run",
+  asap_pickup: "ASAP Pickup / Call HQ",
+};
+
+function formatHqRunDate(value?: string | null): string {
+  if (!value) return "Not specified";
+  const parsed = new Date(`${String(value).slice(0, 10)}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) return "Not specified";
+  return parsed.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+function fulfillmentMethodLabel(value?: string | null): string {
+  return value && value in FULFILLMENT_METHOD_LABELS
+    ? FULFILLMENT_METHOD_LABELS[value as FulfillmentMethod]
+    : "Not specified";
+}
+
+function fulfillmentWindowLabel(value?: string | null): string {
+  return value && value in FULFILLMENT_WINDOW_LABELS
+    ? FULFILLMENT_WINDOW_LABELS[value as FulfillmentWindow]
+    : "Not specified";
+}
+
+function validWindowsForMethod(method: FulfillmentMethod): FulfillmentWindow[] {
+  return method === "hq_delivery"
+    ? ["morning", "afternoon", "evening", "next_hq_run"]
+    : ["morning", "afternoon", "evening", "asap_pickup"];
+}
 
 function toDateInputValue(date: Date): string {
   const year = date.getFullYear();
@@ -387,6 +427,9 @@ function LocationManagerView({
   const [searchQuery, setSearchQuery] = useState("");
   const [filterStatus, setFilterStatus] = useState("all");
   const [draftNotes, setDraftNotes] = useState("");
+  const [hqRunDate, setHqRunDate] = useState("");
+  const [fulfillmentMethod, setFulfillmentMethod] = useState<FulfillmentMethod>("hq_delivery");
+  const [fulfillmentWindow, setFulfillmentWindow] = useState<FulfillmentWindow>("morning");
   const [editingRequisitionId, setEditingRequisitionId] = useState<string | null>(null);
   const [activeDraftRequisitionId, setActiveDraftRequisitionId] = useState<string | null>(null);
   const [isDraftCartRestored, setIsDraftCartRestored] = useState(false);
@@ -401,8 +444,11 @@ function LocationManagerView({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [submitNotice, setSubmitNotice] = useState<{ type: "success" | "warning"; message: string } | null>(null);
   const [draftNotice, setDraftNotice] = useState<string | null>(null);
-  // Local vendor catalog items (from outlet_catalog_items)
+  // Local vendor catalog items (from outlet_catalog_items where source_type='local_vendor')
   const [localCatalogItems, setLocalCatalogItems] = useState<OutletCatalogItem[]>([]);
+  // HQ raw inventory catalog items (from outlet_catalog_items where source_type='hq_supplied'
+  // and hqInventoryItemId is set — e.g. SALT, GINGER CS)
+  const [hqRawCatalogItems, setHqRawCatalogItems] = useState<OutletCatalogItem[]>([]);
 
   const [activeHistoryTab, setActiveHistoryTab] = useState<"orders" | "backorders">("orders");
   const [backorders, setBackorders] = useState<any[]>([]);
@@ -419,13 +465,23 @@ function LocationManagerView({
         loadBackorders(profile.locationId || undefined),
       ]);
       setRequisitions(Array.isArray(rows) ? rows : []);
+      const allCatalog = Array.isArray(localCat) ? localCat : [];
+      // Local vendor items: shown in catalog as "Local Vendor" source
       setLocalCatalogItems(
-        (Array.isArray(localCat) ? localCat : [])
-          .filter((c: OutletCatalogItem) =>
-            c.isActive &&
-            c.orderingEnabled &&
-            c.sourceType === 'local_vendor'
-          )
+        allCatalog.filter((c: OutletCatalogItem) =>
+          c.isActive &&
+          c.orderingEnabled &&
+          c.sourceType === 'local_vendor'
+        )
+      );
+      // HQ raw inventory items: hq_supplied with a LOC-HQ inventory_items.id link
+      setHqRawCatalogItems(
+        allCatalog.filter((c: OutletCatalogItem) =>
+          c.isActive &&
+          c.orderingEnabled &&
+          c.sourceType === 'hq_supplied' &&
+          !!c.hqInventoryItemId
+        )
       );
       setBackorders(Array.isArray(bo) ? bo : []);
     } finally {
@@ -438,6 +494,9 @@ function LocationManagerView({
   const clearDraftCartState = useCallback(() => {
     setLineItems([]);
     setDraftNotes("");
+    setHqRunDate("");
+    setFulfillmentMethod("hq_delivery");
+    setFulfillmentWindow("morning");
     setCatalogQtyById({});
     setActiveDraftRequisitionId(null);
     setIsDraftCartRestored(false);
@@ -502,6 +561,11 @@ function LocationManagerView({
         setIsDraftCartRestored(true);
         setLineItems(draftItems);
         setDraftNotes(res.data.requisition.notes || "");
+        setHqRunDate(res.data.requisition.hqRunDate || res.data.requisition.hq_run_date || "");
+        const restoredMethod = (res.data.requisition.fulfillmentMethod || res.data.requisition.fulfillment_method || "hq_delivery") as FulfillmentMethod;
+        setFulfillmentMethod(restoredMethod);
+        const restoredWindow = (res.data.requisition.fulfillmentWindow || res.data.requisition.fulfillment_window || "morning") as FulfillmentWindow;
+        setFulfillmentWindow(validWindowsForMethod(restoredMethod).includes(restoredWindow) ? restoredWindow : "morning");
         setCatalogQtyById(restoredQty);
         if (draftItems.length > 0) {
           setDraftNotice(`Restored saved draft ${res.data.requisition.id}.`);
@@ -601,6 +665,31 @@ function LocationManagerView({
           added: lineItems.some(li => li.itemId === i.id),
         };
       });
+
+      // HQ raw catalog items: outlet_catalog_items with hqInventoryItemId set.
+      // Use hqInventoryItemId as the cart key (same as inventory path).
+      const hqRawCatalogMapped = hqRawCatalogItems.map(c => ({
+        id: c.hqInventoryItemId!,          // inventory_items.id at LOC-HQ
+        name: c.name,
+        category: c.category || 'HQ Inventory',
+        unit: c.uom || 'unit',
+        hqStock: null as number | null,   // not eagerly loaded
+        cost: c.price,
+        supplier: 'Commissary HQ',
+        storage: 'Commissary HQ',
+        status: 'available' as const,
+        sourceType: 'hq_supplied' as const,
+        isHqRawCatalog: true as const,    // distinguishes from direct inventoryItems
+        packQty: c.packQty,
+        added: lineItems.some(li => li.itemId === c.hqInventoryItemId),
+      }));
+      // Merge: direct inventory panel items first, then HQ raw catalog additions.
+      // Skip catalog items whose inventory_items.id is already in the direct list.
+      const directIds = new Set(hqItems.map((i: any) => i.id));
+      hqItems = [
+        ...hqItems,
+        ...hqRawCatalogMapped.filter(c => !directIds.has(c.id)),
+      ];
     }
 
     // ── Local vendor items (outlet_catalog_items) ────────────────────────
@@ -620,7 +709,8 @@ function LocationManagerView({
     }));
 
     return [...hqItems, ...localItems];
-  }, [fgMode, inventoryItems, lineItems, saleItems, localCatalogItems]);
+  }, [fgMode, inventoryItems, lineItems, saleItems, localCatalogItems, hqRawCatalogItems]);
+
 
   const categoryOptions = useMemo(() => Array.from(new Set(catalogItems.map(i => i.category))).sort(), [catalogItems]);
   const supplierOptions = useMemo(() => Array.from(new Set(catalogItems.map(i => i.supplier))).sort(), [catalogItems]);
@@ -736,8 +826,34 @@ function LocationManagerView({
       ]);
       return;
     }
+    // ── HQ raw catalog path (outlet_catalog_items with hqInventoryItemId) ───
+    // These are HQ-supplied raw inventory items added through the Location Catalog
+    // (e.g. SALT, GINGER CS). They store inventory_items.id as the cart key
+    // and save to requisition_items.item_id so the fulfillment RPC can deduct
+    // LOC-HQ stock — identical to the direct HQ inventory panel path.
+    const hqRawCatItem = hqRawCatalogItems.find(c => c.hqInventoryItemId === itemId);
+    if (hqRawCatItem) {
+      if (lineItems.some(li => li.itemId === hqRawCatItem.hqInventoryItemId)) return;
+      const packQty = hqRawCatItem.packQty > 0 ? hqRawCatItem.packQty : 1;
+      setLineItems(prev => [
+        ...prev,
+        {
+          itemId:            hqRawCatItem.hqInventoryItemId,
+          finishedGoodId:    null,
+          catalogItemId:     null,
+          sourceType:        'hq_supplied' as const,
+          supplierSnapshot:  'Commissary HQ',
+          itemName:          hqRawCatItem.name,
+          unit:              hqRawCatItem.uom || 'unit',
+          packQty,
+          unitPrice:         hqRawCatItem.price,
+          quantityRequested: quantity,
+          sourceCommissary:  'Commissary HQ',
+        },
+      ]);
+      return;
+    }
 
-    // ── HQ FG path ────────────────────────────────────────────────────────
     // The catalog input shows pack count for FG items — use quantity directly.
     if (fgMode) {
       const saleItem = saleItems.find(s => s.id === itemId);
@@ -798,6 +914,14 @@ function LocationManagerView({
       setSaveError("All items must have a quantity greater than 0.");
       return;
     }
+    if (!hqRunDate) {
+      setSaveError("Choose the HQ Run Date before submitting.");
+      return;
+    }
+    if (!validWindowsForMethod(fulfillmentMethod).includes(fulfillmentWindow)) {
+      setSaveError("Choose a valid delivery/pickup window for the selected fulfillment method.");
+      return;
+    }
 
     setIsSaving(true);
     try {
@@ -806,7 +930,12 @@ function LocationManagerView({
       const saveRes = await saveRequisitionDraft(
         profile.locationId,
         draftNotes,
-        lineItems.map(mapDraftLineForSave)
+        lineItems.map(mapDraftLineForSave),
+        {
+          hqRunDate,
+          fulfillmentMethod,
+          fulfillmentWindow,
+        }
       );
 
       if (!saveRes.success || !saveRes.data?.requisitionId) {
@@ -859,7 +988,12 @@ function LocationManagerView({
       const res = await saveRequisitionDraft(
         profile.locationId,
         draftNotes,
-        lineItems.map(mapDraftLineForSave)
+        lineItems.map(mapDraftLineForSave),
+        {
+          hqRunDate: hqRunDate || null,
+          fulfillmentMethod,
+          fulfillmentWindow,
+        }
       );
       if (!res.success || !res.data?.requisitionId) {
         setSaveError(res.error?.message ?? "Draft save failed. Check console.");
@@ -1493,6 +1627,52 @@ function LocationManagerView({
                     })}
                   </div>
                 )}
+                <div className="space-y-3 rounded-xl border border-emerald-100 bg-emerald-50/40 p-4">
+                  <div>
+                    <span className="text-xs font-bold uppercase tracking-[0.14em] text-emerald-700">HQ Run Details</span>
+                    <p className="mt-1 text-xs text-emerald-700/80">Choose when HQ should produce and fulfill this requisition.</p>
+                  </div>
+                  <label className="block">
+                    <span className="text-xs font-semibold text-slate-600">Needed for</span>
+                    <input
+                      type="date"
+                      value={hqRunDate}
+                      onChange={(e) => setHqRunDate(e.target.value)}
+                      className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none ring-emerald-600 focus:ring-2"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="text-xs font-semibold text-slate-600">Fulfillment method</span>
+                    <select
+                      value={fulfillmentMethod}
+                      onChange={(e) => {
+                        const method = e.target.value as FulfillmentMethod;
+                        setFulfillmentMethod(method);
+                        setFulfillmentWindow("morning");
+                      }}
+                      className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none ring-emerald-600 focus:ring-2"
+                    >
+                      <option value="hq_delivery">HQ Delivery</option>
+                      <option value="store_pickup">Store Pickup from HQ</option>
+                    </select>
+                  </label>
+                  <label className="block">
+                    <span className="text-xs font-semibold text-slate-600">
+                      {fulfillmentMethod === "hq_delivery" ? "Preferred delivery window" : "Preferred pickup window"}
+                    </span>
+                    <select
+                      value={fulfillmentWindow}
+                      onChange={(e) => setFulfillmentWindow(e.target.value as FulfillmentWindow)}
+                      className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none ring-emerald-600 focus:ring-2"
+                    >
+                      {validWindowsForMethod(fulfillmentMethod).map((windowValue) => (
+                        <option key={windowValue} value={windowValue}>
+                          {FULFILLMENT_WINDOW_LABELS[windowValue]}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
                 <label className="block">
                   <span className="text-xs font-bold uppercase tracking-[0.14em] text-slate-500">Notes</span>
                   <textarea
@@ -1764,6 +1944,9 @@ function HQAdminView({
   const [searchQuery, setSearchQuery] = useState("");
   const [filterStatus, setFilterStatus] = useState("all");
   const [filterLocation, setFilterLocation] = useState("All"); // stores location.id or "All"
+  const [filterHqRunDate, setFilterHqRunDate] = useState("");
+  const [filterFulfillmentMethod, setFilterFulfillmentMethod] = useState("all");
+  const [filterFulfillmentWindow, setFilterFulfillmentWindow] = useState("all");
   const [filterFromDate, setFilterFromDate] = useState("");    // ISO date string "YYYY-MM-DD" or ""
   const [filterFromTime, setFilterFromTime] = useState("");    // HH:mm local time or ""
   const [filterToDate, setFilterToDate] = useState("");        // ISO date string "YYYY-MM-DD" or ""
@@ -1774,7 +1957,7 @@ function HQAdminView({
   const [activeTab, setActiveTab] = useState<"overview" | "hq-production" | "backorders">("overview");
   const [activeCommissary, setActiveCommissary] = useState<string>("Commissary HQ");
   const [productionDate, setProductionDate] = useState<string>(
-    new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+    toDateInputValue(new Date())
   );
   const [expandedRows, setExpandedRows] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -2196,6 +2379,11 @@ function HQAdminView({
     // ── Location — compare against location_id (r.location stores the FK) ────
     if (filterLocation !== "All" && r.location_id !== filterLocation) return false;
 
+    // ── HQ operational run filters ───────────────────────────────────────────
+    if (filterHqRunDate && String(r.hqRunDate ?? r.hq_run_date ?? "").slice(0, 10) !== filterHqRunDate) return false;
+    if (filterFulfillmentMethod !== "all" && String(r.fulfillmentMethod ?? r.fulfillment_method ?? "") !== filterFulfillmentMethod) return false;
+    if (filterFulfillmentWindow !== "all" && String(r.fulfillmentWindow ?? r.fulfillment_window ?? "") !== filterFulfillmentWindow) return false;
+
     // ── Submitted/created timestamp window ───────────────────────────────────
     if (fromDateTime || toDateTime) {
       const rawTimestamp = r.createdAt ?? r.created_at;
@@ -2390,12 +2578,7 @@ function HQAdminView({
     //   isFGMode = false → quantityRequested is BASE UNITS (loose/raw)
     //   packQty null/0   → configuration missing; never invent pack math
 
-    const normalize = (d: string): string => {
-      if (!d) return "";
-      if (isNaN(Date.parse(d))) return d.trim();
-      return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-    };
-    const targetDate = normalize(productionDate);
+    const targetDate = String(productionDate || "").slice(0, 10);
 
     type LocEntry = { loc: string; qty: number; baseQty: number };
     type AggEntry = {
@@ -2439,7 +2622,8 @@ function HQAdminView({
     requisitions.forEach((req) => {
       const s = (req.status ?? "").toLowerCase();
       if (!PRODUCTION_STATUSES.has(s)) return;
-      if (normalize(req.date ?? "") !== targetDate) return;
+      const runDate = String(req.hqRunDate ?? req.hq_run_date ?? "").slice(0, 10);
+      if (runDate !== targetDate) return;
 
       const items = productionItems.get(req.id) ?? [];
       const locKey = req.location || req.location_id || "HQ";
@@ -2761,6 +2945,42 @@ function HQAdminView({
                     {profile.locationId}
                   </div>
                 )}
+                <div className="flex flex-col gap-1.5 rounded-xl border border-white/10 bg-[#121212] p-2 text-xs font-medium text-zinc-500 sm:flex-row sm:items-center">
+                  <span className="font-semibold text-zinc-400">HQ Run:</span>
+                  <input
+                    type="date"
+                    value={filterHqRunDate}
+                    onChange={(e) => setFilterHqRunDate(e.target.value)}
+                    className="rounded-lg border border-white/10 bg-[#171717] px-2 py-2 text-sm text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+                <select
+                  className="rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm font-medium text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500"
+                  value={filterFulfillmentMethod}
+                  onChange={(e) => {
+                    setFilterFulfillmentMethod(e.target.value);
+                    setFilterFulfillmentWindow("all");
+                  }}
+                >
+                  <option value="all">All Methods</option>
+                  <option value="hq_delivery">HQ Delivery</option>
+                  <option value="store_pickup">Store Pickup</option>
+                </select>
+                <select
+                  className="rounded-lg border border-white/10 bg-[#171717] px-3 py-2 text-sm font-medium text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500"
+                  value={filterFulfillmentWindow}
+                  onChange={(e) => setFilterFulfillmentWindow(e.target.value)}
+                >
+                  <option value="all">All Windows</option>
+                  {(filterFulfillmentMethod === "store_pickup"
+                    ? validWindowsForMethod("store_pickup")
+                    : filterFulfillmentMethod === "hq_delivery"
+                    ? validWindowsForMethod("hq_delivery")
+                    : ["morning", "afternoon", "evening", "next_hq_run", "asap_pickup"] as FulfillmentWindow[]
+                  ).map((windowValue) => (
+                    <option key={windowValue} value={windowValue}>{FULFILLMENT_WINDOW_LABELS[windowValue]}</option>
+                  ))}
+                </select>
                 {/* Date/time range filters */}
                 <select
                   value={filterDatePreset}
@@ -2804,10 +3024,13 @@ function HQAdminView({
                     onCustom={() => setFilterDatePreset("custom")}
                   />
                 </div>
-                {(filterStatus !== "all" || filterLocation !== "All" || filterFromDate || filterFromTime || filterToDate || filterToTime || filterDatePreset !== "custom" || searchQuery) && (
+                {(filterStatus !== "all" || filterLocation !== "All" || filterHqRunDate || filterFulfillmentMethod !== "all" || filterFulfillmentWindow !== "all" || filterFromDate || filterFromTime || filterToDate || filterToTime || filterDatePreset !== "custom" || searchQuery) && (
                   <button onClick={() => {
                     setFilterStatus("all");
                     setFilterLocation("All");
+                    setFilterHqRunDate("");
+                    setFilterFulfillmentMethod("all");
+                    setFilterFulfillmentWindow("all");
                     setFilterFromDate("");
                     setFilterFromTime("");
                     setFilterToDate("");
@@ -2842,7 +3065,9 @@ function HQAdminView({
                     <TableHead className="py-3">Request ID</TableHead>
                     <TableHead className="py-3">Location</TableHead>
                     <TableHead className="py-3">Requested By</TableHead>
-                    <TableHead className="py-3">Date</TableHead>
+                    <TableHead className="py-3">Submitted</TableHead>
+                    <TableHead className="py-3">HQ Run Date</TableHead>
+                    <TableHead className="py-3">Method / Window</TableHead>
                     <TableHead className="py-3">Items</TableHead>
                     <TableHead className="py-3">Req. Value</TableHead>
                     <TableHead className="py-3">Status</TableHead>
@@ -2868,6 +3093,13 @@ function HQAdminView({
                       <TableCell className="py-4 text-sm text-zinc-400">{req.requestedBy || req.requestedby || "—"}</TableCell>
                       <TableCell className="py-4 text-sm text-zinc-500">
                         <div className="flex items-center gap-1.5"><Clock className="h-3.5 w-3.5 text-zinc-600" />{req.date}</div>
+                      </TableCell>
+                      <TableCell className="py-4 text-sm font-semibold text-zinc-200">
+                        {formatHqRunDate(req.hqRunDate ?? req.hq_run_date)}
+                      </TableCell>
+                      <TableCell className="py-4 text-xs text-zinc-400">
+                        <div className="font-semibold text-zinc-200">{fulfillmentMethodLabel(req.fulfillmentMethod ?? req.fulfillment_method)}</div>
+                        <div>{fulfillmentWindowLabel(req.fulfillmentWindow ?? req.fulfillment_window)}</div>
                       </TableCell>
                       <TableCell className="py-4 text-sm font-medium text-zinc-300">{req.items}</TableCell>
                        <TableCell className="py-4 text-sm font-semibold">
@@ -2922,7 +3154,7 @@ function HQAdminView({
                     </TableRow>
                   )) : (
                     <TableRow>
-                      <TableCell colSpan={9} className="py-10 text-center text-sm text-zinc-500">No matching requests.</TableCell>
+                      <TableCell colSpan={11} className="py-10 text-center text-sm text-zinc-500">No matching requests.</TableCell>
                     </TableRow>
                   )}
                 </TableBody>
@@ -2982,7 +3214,8 @@ function HQAdminView({
                       </button>
                     )}
                     {/* Ticket button: hq_fulfillment only sees it when a ticket exists. */}
-                    {["approved", "fulfilled"].includes((selectedReq?.status ?? "").toLowerCase()) &&
+                    {["approved", "fulfilled", "partially_fulfilled"].includes((selectedReq?.status ?? "").toLowerCase()) &&
+                     (selectedReq?.fulfillmentMethod ?? selectedReq?.fulfillment_method) !== "store_pickup" &&
                      (deliveryTicketForReq || !isHqFulfillmentUser) && (
                       <button
                         onClick={handleDeliveryTicketAction}
@@ -3307,6 +3540,22 @@ function HQAdminView({
                 <span className="shrink-0 font-semibold text-neutral-500 text-xs uppercase tracking-wider pt-0.5">Notes:</span>
                 <span className="text-neutral-700">{selectedReq?.notes || <span className="text-neutral-400 italic">No notes provided.</span>}</span>
               </div>
+              {selectedReq && (
+                <div className="grid grid-cols-1 gap-2 rounded-lg border border-neutral-200 bg-neutral-50 p-3 text-xs sm:grid-cols-3">
+                  <div>
+                    <span className="block font-semibold uppercase tracking-wider text-neutral-500">HQ Run Date</span>
+                    <span className="mt-1 block font-bold text-neutral-800">{formatHqRunDate(selectedReq.hqRunDate ?? selectedReq.hq_run_date)}</span>
+                  </div>
+                  <div>
+                    <span className="block font-semibold uppercase tracking-wider text-neutral-500">Fulfillment</span>
+                    <span className="mt-1 block font-bold text-neutral-800">{fulfillmentMethodLabel(selectedReq.fulfillmentMethod ?? selectedReq.fulfillment_method)}</span>
+                  </div>
+                  <div>
+                    <span className="block font-semibold uppercase tracking-wider text-neutral-500">Window</span>
+                    <span className="mt-1 block font-bold text-neutral-800">{fulfillmentWindowLabel(selectedReq.fulfillmentWindow ?? selectedReq.fulfillment_window)}</span>
+                  </div>
+                </div>
+              )}
               {selectedReq && canCompleteFulfillment && FULFILLABLE_STATUSES.has((selectedReq.status ?? "").toLowerCase()) && !isFulfillmentLocked && hqReqItems.length > 0 && (
                 <div className="bg-neutral-50 border border-neutral-200 rounded-lg p-3 space-y-2.5 shadow-sm">
                   <div>
@@ -3672,12 +3921,8 @@ function HQAdminView({
             </div>
             <div className="flex flex-col sm:flex-row items-center gap-2 w-full sm:w-auto mt-4 sm:mt-0 print:hidden">
               <input type="date"
-                value={new Date(productionDate).toISOString().split("T")[0]}
-                onChange={(e) => {
-                  const [y, m, d] = e.target.value.split("-");
-                  const dDate = new Date(Number(y), Number(m) - 1, Number(d));
-                  setProductionDate(dDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }));
-                }}
+                value={productionDate}
+                onChange={(e) => setProductionDate(e.target.value)}
                 className="px-3 py-1.5 text-sm font-medium border border-neutral-200 text-neutral-700 bg-white rounded-lg focus:outline-none focus:ring-1 focus:ring-brand-500" />
               <button onClick={() => window.print()}
                 className="flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-neutral-900 text-white rounded-lg shadow-sm hover:bg-neutral-800 transition-colors w-full sm:w-auto justify-center">
@@ -3731,10 +3976,10 @@ function HQAdminView({
                 if (isNaN(Date.parse(d))) return d.trim();
                 return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
               };
-              const targetNorm = normDate(productionDate);
+              const targetNorm = String(productionDate || "").slice(0, 10);
               const reqSet = new Set(
                 requisitions
-                  .filter(r => PRODUCTION_STATUSES.has((r.status ?? "").toLowerCase()) && normDate(r.date ?? "") === targetNorm)
+                  .filter(r => PRODUCTION_STATUSES.has((r.status ?? "").toLowerCase()) && String(r.hqRunDate ?? r.hq_run_date ?? "").slice(0, 10) === targetNorm)
                   .map(r => r.id)
               );
               const missingCount = allEntries.filter(([, e]) => e.isFGMode && (!e.packQty || e.packQty <= 0)).length;
