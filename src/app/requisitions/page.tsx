@@ -2138,6 +2138,37 @@ function HQAdminView({
   // Defined here (not inside hqProductionDemand) so the useEffect below can use it too.
   const PRODUCTION_STATUSES = new Set(["submitted", "approved", "partial", "backordered", "fulfilled"]);
 
+  // Keep preload and aggregation date/status logic in sync.
+  // New requisitions use hq_run_date; legacy rows without it fall back to the old display date.
+  const normalizeProductionStatus = (status?: string | null) => {
+    const normalized = String(status ?? "").toLowerCase().trim();
+    if (normalized === "partially_fulfilled" || normalized === "partial_fulfilled" || normalized === "partial") {
+      return "partial";
+    }
+    return normalized;
+  };
+
+  const isProductionStatus = (status?: string | null) =>
+    PRODUCTION_STATUSES.has(normalizeProductionStatus(status));
+
+  const normalizeLegacyProductionDate = (dateValue?: string | null): string => {
+    if (!dateValue) return "";
+    const raw = String(dateValue).trim();
+    if (!raw) return "";
+    if (isNaN(Date.parse(raw))) return raw;
+    return new Date(raw).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  };
+
+  const matchesProductionDate = (req: any, selectedDate: string) => {
+    const targetDate = String(selectedDate || "").slice(0, 10);
+    if (!targetDate) return false;
+
+    const runDate = String(req.hqRunDate ?? req.hq_run_date ?? "").slice(0, 10);
+    if (runDate) return runDate === targetDate;
+
+    return normalizeLegacyProductionDate(req.date) === normalizeLegacyProductionDate(targetDate);
+  };
+
   // Real locations loaded from DB — used for the filter dropdown.
   const [locations, setLocations] = useState<Array<{ id: string; name: string }>>([]);
 
@@ -2167,15 +2198,8 @@ function HQAdminView({
   // Batch-load line items for production date whenever date or requisitions list changes
   useEffect(() => {
     if (!requisitions.length || !productionDate) return;
-    const normalize = (d: string): string => {
-      if (!d) return "";
-      if (isNaN(Date.parse(d))) return d.trim();
-      return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-    };
-    const targetDate = normalize(productionDate);
     const relevant = requisitions.filter((r) => {
-      const s = (r.status ?? "").toLowerCase();
-      return PRODUCTION_STATUSES.has(s) && normalize(r.date ?? "") === targetDate;
+      return isProductionStatus(r.status) && matchesProductionDate(r, productionDate);
     });
     if (!relevant.length) { setProductionItems(new Map()); return; }
     let cancelled = false;
@@ -2755,10 +2779,9 @@ function HQAdminView({
     };
 
     requisitions.forEach((req) => {
-      const s = (req.status ?? "").toLowerCase();
+      const s = normalizeProductionStatus(req.status);
       if (!PRODUCTION_STATUSES.has(s)) return;
-      const runDate = String(req.hqRunDate ?? req.hq_run_date ?? "").slice(0, 10);
-      if (runDate !== targetDate) return;
+      if (!matchesProductionDate(req, targetDate)) return;
 
       const items = productionItems.get(req.id) ?? [];
       const locKey = req.location || req.location_id || "HQ";
@@ -4104,15 +4127,9 @@ function HQAdminView({
             {(() => {
               const allEntries = [...pendingEntries, ...completedEntries] as [string, ProdAggEntry][];
               const destSet = new Set(allEntries.flatMap(([, e]) => e.locations.map(l => l.loc)));
-              const normDate = (d: string) => {
-                if (!d) return "";
-                if (isNaN(Date.parse(d))) return d.trim();
-                return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-              };
-              const targetNorm = String(productionDate || "").slice(0, 10);
               const reqSet = new Set(
                 requisitions
-                  .filter(r => PRODUCTION_STATUSES.has((r.status ?? "").toLowerCase()) && String(r.hqRunDate ?? r.hq_run_date ?? "").slice(0, 10) === targetNorm)
+                  .filter(r => isProductionStatus(r.status) && matchesProductionDate(r, productionDate))
                   .map(r => r.id)
               );
               const missingCount = allEntries.filter(([, e]) => e.isFGMode && (!e.packQty || e.packQty <= 0)).length;
