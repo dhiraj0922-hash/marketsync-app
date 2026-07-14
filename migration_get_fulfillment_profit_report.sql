@@ -29,8 +29,8 @@
 --   ri.finished_good_id IS NOT NULL    — finished-good mode only (excludes raw transfers)
 --
 -- Margin calculation:
---   revenue    = quantity_fulfilled × unit_price
---   cogs       = quantity_fulfilled × hq_sale_items.making_cost
+--   revenue    = fulfilled_value, line_total, or quantity_fulfilled × unit_price
+--   cogs       = quantity_fulfilled × requisition_items.pack_qty_snapshot × hq_sale_items.making_cost
 --   profit     = revenue − cogs
 --   margin_pct = (profit / NULLIF(revenue, 0)) × 100
 --                → NULL when revenue = 0 (avoids division-by-zero)
@@ -82,31 +82,41 @@ AS $$
 
     -- Revenue: use line_total when pre-computed (avoids floating-point drift),
     -- fall back to quantity × unit_price for rows where line_total was not stored.
-    COALESCE(ri.line_total, ri.quantity_fulfilled * ri.unit_price)
+    COALESCE(ri.fulfilled_value, ri.line_total, ri.quantity_fulfilled * ri.unit_price)
                                                               AS revenue,
 
     hq.making_cost,
 
-    -- COGS: ingredient cost to produce the quantity fulfilled
-    ri.quantity_fulfilled * COALESCE(hq.making_cost, 0)       AS cogs,
+    -- COGS: use row-level pack snapshot, not live hq_sale_items.pack_qty.
+    ri.quantity_fulfilled
+      * COALESCE(NULLIF(ri.pack_qty_snapshot, 0), 1)
+      * COALESCE(hq.making_cost, 0)                           AS cogs,
 
     -- Profit: revenue minus production cost
-    COALESCE(ri.line_total, ri.quantity_fulfilled * ri.unit_price)
-      - (ri.quantity_fulfilled * COALESCE(hq.making_cost, 0)) AS profit,
+    COALESCE(ri.fulfilled_value, ri.line_total, ri.quantity_fulfilled * ri.unit_price)
+      - (
+          ri.quantity_fulfilled
+          * COALESCE(NULLIF(ri.pack_qty_snapshot, 0), 1)
+          * COALESCE(hq.making_cost, 0)
+        )                                                     AS profit,
 
     -- Margin %: NULL-safe — returns NULL rather than divide-by-zero when revenue = 0
     CASE
-      WHEN COALESCE(ri.line_total, ri.quantity_fulfilled * ri.unit_price) = 0
+      WHEN COALESCE(ri.fulfilled_value, ri.line_total, ri.quantity_fulfilled * ri.unit_price) = 0
         THEN NULL
       ELSE ROUND(
         (
           (
-            COALESCE(ri.line_total, ri.quantity_fulfilled * ri.unit_price)
-            - (ri.quantity_fulfilled * COALESCE(hq.making_cost, 0))
+            COALESCE(ri.fulfilled_value, ri.line_total, ri.quantity_fulfilled * ri.unit_price)
+            - (
+                ri.quantity_fulfilled
+                * COALESCE(NULLIF(ri.pack_qty_snapshot, 0), 1)
+                * COALESCE(hq.making_cost, 0)
+              )
           )
           /
           NULLIF(
-            COALESCE(ri.line_total, ri.quantity_fulfilled * ri.unit_price),
+            COALESCE(ri.fulfilled_value, ri.line_total, ri.quantity_fulfilled * ri.unit_price),
             0
           )
         ) * 100,

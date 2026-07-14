@@ -332,34 +332,34 @@ BEGIN
     hq.name                                                    AS item_name,
     ri.quantity_fulfilled                                      AS qty,
     ri.unit_price,
-    COALESCE(ri.line_total, ri.quantity_fulfilled * ri.unit_price) AS revenue,
+    COALESCE(ri.fulfilled_value, ri.line_total, ri.quantity_fulfilled * ri.unit_price) AS revenue,
     hq.making_cost,
-    COALESCE(NULLIF(hq.pack_qty, 0), 1)                        AS pack_qty,
+    COALESCE(NULLIF(ri.pack_qty_snapshot, 0), 1)                AS pack_qty,
     ri.quantity_fulfilled
-      * COALESCE(NULLIF(hq.pack_qty, 0), 1)
+      * COALESCE(NULLIF(ri.pack_qty_snapshot, 0), 1)
       * COALESCE(hq.making_cost, 0)                            AS cogs,
-    COALESCE(ri.line_total, ri.quantity_fulfilled * ri.unit_price)
+    COALESCE(ri.fulfilled_value, ri.line_total, ri.quantity_fulfilled * ri.unit_price)
       - (
           ri.quantity_fulfilled
-          * COALESCE(NULLIF(hq.pack_qty, 0), 1)
+          * COALESCE(NULLIF(ri.pack_qty_snapshot, 0), 1)
           * COALESCE(hq.making_cost, 0)
         )                                                       AS profit,
     CASE
-      WHEN COALESCE(ri.line_total, ri.quantity_fulfilled * ri.unit_price) = 0
+      WHEN COALESCE(ri.fulfilled_value, ri.line_total, ri.quantity_fulfilled * ri.unit_price) = 0
         THEN NULL
       ELSE ROUND(
         (
           (
-            COALESCE(ri.line_total, ri.quantity_fulfilled * ri.unit_price)
+            COALESCE(ri.fulfilled_value, ri.line_total, ri.quantity_fulfilled * ri.unit_price)
             - (
                 ri.quantity_fulfilled
-                * COALESCE(NULLIF(hq.pack_qty, 0), 1)
+                * COALESCE(NULLIF(ri.pack_qty_snapshot, 0), 1)
                 * COALESCE(hq.making_cost, 0)
               )
           )
           /
           NULLIF(
-            COALESCE(ri.line_total, ri.quantity_fulfilled * ri.unit_price),
+            COALESCE(ri.fulfilled_value, ri.line_total, ri.quantity_fulfilled * ri.unit_price),
             0
           )
         ) * 100,

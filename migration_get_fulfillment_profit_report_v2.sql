@@ -2,16 +2,17 @@
 -- MIGRATION: get_fulfillment_profit_report v2 — Fix COGS for packed FG items
 --
 -- Root cause fixed:
---   quantity_fulfilled is in PACKS (e.g. 3 packs of DOSA BATTER)
+--   some quantity_fulfilled values are in PACKS (e.g. 3 packs of DOSA BATTER)
+--   while others are base units/eaches (e.g. 5 Chocolate Lava Cakes)
 --   making_cost is per BASE UNIT (e.g. $3.0593 / litre)
---   pack_qty (e.g. 11 L/pack) was missing from the COGS formula
+--   the row-level pack_qty_snapshot is the only safe multiplier
 --
 -- Old (wrong):
 --   cogs = quantity_fulfilled × making_cost
 --   e.g.  3 × $3.0593 = $9.18   ← should be $100.96
 --
 -- New (correct):
---   cogs = quantity_fulfilled × COALESCE(NULLIF(pack_qty, 0), 1) × making_cost
+--   cogs = quantity_fulfilled × COALESCE(NULLIF(ri.pack_qty_snapshot, 0), 1) × making_cost
 --   e.g.  3 × 11 × $3.0593 = $100.96   ✅
 --
 -- Additional improvements over v1:
@@ -19,7 +20,7 @@
 --   • Adds pack_qty column to output for audit transparency
 --   • Keeps qty alias (not quantity_fulfilled) so frontend mapper is unchanged
 --   • Keeps making_cost column so frontend mapper is unchanged
---   • Uses COALESCE(ri.line_total, qty × unit_price) for revenue (float-drift safe)
+--   • Uses COALESCE(ri.fulfilled_value, ri.line_total, qty × unit_price) for revenue
 --   • margin_pct returns NULL when revenue = 0 (avoids divide-by-zero;
 --     frontend already handles null margin_pct correctly)
 --   • Preserves original JOIN on finished_good_id (not item_id)
@@ -40,12 +41,12 @@ RETURNS TABLE (
   location_id   TEXT,       -- from requisitions.location_id
   location_name TEXT,       -- from locations.name (NEW — NULL if location not in table)
   item_name     TEXT,       -- from hq_sale_items.name
-  qty           NUMERIC,    -- quantity_fulfilled (in packs / sellable units)
-  unit_price    NUMERIC,    -- pack price snapshot at fulfillment time
-  revenue       NUMERIC,    -- qty × unit_price (uses line_total when pre-computed)
+  qty           NUMERIC,    -- quantity_fulfilled (line quantity)
+  unit_price    NUMERIC,    -- line price snapshot at fulfillment time
+  revenue       NUMERIC,    -- prefers fulfilled_value, then line_total, then qty × unit_price
   making_cost   NUMERIC,    -- hq_sale_items.making_cost (per base unit)
-  pack_qty      NUMERIC,    -- hq_sale_items.pack_qty (base units per pack; NEW — for audit)
-  cogs          NUMERIC,    -- qty × pack_qty × making_cost  ← THE FIX
+  pack_qty      NUMERIC,    -- requisition_items.pack_qty_snapshot used as COGS multiplier
+  cogs          NUMERIC,    -- qty × pack_qty_snapshot × making_cost
   profit        NUMERIC,    -- revenue − cogs
   margin_pct    NUMERIC     -- (profit / revenue) × 100; NULL when revenue = 0
 )
@@ -65,55 +66,54 @@ AS $$
 
     hq.name                                                    AS item_name,
 
-    -- Qty is in packs (the fulfillment unit)
+    -- Qty is the fulfilled line quantity; pack_qty_snapshot defines its base multiplier.
     ri.quantity_fulfilled                                      AS qty,
 
     ri.unit_price,
 
     -- Revenue: prefer pre-computed line_total (avoids floating-point drift);
     -- fall back to qty × unit_price for rows where line_total was not stored.
-    COALESCE(ri.line_total, ri.quantity_fulfilled * ri.unit_price)
+    COALESCE(ri.fulfilled_value, ri.line_total, ri.quantity_fulfilled * ri.unit_price)
                                                                AS revenue,
 
     -- Making cost per base unit (exposed for audit transparency)
     hq.making_cost,
 
-    -- Pack qty: base units per sellable pack (exposed for audit transparency)
-    COALESCE(NULLIF(hq.pack_qty, 0), 1)                        AS pack_qty,
+    -- Pack qty snapshot: row-level base-unit multiplier captured at requisition time.
+    COALESCE(NULLIF(ri.pack_qty_snapshot, 0), 1)                AS pack_qty,
 
     -- ── COGS FIX ──────────────────────────────────────────────────────────────
-    -- Old: ri.quantity_fulfilled * hq.making_cost            (WRONG — unit mismatch)
-    -- New: qty_packs × base_units_per_pack × cost_per_base_unit  ✅
+    -- Use row snapshot, not live hq.pack_qty. Some FG lines are fulfilled as eaches.
     ri.quantity_fulfilled
-      * COALESCE(NULLIF(hq.pack_qty, 0), 1)
+      * COALESCE(NULLIF(ri.pack_qty_snapshot, 0), 1)
       * COALESCE(hq.making_cost, 0)                            AS cogs,
 
     -- Profit: revenue minus full production cost
-    COALESCE(ri.line_total, ri.quantity_fulfilled * ri.unit_price)
+    COALESCE(ri.fulfilled_value, ri.line_total, ri.quantity_fulfilled * ri.unit_price)
       - (
           ri.quantity_fulfilled
-          * COALESCE(NULLIF(hq.pack_qty, 0), 1)
+          * COALESCE(NULLIF(ri.pack_qty_snapshot, 0), 1)
           * COALESCE(hq.making_cost, 0)
         )                                                       AS profit,
 
     -- Margin %: NULL-safe — returns NULL (not 0) when revenue = 0
     -- so the frontend can distinguish "no sale" from "zero margin".
     CASE
-      WHEN COALESCE(ri.line_total, ri.quantity_fulfilled * ri.unit_price) = 0
+      WHEN COALESCE(ri.fulfilled_value, ri.line_total, ri.quantity_fulfilled * ri.unit_price) = 0
         THEN NULL
       ELSE ROUND(
         (
           (
-            COALESCE(ri.line_total, ri.quantity_fulfilled * ri.unit_price)
+            COALESCE(ri.fulfilled_value, ri.line_total, ri.quantity_fulfilled * ri.unit_price)
             - (
                 ri.quantity_fulfilled
-                * COALESCE(NULLIF(hq.pack_qty, 0), 1)
+                * COALESCE(NULLIF(ri.pack_qty_snapshot, 0), 1)
                 * COALESCE(hq.making_cost, 0)
               )
           )
           /
           NULLIF(
-            COALESCE(ri.line_total, ri.quantity_fulfilled * ri.unit_price),
+            COALESCE(ri.fulfilled_value, ri.line_total, ri.quantity_fulfilled * ri.unit_price),
             0
           )
         ) * 100,
