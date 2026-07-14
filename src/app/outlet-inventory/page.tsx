@@ -40,6 +40,92 @@ function validWindowsForMethod(method: FulfillmentMethod): FulfillmentWindow[] {
     ? ["morning", "afternoon", "evening", "next_hq_run"]
     : ["morning", "afternoon", "evening", "asap_pickup"];
 }
+
+function daysInMonth(year: number, month: number): number {
+  return new Date(year, month, 0).getDate();
+}
+
+function parseIsoDateParts(value: string): { year: number; month: number; day: number } | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value || "");
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (!Number.isFinite(year) || month < 1 || month > 12) return null;
+  const maxDay = daysInMonth(year, month);
+  if (day < 1 || day > maxDay) return null;
+  return { year, month, day };
+}
+
+function makeIsoDate(year: number, month: number, day: number): string {
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function IsoDateDropdownPicker({
+  value,
+  onChange,
+  label,
+  disabled = false,
+  className = "",
+}: {
+  value: string;
+  onChange: (nextIsoDate: string) => void;
+  label?: string;
+  disabled?: boolean;
+  className?: string;
+}) {
+  const currentYear = new Date().getFullYear();
+  const now = new Date();
+  const parsed = parseIsoDateParts(value);
+  const fallback = parsed ?? { year: currentYear, month: now.getMonth() + 1, day: now.getDate() };
+  const yearOptions = Array.from(new Set([
+    ...Array.from({ length: 7 }, (_, idx) => currentYear - 2 + idx),
+    parsed?.year,
+  ].filter((year): year is number => typeof year === "number"))).sort((a, b) => a - b);
+  const monthOptions = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  ];
+  const maxDay = daysInMonth(fallback.year, fallback.month);
+
+  const updatePart = (part: "year" | "month" | "day", rawValue: string) => {
+    if (!rawValue) {
+      onChange("");
+      return;
+    }
+    const nextYear = part === "year" ? Number(rawValue) : fallback.year;
+    const nextMonth = part === "month" ? Number(rawValue) : fallback.month;
+    const nextDay = part === "day" ? Number(rawValue) : Math.min(fallback.day, daysInMonth(nextYear, nextMonth));
+    onChange(makeIsoDate(nextYear, nextMonth, Math.min(nextDay, daysInMonth(nextYear, nextMonth))));
+  };
+
+  const selectClass = "h-10 rounded-lg border border-neutral-200 bg-white px-2 text-xs text-neutral-800 shadow-sm outline-none focus:ring-2 focus:ring-brand-500 disabled:cursor-not-allowed disabled:opacity-50";
+
+  return (
+    <div className={`flex flex-col gap-1 ${className}`}>
+      {label && <span className="text-xs font-semibold text-inherit">{label}</span>}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <select aria-label={`${label ?? "Date"} year`} disabled={disabled} value={parsed?.year ?? ""} onChange={(e) => updatePart("year", e.target.value)} className={selectClass}>
+          <option value="">Year</option>
+          {yearOptions.map((year) => <option key={year} value={year}>{year}</option>)}
+        </select>
+        <select aria-label={`${label ?? "Date"} month`} disabled={disabled} value={parsed?.month ?? ""} onChange={(e) => updatePart("month", e.target.value)} className={selectClass}>
+          <option value="">Month</option>
+          {monthOptions.map((month, idx) => <option key={month} value={idx + 1}>{month}</option>)}
+        </select>
+        <select aria-label={`${label ?? "Date"} day`} disabled={disabled} value={parsed?.day ?? ""} onChange={(e) => updatePart("day", e.target.value)} className={selectClass}>
+          <option value="">Day</option>
+          {Array.from({ length: maxDay }, (_, idx) => idx + 1).map((day) => <option key={day} value={day}>{day}</option>)}
+        </select>
+        {value && (
+          <button type="button" disabled={disabled} onClick={() => onChange("")} className="h-10 rounded-lg border border-neutral-200 bg-white px-2 text-xs font-semibold text-neutral-500 hover:bg-neutral-50 hover:text-neutral-900 disabled:opacity-50">
+            Clear
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
 const HQ_VIEW_MODES: [ViewMode, string][] = [
   ["active",    "Active"],
   ["catalog",   "Add"],
@@ -1589,11 +1675,10 @@ export default function OutletInventoryPage() {
               <div className="grid gap-3 rounded-xl border border-brand-100 bg-brand-50/40 p-3 sm:grid-cols-3">
                 <label className="block">
                   <span className="text-xs font-semibold text-neutral-700 block">Needed for</span>
-                  <input
-                    type="date"
+                  <IsoDateDropdownPicker
                     value={reqHqRunDate}
-                    onChange={(e) => setReqHqRunDate(e.target.value)}
-                    className="mt-1 h-10 w-full rounded-lg border border-neutral-200 bg-white px-3 text-xs outline-none focus:ring-2 focus:ring-brand-500"
+                    onChange={setReqHqRunDate}
+                    className="mt-1"
                   />
                 </label>
                 <label className="block">

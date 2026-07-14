@@ -164,6 +164,99 @@ function buildLocalDateTime(dateValue: string, timeValue: string, fallbackTime: 
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+function daysInMonth(year: number, month: number): number {
+  return new Date(year, month, 0).getDate();
+}
+
+function parseIsoDateParts(value: string): { year: number; month: number; day: number } | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value || "");
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (!Number.isFinite(year) || month < 1 || month > 12) return null;
+  const maxDay = daysInMonth(year, month);
+  if (day < 1 || day > maxDay) return null;
+  return { year, month, day };
+}
+
+function makeIsoDate(year: number, month: number, day: number): string {
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function IsoDateDropdownPicker({
+  value,
+  onChange,
+  label,
+  disabled = false,
+  className = "",
+  selectClassName,
+  clearButtonClassName,
+  onCustom,
+}: {
+  value: string;
+  onChange: (nextIsoDate: string) => void;
+  label?: string;
+  disabled?: boolean;
+  className?: string;
+  selectClassName?: string;
+  clearButtonClassName?: string;
+  onCustom?: () => void;
+}) {
+  const currentYear = new Date().getFullYear();
+  const parsed = parseIsoDateParts(value);
+  const fallback = parsed ?? { year: currentYear, month: new Date().getMonth() + 1, day: new Date().getDate() };
+  const yearOptions = Array.from(new Set([
+    ...Array.from({ length: 7 }, (_, idx) => currentYear - 2 + idx),
+    parsed?.year,
+  ].filter((year): year is number => typeof year === "number"))).sort((a, b) => a - b);
+  const monthOptions = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  ];
+  const maxDay = daysInMonth(fallback.year, fallback.month);
+
+  const updatePart = (part: "year" | "month" | "day", rawValue: string) => {
+    onCustom?.();
+    if (!rawValue) {
+      onChange("");
+      return;
+    }
+    const nextYear = part === "year" ? Number(rawValue) : fallback.year;
+    const nextMonth = part === "month" ? Number(rawValue) : fallback.month;
+    const nextDay = part === "day" ? Number(rawValue) : Math.min(fallback.day, daysInMonth(nextYear, nextMonth));
+    onChange(makeIsoDate(nextYear, nextMonth, Math.min(nextDay, daysInMonth(nextYear, nextMonth))));
+  };
+
+  const selectClass = selectClassName ?? "h-10 rounded-lg border border-white/10 bg-[#171717] px-2 text-sm text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50";
+  const clearClass = clearButtonClassName ?? "h-10 rounded-lg border border-white/10 bg-[#151515] px-2 text-xs font-semibold text-zinc-400 hover:bg-[#202020] hover:text-white disabled:opacity-50";
+
+  return (
+    <div className={`flex flex-col gap-1 ${className}`}>
+      {label && <span className="text-xs font-semibold text-inherit">{label}</span>}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <select aria-label={`${label ?? "Date"} year`} disabled={disabled} value={parsed?.year ?? ""} onChange={(e) => updatePart("year", e.target.value)} className={selectClass}>
+          <option value="">Year</option>
+          {yearOptions.map((year) => <option key={year} value={year}>{year}</option>)}
+        </select>
+        <select aria-label={`${label ?? "Date"} month`} disabled={disabled} value={parsed?.month ?? ""} onChange={(e) => updatePart("month", e.target.value)} className={selectClass}>
+          <option value="">Month</option>
+          {monthOptions.map((month, idx) => <option key={month} value={idx + 1}>{month}</option>)}
+        </select>
+        <select aria-label={`${label ?? "Date"} day`} disabled={disabled} value={parsed?.day ?? ""} onChange={(e) => updatePart("day", e.target.value)} className={selectClass}>
+          <option value="">Day</option>
+          {Array.from({ length: maxDay }, (_, idx) => idx + 1).map((day) => <option key={day} value={day}>{day}</option>)}
+        </select>
+        {value && (
+          <button type="button" disabled={disabled} onClick={() => { onCustom?.(); onChange(""); }} className={clearClass}>
+            Clear
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function to12HourParts(timeValue: string): { hour: string; minute: string; period: "AM" | "PM" } {
   const [rawHour = "0", rawMinute = "00"] = (timeValue || "00:00").split(":");
   const hour24 = Number(rawHour);
@@ -1672,11 +1765,12 @@ function LocationManagerView({
                   </div>
                   <label className="block">
                     <span className="text-xs font-semibold text-slate-600">Needed for</span>
-                    <input
-                      type="date"
+                    <IsoDateDropdownPicker
                       value={hqRunDate}
-                      onChange={(e) => setHqRunDate(e.target.value)}
-                      className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none ring-emerald-600 focus:ring-2"
+                      onChange={setHqRunDate}
+                      className="mt-1"
+                      selectClassName="h-10 rounded-lg border border-slate-200 bg-white px-2 text-sm text-slate-800 shadow-sm outline-none ring-emerald-600 focus:ring-2 disabled:cursor-not-allowed disabled:opacity-50"
+                      clearButtonClassName="h-10 rounded-lg border border-slate-200 bg-white px-2 text-xs font-semibold text-slate-500 hover:bg-slate-50 hover:text-slate-900 disabled:opacity-50"
                     />
                   </label>
                   <label className="block">
@@ -2988,11 +3082,9 @@ function HQAdminView({
                 )}
                 <div className="flex flex-col gap-1.5 rounded-xl border border-white/10 bg-[#121212] p-2 text-xs font-medium text-zinc-500 sm:flex-row sm:items-center">
                   <span className="font-semibold text-zinc-400">HQ Run:</span>
-                  <input
-                    type="date"
+                  <IsoDateDropdownPicker
                     value={filterHqRunDate}
-                    onChange={(e) => setFilterHqRunDate(e.target.value)}
-                    className="rounded-lg border border-white/10 bg-[#171717] px-2 py-2 text-sm text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500"
+                    onChange={setFilterHqRunDate}
                   />
                 </div>
                 <select
@@ -3037,11 +3129,10 @@ function HQAdminView({
                 </select>
                 <div className="flex flex-col gap-1.5 rounded-xl border border-white/10 bg-[#121212] p-2 text-xs font-medium text-zinc-500 sm:flex-row sm:items-center">
                   <span className="min-w-[38px] font-semibold text-zinc-400">From:</span>
-                  <input
-                    type="date"
+                  <IsoDateDropdownPicker
                     value={filterFromDate}
-                    onChange={(e) => { setFilterDatePreset("custom"); setFilterFromDate(e.target.value); }}
-                    className="rounded-lg border border-white/10 bg-[#171717] px-2 py-2 text-sm text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500"
+                    onChange={setFilterFromDate}
+                    onCustom={() => setFilterDatePreset("custom")}
                   />
                   <Time12HourPicker
                     label="From time"
@@ -3052,11 +3143,10 @@ function HQAdminView({
                 </div>
                 <div className="flex flex-col gap-1.5 rounded-xl border border-white/10 bg-[#121212] p-2 text-xs font-medium text-zinc-500 sm:flex-row sm:items-center">
                   <span className="min-w-[38px] font-semibold text-zinc-400">To:</span>
-                  <input
-                    type="date"
+                  <IsoDateDropdownPicker
                     value={filterToDate}
-                    onChange={(e) => { setFilterDatePreset("custom"); setFilterToDate(e.target.value); }}
-                    className="rounded-lg border border-white/10 bg-[#171717] px-2 py-2 text-sm text-zinc-200 shadow-sm outline-none focus:ring-1 focus:ring-blue-500"
+                    onChange={setFilterToDate}
+                    onCustom={() => setFilterDatePreset("custom")}
                   />
                   <Time12HourPicker
                     label="To time"
@@ -3961,10 +4051,12 @@ function HQAdminView({
               <p className="text-neutral-500 text-sm">Centralized preparation queue for selected date.</p>
             </div>
             <div className="flex flex-col sm:flex-row items-center gap-2 w-full sm:w-auto mt-4 sm:mt-0 print:hidden">
-              <input type="date"
+              <IsoDateDropdownPicker
                 value={productionDate}
-                onChange={(e) => setProductionDate(e.target.value)}
-                className="px-3 py-1.5 text-sm font-medium border border-neutral-200 text-neutral-700 bg-white rounded-lg focus:outline-none focus:ring-1 focus:ring-brand-500" />
+                onChange={setProductionDate}
+                selectClassName="h-9 rounded-lg border border-neutral-200 bg-white px-2 text-sm font-medium text-neutral-700 shadow-sm outline-none focus:ring-1 focus:ring-brand-500 disabled:cursor-not-allowed disabled:opacity-50"
+                clearButtonClassName="h-9 rounded-lg border border-neutral-200 bg-white px-2 text-xs font-semibold text-neutral-500 hover:bg-neutral-50 hover:text-neutral-900 disabled:opacity-50"
+              />
               <button onClick={() => window.print()}
                 className="flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-neutral-900 text-white rounded-lg shadow-sm hover:bg-neutral-800 transition-colors w-full sm:w-auto justify-center">
                 <Printer className="h-4 w-4" /> Print Kitchen Sheet
