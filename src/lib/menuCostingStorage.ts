@@ -87,7 +87,10 @@ export function fromDbMenuCostingComponent(db: any): MenuCostingComponent {
 
 export function toDbMenuCostingComponent(fe: Partial<MenuCostingComponent>): any {
   const db: any = {};
-  if (fe.id != null && fe.id !== "") db.id = fe.id;
+  // Do not generate or forward client-side component IDs for saves.
+  // outlet_menu_costing_components.id has DEFAULT gen_random_uuid() in Postgres.
+  // Existing component IDs are intentionally not reused because updateMenuCosting
+  // replaces child rows after deleting the previous component set.
   if (fe.costingId !== undefined) db.costing_id = fe.costingId;
   if (fe.sourceType !== undefined) db.source_type = fe.sourceType;
   if (fe.sourceItemId !== undefined) db.source_item_id = fe.sourceItemId;
