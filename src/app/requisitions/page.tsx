@@ -1675,16 +1675,19 @@ function LocationManagerView({
             </section>
           </main>
 
-          <aside className="space-y-4 lg:sticky lg:top-6 lg:self-start">
-            <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
-              <div className="flex items-center justify-between border-b border-slate-200 p-5">
+          {/* Order Cart — sticky panel with independent scroll on desktop */}
+          <aside className="space-y-4 lg:sticky lg:top-6 lg:self-start lg:flex lg:flex-col lg:max-h-[calc(100vh-6rem)] lg:overflow-hidden">
+            <section className="rounded-2xl border border-slate-200 bg-white shadow-sm lg:flex lg:flex-col lg:min-h-0 lg:h-full">
+              {/* Cart header — pinned, never scrolls */}
+              <div className="flex shrink-0 items-center justify-between border-b border-slate-200 p-5">
                 <div>
                   <h2 className="text-lg font-semibold text-slate-950">Order Cart</h2>
                   <p className="mt-1 text-sm text-slate-500">{lineItems.filter(li => li.quantityRequested > 0).length} selected item{lineItems.filter(li => li.quantityRequested > 0).length === 1 ? "" : "s"}</p>
                 </div>
                 <div className="rounded-xl bg-emerald-50 p-2 text-emerald-700"><ShoppingCart className="h-5 w-5" /></div>
               </div>
-              <div className="space-y-4 p-5">
+              {/* Cart body — scrolls independently on desktop */}
+              <div className="flex-1 overflow-y-auto min-h-0 space-y-4 p-5">
                 {!editingRequisitionId && isDraftCartRestored && activeDraftRequisitionId && (
                   <div className="flex items-start gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
                     <Save className="mt-0.5 h-4 w-4 shrink-0" />
@@ -1815,12 +1818,18 @@ function LocationManagerView({
                     className="mt-2 w-full resize-none rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-emerald-600 focus:ring-2"
                   />
                 </label>
+              </div>{/* end cart-body */}
+
+              {/* Cart footer — pinned at bottom, never scrolls */}
+              <div className="shrink-0 space-y-3 border-t border-slate-100 bg-white p-5 pt-4">
+                {/* Draft total */}
                 <div className="rounded-xl bg-slate-50 p-4">
                   <div className="flex items-center justify-between text-sm text-slate-600">
                     <span>Draft total</span>
                     <span className="text-lg font-semibold text-slate-950">${draftTotal.toFixed(2)}</span>
                   </div>
                 </div>
+                {/* Action buttons */}
                 <div className="grid gap-2">
                   {editingRequisitionId ? (
                     <>
@@ -1863,8 +1872,8 @@ function LocationManagerView({
                       </button>
                     </>
                   )}
-                </div>
-              </div>
+                </div>{/* end buttons grid */}
+              </div>{/* end cart-footer */}
             </section>
           </aside>
         </div>
