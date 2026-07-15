@@ -62,8 +62,8 @@ export function toDbMenuCosting(fe: Partial<MenuCosting>): any {
   if (fe.targetFoodCostPercent !== undefined) db.target_food_cost_percent = fe.targetFoodCostPercent;
   if (fe.status !== undefined) db.status = fe.status;
   if (fe.notes !== undefined) db.notes = fe.notes;
-  if (fe.createdAt !== undefined) db.created_at = fe.createdAt;
-  if (fe.updatedAt !== undefined) db.updated_at = fe.updatedAt;
+  if (fe.createdAt != null) db.created_at = fe.createdAt;
+  if (fe.updatedAt != null) db.updated_at = fe.updatedAt;
   if (fe.createdBy !== undefined) db.created_by = fe.createdBy;
   return db;
 }
@@ -88,7 +88,8 @@ export function fromDbMenuCostingComponent(db: any): MenuCostingComponent {
 export function toDbMenuCostingComponent(fe: Partial<MenuCostingComponent>): any {
   const db: any = {};
   // Do not generate or forward client-side component IDs for saves.
-  // outlet_menu_costing_components.id has DEFAULT gen_random_uuid() in Postgres.
+  // outlet_menu_costing_components.id has DEFAULT gen_random_uuid() in Postgres,
+  // and created_at has DEFAULT now(). Sending null suppresses those defaults.
   // Existing component IDs are intentionally not reused because updateMenuCosting
   // replaces child rows after deleting the previous component set.
   if (fe.costingId !== undefined) db.costing_id = fe.costingId;
@@ -101,7 +102,6 @@ export function toDbMenuCostingComponent(fe: Partial<MenuCostingComponent>): any
   if (fe.unitCostSnapshot !== undefined) db.unit_cost_snapshot = fe.unitCostSnapshot;
   if (fe.lineCost !== undefined) db.line_cost = fe.lineCost;
   if (fe.sortOrder !== undefined) db.sort_order = fe.sortOrder;
-  if (fe.createdAt !== undefined) db.created_at = fe.createdAt;
   return db;
 }
 

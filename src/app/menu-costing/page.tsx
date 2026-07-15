@@ -401,8 +401,8 @@ export default function MenuCostingPage() {
     // Validation checks on component rows
     for (let i = 0; i < formComponents.length; i++) {
       const comp = formComponents[i];
-      if (!comp.sourceItemId) {
-        alert(`Component row #${i + 1} does not have a selected item.`);
+      if (!String(comp.sourceItemId || "").trim() || !String(comp.itemNameSnapshot || "").trim()) {
+        alert("Please select an item for every component row or delete incomplete rows.");
         return;
       }
       if (comp.qtyUsed <= 0) {
@@ -1108,7 +1108,7 @@ export default function MenuCostingPage() {
                                   placeholder={
                                     comp.sourceType === "finished_good" ? "Type to search finished goods..." : "Type to search inventory..."
                                   }
-                                  value={rowSearchTerm[idx] || ""}
+                                  value={rowSearchTerm[idx] ?? comp.itemNameSnapshot ?? ""}
                                   onChange={(e) => {
                                     setRowSearchTerm((prev) => ({ ...prev, [idx]: e.target.value }));
                                     setRowShowSuggestions((prev) => ({ ...prev, [idx]: true }));
