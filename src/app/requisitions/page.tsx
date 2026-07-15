@@ -566,6 +566,7 @@ function LocationManagerView({
   const [isDraftCartRestored, setIsDraftCartRestored] = useState(false);
   const [isRestoringDraft, setIsRestoringDraft] = useState(false);
   const [lineItems, setLineItems] = useState<LineItemDraft[]>([]);
+  const cartSectionRef = React.useRef<HTMLElement | null>(null);
   const [catalogSearch, setCatalogSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [supplierFilter, setSupplierFilter] = useState("all");
@@ -858,6 +859,10 @@ function LocationManagerView({
   }, [catalogItems, catalogSearch, categoryFilter, supplierFilter, storageFilter]);
 
   const draftTotal = lineItems.filter(li => li.quantityRequested > 0).reduce((sum, li) => sum + li.quantityRequested * li.unitPrice, 0);
+  const cartItemCount = lineItems.filter(li => li.quantityRequested > 0).length;
+  const scrollToOrderCart = () => {
+    cartSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
   const lowStockCount = catalogItems.filter(i => i.status === "low_stock" || i.status === "out_of_stock" || i.status === "not_available").length;
   const lastSubmittedOrder = requisitions[0]?.id ?? "None";
 
@@ -1266,7 +1271,7 @@ function LocationManagerView({
   }
 
   return (
-    <div className="w-full space-y-6">
+    <div className="w-full max-w-full space-y-6 overflow-x-hidden pb-24 md:pb-0">
       {submitNotice && (
         <div className={`fixed right-4 top-4 z-50 rounded-lg border px-4 py-3 text-sm font-semibold shadow-lg ${
           submitNotice.type === "success"
@@ -1327,7 +1332,7 @@ function LocationManagerView({
         <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
           {[
             { label: "Draft Order Total", value: `$${draftTotal.toFixed(2)}`, icon: <CircleDollarSign className="h-5 w-5" /> },
-            { label: "Items in Cart", value: lineItems.filter(li => li.quantityRequested > 0).length, icon: <ShoppingCart className="h-5 w-5" /> },
+            { label: "Items in Cart", value: cartItemCount, icon: <ShoppingCart className="h-5 w-5" /> },
             { label: "Low Stock Items", value: lowStockCount, icon: <AlertCircle className="h-5 w-5" /> },
             { label: "Last Submitted Order", value: lastSubmittedOrder, icon: <ClipboardList className="h-5 w-5" /> },
           ].map((card) => (
@@ -1465,44 +1470,44 @@ function LocationManagerView({
                 </Table>
               </div>
 
-              <div className="grid gap-3 p-4 md:hidden">
+              <div className="grid gap-2 p-3 md:hidden">
                 {visibleCatalogItems.map(item => {
                   const isLocal = (item as any).sourceType === 'local_vendor';
                   return (
-                    <div key={item.id} className="rounded-xl border border-slate-200 bg-white p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <h3 className="font-semibold text-slate-950">{item.name}</h3>
-                          <p className="mt-1 text-sm text-slate-500">{item.category} · {item.unit}</p>
-                          {item.supplier && <p className="mt-0.5 text-xs text-slate-400">{item.supplier}</p>}
+                    <div key={item.id} className="max-w-full rounded-xl border border-slate-200 bg-white p-3">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <h3 className="break-words text-sm font-semibold leading-snug text-slate-950">{item.name}</h3>
+                          <p className="mt-0.5 text-xs leading-snug text-slate-500">{item.category} · {item.unit}</p>
+                          {item.supplier && <p className="mt-0.5 truncate text-xs text-slate-400">{item.supplier}</p>}
                         </div>
                         {isLocal
                           ? <span className="inline-flex rounded-full border border-teal-200 bg-teal-50 px-2 py-0.5 text-xs font-semibold text-teal-700 shrink-0">Local Vendor</span>
                           : renderStockBadge(item.status)
                         }
                       </div>
-                      <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+                      <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
                         {isLocal
                           ? <div><span className="text-slate-500">Supplier</span><p className="font-semibold text-slate-900">{item.supplier || "—"}</p></div>
                           : <div><span className="text-slate-500">HQ Stock</span><p className="font-semibold text-slate-900">{item.hqStock}</p></div>
                         }
                         <div><span className="text-slate-500">Cost</span><p className="font-semibold text-slate-900">{item.cost > 0 ? `$${item.cost.toFixed(2)}` : "-"}</p></div>
                       </div>
-                      <div className="mt-4 flex gap-2">
+                      <div className="mt-3 flex min-w-0 items-center gap-2">
                         <input
                           type="number"
                           min={0}
                           value={catalogQtyById[item.id] ?? 0}
-                              onChange={(e) => updateItemQuantity(item.id, e.target.value)}
-                          className="h-11 w-24 rounded-lg border border-slate-200 px-3 text-sm"
+                          onChange={(e) => updateItemQuantity(item.id, e.target.value)}
+                          className="h-10 w-20 flex-none rounded-lg border border-slate-200 px-2 text-sm outline-none ring-emerald-600 focus:ring-2"
                         />
                         <button
                           type="button"
                           onClick={() => addItemById(item.id)}
                           disabled={item.added || (catalogQtyById[item.id] ?? 0) <= 0}
-                          className="flex min-h-11 flex-1 items-center justify-center rounded-lg bg-emerald-700 px-3 text-sm font-semibold text-white disabled:bg-slate-200 disabled:text-slate-500"
+                          className="flex min-h-10 min-w-0 flex-1 items-center justify-center rounded-lg bg-emerald-700 px-3 text-sm font-semibold text-white disabled:bg-slate-200 disabled:text-slate-500"
                         >
-                          {item.added ? "Added" : "Add item"}
+                          {item.added ? "Added" : "Add"}
                         </button>
                       </div>
                     </div>
@@ -1676,7 +1681,7 @@ function LocationManagerView({
           </main>
 
           {/* Order Cart — sticky panel with independent scroll on desktop */}
-          <aside className="space-y-4 lg:sticky lg:top-6 lg:self-start lg:flex lg:flex-col lg:max-h-[calc(100vh-6rem)] lg:overflow-hidden">
+          <aside ref={cartSectionRef} className="scroll-mt-4 space-y-4 lg:sticky lg:top-6 lg:self-start lg:flex lg:flex-col lg:max-h-[calc(100vh-6rem)] lg:overflow-hidden">
             <section className="rounded-2xl border border-slate-200 bg-white shadow-sm lg:flex lg:flex-col lg:min-h-0 lg:h-full">
               {/* Cart header — pinned, never scrolls */}
               <div className="flex shrink-0 items-center justify-between border-b border-slate-200 p-5">
@@ -1877,6 +1882,26 @@ function LocationManagerView({
             </section>
           </aside>
         </div>
+
+      {cartItemCount > 0 && (
+        <div className="fixed inset-x-0 bottom-0 z-40 border-t border-emerald-200 bg-white/95 px-3 pt-2 shadow-[0_-8px_24px_rgba(15,23,42,0.12)] backdrop-blur md:hidden" style={{ paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))" }}>
+          <div className="mx-auto flex max-w-lg items-center gap-2 rounded-xl border border-emerald-100 bg-emerald-50 px-3 py-2">
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-bold text-emerald-950">
+                Cart: {cartItemCount} item{cartItemCount === 1 ? "" : "s"} · ${draftTotal.toFixed(2)}
+              </p>
+              <p className="text-xs text-emerald-700">Review run details and submit</p>
+            </div>
+            <button
+              type="button"
+              onClick={scrollToOrderCart}
+              className="min-h-11 shrink-0 rounded-lg bg-emerald-700 px-3 text-sm font-semibold text-white shadow-sm"
+            >
+              View Cart
+            </button>
+          </div>
+        </div>
+      )}
 
       <Drawer
         isOpen={!!selectedReq}
