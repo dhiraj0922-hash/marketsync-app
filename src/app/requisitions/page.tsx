@@ -106,6 +106,14 @@ const COMMISSARY_COLORS: Record<string, string> = {
 type RequisitionDatePreset = "custom" | "today" | "yesterday" | "last24" | "nextDay";
 type FulfillmentMethod = "hq_delivery" | "store_pickup";
 type FulfillmentWindow = "morning" | "afternoon" | "evening" | "next_hq_run" | "asap_pickup";
+type ManualHqSupplyReason = "HQ physically supplied today" | "Temporary emergency supply" | "Catalog setup pending" | "Other";
+
+const MANUAL_HQ_SUPPLY_REASONS: ManualHqSupplyReason[] = [
+  "HQ physically supplied today",
+  "Temporary emergency supply",
+  "Catalog setup pending",
+  "Other",
+];
 
 const FULFILLMENT_METHOD_LABELS: Record<FulfillmentMethod, string> = {
   hq_delivery: "HQ Delivery",
@@ -2283,10 +2291,16 @@ function HQAdminView({
   // Reset draft and idempotency key when selected requisition changes
   const [fulfillmentAttemptKey, setFulfillmentAttemptKey] = useState<string | null>(null);
   const [isFulfillmentLoading, setIsFulfillmentLoading] = useState(false);
+  const [manualHqSupplyOverrides, setManualHqSupplyOverrides] = useState<Map<string, {
+    enabled: boolean;
+    reason: ManualHqSupplyReason | "";
+    note: string;
+  }>>(new Map());
 
   useEffect(() => {
     setFulfillDraftMap(new Map());
     setFulfillmentAttemptKey(null);
+    setManualHqSupplyOverrides(new Map());
   }, [selectedReq?.id]);
 
   const getSafeFulfillQty = useCallback((li: any) => {
@@ -2349,6 +2363,34 @@ function HQAdminView({
 
   const setLineFulfillQuantity = useCallback((lineId: string, qty: number) => {
     setFulfillDraftMap(prev => new Map(prev).set(lineId, qty));
+  }, []);
+
+  const isManualHqSupplyCandidate = useCallback((li: any) => {
+    const sourceType = String(li.sourceType ?? li.source_type ?? "").toLowerCase().trim();
+    return sourceType === "local_vendor" || (!li.itemId && !li.finishedGoodId);
+  }, []);
+
+  const getManualHqSupplyOverride = useCallback((lineId: string) => {
+    return manualHqSupplyOverrides.get(lineId) ?? { enabled: false, reason: "" as const, note: "" };
+  }, [manualHqSupplyOverrides]);
+
+  const isManualHqSupplyOverrideValid = useCallback((lineId: string) => {
+    const override = getManualHqSupplyOverride(lineId);
+    if (!override.enabled || !override.reason) return false;
+    if (override.reason === "Other" && !override.note.trim()) return false;
+    return true;
+  }, [getManualHqSupplyOverride]);
+
+  const updateManualHqSupplyOverride = useCallback((
+    lineId: string,
+    patch: Partial<{ enabled: boolean; reason: ManualHqSupplyReason | ""; note: string }>
+  ) => {
+    setManualHqSupplyOverrides(prev => {
+      const current = prev.get(lineId) ?? { enabled: false, reason: "" as ManualHqSupplyReason | "", note: "" };
+      const next = new Map(prev);
+      next.set(lineId, { ...current, ...patch });
+      return next;
+    });
   }, []);
 
   // Initialise missing entries from loaded line items.
@@ -2479,6 +2521,7 @@ function HQAdminView({
   // may complete fulfillment and cause stock deductions.
   // hq_fulfillment may review and approve/reject but not finalize fulfillment.
   const canCompleteFulfillment = !isHqFulfillment(profile);
+  const canUseManualHqSupplyOverride = canCompleteFulfillment && (isHqMaster(profile) || isHqOps(profile));
   const FULFILLED_STATUSES    = new Set(["fulfilled", "partially_fulfilled", "backordered", "partial"]);
   const PENDING_STATUSES      = new Set(["draft", "submitted"]);
 
@@ -3514,88 +3557,80 @@ function HQAdminView({
                     {/* Complete Fulfillment — shown only for management roles (not hq_fulfillment) on fulfillable statuses */}
                     {selectedReq && canCompleteFulfillment && FULFILLABLE_STATUSES.has((selectedReq.status ?? "").toLowerCase()) && !isFulfillmentLocked && (() => {
                       // ── Pre-flight: classify every line before allowing submission ──────────
-                      // Local vendor items must NEVER go through the HQ atomic RPC.
-                      const localVendorLines = hqReqItems.filter((li: any) =>
-                        li.sourceType === 'local_vendor'
+                      const manualOverrideCandidateLines = hqReqItems.filter((li: any) => isManualHqSupplyCandidate(li));
+                      const unresolvedManualOverrideLines = manualOverrideCandidateLines.filter((li: any) =>
+                        !canUseManualHqSupplyOverride || !isManualHqSupplyOverrideValid(li.id)
                       );
-                      // Unmapped HQ lines: source_type is hq_supplied (or legacy null) but
-                      // both item_id AND finished_good_id are null → RPC will crash with
-                      // "Shared item_id not resolved for inventory item NULL"
-                      const unmappedHqLines = hqReqItems.filter((li: any) =>
-                        li.sourceType !== 'local_vendor' &&
-                        !li.itemId &&
-                        !li.finishedGoodId
-                      );
-                      const hasPreflightErrors = localVendorLines.length > 0 || unmappedHqLines.length > 0;
+                      const hasPreflightErrors = unresolvedManualOverrideLines.length > 0;
 
                       return (
                         <>
                                 {/* Pre-flight warning banner — shown only when there are blocking items */}
-                          {hasPreflightErrors && (
-                            <div className="w-full rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                              <p className="font-semibold mb-1">⚠ Cannot finalize: mapping issues detected</p>
-                              {localVendorLines.length > 0 && (() => {
-                                // Inline HQ FC supplier detection — uses the same alias list as
-                                // isHqFulfillmentCentreSupplier() but without an extra fetch.
-                                // supplierSnapshot is a text field snapshotted at order time.
-                                const HQ_FC_ALIASES = [
-                                  'veggie paradise', 'veggieparadise', 'vp',
-                                  'momo loco', 'momoloco', 'momo-loco',
-                                ];
-                                const normSnap = (s: string | null | undefined) =>
-                                  (s ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
-                                const isHqFcSnap = (snap: string | null | undefined) =>
-                                  HQ_FC_ALIASES.includes(normSnap(snap));
-
-                                return (
-                                  <div className="mt-1">
-                                    <p className="font-medium text-amber-700">
-                                      {localVendorLines.length} item{localVendorLines.length > 1 ? 's' : ''} blocked from HQ fulfillment — individual setup required:
-                                    </p>
-                                    <ul className="mt-0.5 space-y-0.5 pl-3">
-                                      {localVendorLines.map((li: any) => {
-                                        const isHqFc = isHqFcSnap(li.supplierSnapshot ?? li.supplier_snapshot);
-                                        return (
-                                          <li key={li.id} className="list-disc text-amber-700">
-                                            {li.itemName ?? li.catalogItemId ?? li.id}
-                                            {isHqFc ? (
-                                              <span className="ml-1 font-semibold text-slate-600 text-[10px]">
-                                                [HQ Supplier Item — Setup Required]
-                                              </span>
-                                            ) : (
-                                              <span className="ml-1 font-mono text-[10px] text-amber-500">[local_vendor]</span>
-                                            )}
-                                          </li>
-                                        );
-                                      })}
-                                    </ul>
-                                    {localVendorLines.some((li: any) => isHqFcSnap(li.supplierSnapshot ?? li.supplier_snapshot)) && (
-                                      <p className="mt-1 text-[10px] text-slate-500 italic">
-                                        Items marked "HQ Supplier Item — Setup Required" are from approved HQ suppliers
-                                        (Veggie Paradise, Momo Loco) but have not yet been individually linked to an HQ Sale Item.
-                                        Contact HQ admin to complete setup before fulfillment.
-                                      </p>
-                                    )}
-                                  </div>
-                                );
-                              })()}
-                              {unmappedHqLines.length > 0 && (
-                                <div className="mt-1">
-                                  <p className="font-medium text-amber-700">
-                                    {unmappedHqLines.length} HQ item{unmappedHqLines.length > 1 ? 's' : ''} missing inventory mapping:
-                                  </p>
-                                  <ul className="mt-0.5 space-y-0.5 pl-3">
-                                    {unmappedHqLines.map((li: any) => (
-                                      <li key={li.id} className="list-disc text-amber-700">
-                                        {li.itemName ?? li.id}
-                                        <span className="ml-1 font-mono text-[10px] text-amber-500">
-                                          [{li.sourceType ?? 'legacy'} · no item_id or finished_good_id]
-                                        </span>
-                                      </li>
-                                    ))}
-                                  </ul>
-                                </div>
+                          {manualOverrideCandidateLines.length > 0 && (
+                            <div className="w-full rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                              <p className="font-semibold mb-1">
+                                {hasPreflightErrors ? "Cannot finalize: manual HQ supply review required" : "Manual HQ supply override ready"}
+                              </p>
+                              {!canUseManualHqSupplyOverride && (
+                                <p className="mb-2 text-rose-700">
+                                  These lines require hq_master or hq_ops authorization before fulfillment can be completed.
+                                </p>
                               )}
+                              <div className="space-y-2">
+                                {manualOverrideCandidateLines.map((li: any) => {
+                                  const override = getManualHqSupplyOverride(li.id);
+                                  const validOverride = isManualHqSupplyOverrideValid(li.id);
+                                  const isLocalVendor = String(li.sourceType ?? li.source_type ?? "").toLowerCase().trim() === "local_vendor";
+                                  return (
+                                    <div key={li.id} className="rounded-md border border-amber-200 bg-white/70 p-2">
+                                      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                                        <div>
+                                          <p className="font-semibold text-amber-900">{li.itemName ?? li.catalogItemId ?? li.id}</p>
+                                          <p className="text-[10px] text-amber-700">
+                                            {isLocalVendor ? "local_vendor" : "unmapped"} - no inventory deduction or catalog mapping will be created.
+                                          </p>
+                                          {validOverride && (
+                                            <span className="mt-1 inline-flex rounded-full border border-amber-300 bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800">
+                                              Manual HQ supply override - permanent item setup still required
+                                            </span>
+                                          )}
+                                        </div>
+                                        <label className="flex items-center gap-2 text-[11px] font-semibold text-amber-900">
+                                          <input
+                                            type="checkbox"
+                                            disabled={!canUseManualHqSupplyOverride}
+                                            checked={override.enabled}
+                                            onChange={(event) => updateManualHqSupplyOverride(li.id, { enabled: event.target.checked })}
+                                            className="h-4 w-4 rounded border-amber-300 text-amber-700 focus:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50"
+                                          />
+                                          Mark supplied by HQ for this order only
+                                        </label>
+                                      </div>
+                                      {override.enabled && (
+                                        <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                          <select
+                                            value={override.reason}
+                                            onChange={(event) => updateManualHqSupplyOverride(li.id, { reason: event.target.value as ManualHqSupplyReason | "" })}
+                                            className="rounded-md border border-amber-200 bg-white px-2 py-1.5 text-xs text-neutral-800 outline-none focus:ring-2 focus:ring-amber-400"
+                                          >
+                                            <option value="">Select override reason</option>
+                                            {MANUAL_HQ_SUPPLY_REASONS.map((reason) => (
+                                              <option key={reason} value={reason}>{reason}</option>
+                                            ))}
+                                          </select>
+                                          <input
+                                            type="text"
+                                            value={override.note}
+                                            onChange={(event) => updateManualHqSupplyOverride(li.id, { note: event.target.value })}
+                                            placeholder={override.reason === "Other" ? "Required note for Other" : "Optional note"}
+                                            className="rounded-md border border-amber-200 bg-white px-2 py-1.5 text-xs text-neutral-800 outline-none focus:ring-2 focus:ring-amber-400"
+                                          />
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
                             </div>
                           )}
                       <button
@@ -3611,10 +3646,15 @@ function HQAdminView({
 
                             const linesToSubmit = hqReqItems.map((li: any) => {
                               const val = fulfillDraftMap.has(li.id) ? Number(fulfillDraftMap.get(li.id)) : Number(li.quantityFulfilled ?? 0);
+                              const manualOverride = getManualHqSupplyOverride(li.id);
+                              const shouldSendManualOverride = isManualHqSupplyCandidate(li) && isManualHqSupplyOverrideValid(li.id);
                               return {
                                 lineId: li.id,
                                 fulfilledQty: val,
-                                availableQty: li.hqAvailableStock ?? 0
+                                availableQty: li.hqAvailableStock ?? 0,
+                                manualHqSupplyOverride: shouldSendManualOverride,
+                                overrideReason: shouldSendManualOverride ? manualOverride.reason : undefined,
+                                overrideNote: shouldSendManualOverride ? manualOverride.note.trim() : undefined,
                               };
                             });
 

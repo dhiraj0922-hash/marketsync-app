@@ -9954,18 +9954,33 @@ export async function saveFgCountLineAtomic(params: {
 
 export async function finalizeRequisitionFulfillment(
   requisitionId: string,
-  lines: Array<{ lineId: string; fulfilledQty: number; availableQty: number }>,
+  lines: Array<{
+    lineId: string;
+    fulfilledQty: number;
+    availableQty: number;
+    manualHqSupplyOverride?: boolean;
+    overrideReason?: string;
+    overrideNote?: string;
+  }>,
   userId: string,
   userName: string,
   idempotencyKey: string
 ): Promise<{ success: boolean; newStatus?: string; totalAmount?: number; error?: any; dbErrorMessage?: string }> {
   const rpcPayload = {
     p_requisition_id:  requisitionId,
-    p_fulfilled_lines: lines.map(l => ({
-      line_id:       l.lineId,
-      fulfilled_qty: l.fulfilledQty,
-      available_qty: l.availableQty,
-    })),
+    p_fulfilled_lines: lines.map(l => {
+      const row: any = {
+        line_id:       l.lineId,
+        fulfilled_qty: l.fulfilledQty,
+        available_qty: l.availableQty,
+      };
+      if (l.manualHqSupplyOverride) {
+        row.manual_hq_supply_override = true;
+        row.override_reason = l.overrideReason?.trim() || null;
+        row.override_note = l.overrideNote?.trim() || null;
+      }
+      return row;
+    }),
     p_user_id:         userId,
     p_user_name:       userName,
     p_idempotency_key: idempotencyKey,
@@ -9989,9 +10004,12 @@ export async function finalizeRequisitionFulfillment(
         userId_prefix:   userId ? userId.slice(0, 8) + '...' : '(empty — check profile.id vs profile.userId)',
         userName,
         lines: lines.map(l => ({
-          lineId:       l.lineId,
-          fulfilledQty: l.fulfilledQty,
-          availableQty: l.availableQty,
+          lineId:                 l.lineId,
+          fulfilledQty:           l.fulfilledQty,
+          availableQty:           l.availableQty,
+          manualHqSupplyOverride: Boolean(l.manualHqSupplyOverride),
+          overrideReason:         l.overrideReason?.trim() || null,
+          overrideNote:           l.overrideNote?.trim() || null,
         })),
       },
     });
