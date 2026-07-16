@@ -12,9 +12,10 @@ interface DrawerProps {
   footer?: React.ReactNode;
   /** 'panel' (default) = full-height right side-panel. 'dialog' = centered modal, max-h-[85vh], internally scrollable. */
   variant?: 'panel' | 'dialog';
+  dialogClassName?: string;
 }
 
-export function Drawer({ isOpen, onClose, title, description, children, footer, variant = 'panel' }: DrawerProps) {
+export function Drawer({ isOpen, onClose, title, description, children, footer, variant = 'panel', dialogClassName }: DrawerProps) {
   const [mounted, setMounted] = React.useState(false);
 
   React.useEffect(() => {
@@ -52,7 +53,8 @@ export function Drawer({ isOpen, onClose, title, description, children, footer, 
             "relative flex h-[100dvh] max-h-[100dvh] w-full max-w-[1100px] flex-col overflow-hidden rounded-none bg-white shadow-2xl md:h-auto md:rounded-xl",
             "border border-neutral-200",
             "md:max-h-[85vh]",
-            "animate-in zoom-in-95 duration-200"
+            "animate-in zoom-in-95 duration-200",
+            dialogClassName
           )}
           onClick={(e) => e.stopPropagation()}
         >
