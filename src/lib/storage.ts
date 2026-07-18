@@ -9952,6 +9952,291 @@ export async function saveFgCountLineAtomic(params: {
   }
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Finished Goods Count — Enterprise Session Workflow
+// ────────────────────────────────────────────────────────────────────────────
+
+export type EnterpriseFgCountStatus = 'draft' | 'submitted' | 'approved' | 'rejected' | 'cancelled';
+
+export interface EnterpriseFgCountSession {
+  id: string;
+  countDate: string;
+  businessDate: string;
+  sessionName: string | null;
+  locationId: string;
+  locationName: string | null;
+  countType: string;
+  status: EnterpriseFgCountStatus;
+  notes: string | null;
+  counterName: string | null;
+  countedByName: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  submittedByName: string | null;
+  submittedAt: string | null;
+  approvedByName: string | null;
+  approvedAt: string | null;
+  postedByName: string | null;
+  postedAt: string | null;
+  totalItems: number;
+  countedItems: number;
+  varianceItems: number;
+  expectedValue: number;
+  physicalValue: number;
+  varianceValue: number;
+  gainValue: number;
+  lossValue: number;
+  postedMovementCount: number;
+}
+
+export interface EnterpriseFgCountLine {
+  id: string;
+  sessionId: string;
+  itemId: string;
+  finishedGoodId: string | null;
+  itemName: string;
+  sku: string | null;
+  category: string | null;
+  packSize: string | null;
+  packQty: number;
+  unit: string | null;
+  expectedQty: number;
+  physicalQty: number;
+  physicalQtyEntered: boolean;
+  varianceQty: number;
+  variancePercent: number | null;
+  makingCost: number;
+  expectedValue: number;
+  physicalValue: number;
+  varianceValue: number;
+  lastCountDate: string | null;
+  notes: string | null;
+  status: 'uncounted' | 'counted' | 'gain' | 'loss';
+  postedMovementId: number | null;
+}
+
+export interface EnterpriseFgCountAuditLog {
+  id: string;
+  sessionId: string;
+  action: string;
+  actorName: string | null;
+  reason: string | null;
+  metadata: any;
+  createdAt: string;
+}
+
+export interface EnterpriseFgCountSessionDetail {
+  session: EnterpriseFgCountSession;
+  lines: EnterpriseFgCountLine[];
+  audit: EnterpriseFgCountAuditLog[];
+}
+
+const mapEnterpriseFgSession = (db: any): EnterpriseFgCountSession => ({
+  id: String(db.id ?? ''),
+  countDate: String(db.count_date ?? db.business_date ?? ''),
+  businessDate: String(db.business_date ?? db.count_date ?? ''),
+  sessionName: db.session_name ?? null,
+  locationId: String(db.location_id ?? 'LOC-HQ'),
+  locationName: db.location_name ?? null,
+  countType: String(db.count_type ?? 'Closing Count'),
+  status: String(db.status ?? 'draft').toLowerCase() as EnterpriseFgCountStatus,
+  notes: db.notes ?? null,
+  counterName: db.counter_name ?? null,
+  countedByName: db.counted_by_name ?? null,
+  createdBy: db.created_by ?? db.counted_by ?? null,
+  createdAt: db.created_at ?? '',
+  updatedAt: db.updated_at ?? '',
+  submittedByName: db.submitted_by_name ?? null,
+  submittedAt: db.submitted_at ?? null,
+  approvedByName: db.approved_by_name ?? null,
+  approvedAt: db.approved_at ?? null,
+  postedByName: db.posted_by_name ?? null,
+  postedAt: db.posted_at ?? null,
+  totalItems: Number(db.total_items ?? 0),
+  countedItems: Number(db.counted_items ?? 0),
+  varianceItems: Number(db.variance_items ?? 0),
+  expectedValue: Number(db.expected_value ?? 0),
+  physicalValue: Number(db.physical_value ?? 0),
+  varianceValue: Number(db.variance_value ?? 0),
+  gainValue: Number(db.gain_value ?? 0),
+  lossValue: Number(db.loss_value ?? 0),
+  postedMovementCount: Number(db.posted_movement_count ?? 0),
+});
+
+const mapEnterpriseFgLine = (db: any): EnterpriseFgCountLine => {
+  const expectedQty = Number(db.expected_qty ?? db.system_qty ?? 0);
+  const physicalQty = Number(db.physical_qty ?? 0);
+  const varianceQty = Number(db.variance_qty ?? 0);
+  return {
+    id: String(db.id ?? ''),
+    sessionId: String(db.session_id ?? ''),
+    itemId: String(db.item_id ?? ''),
+    finishedGoodId: db.finished_good_id ?? db.item_id ?? null,
+    itemName: String(db.item_name ?? ''),
+    sku: db.sku_snapshot ?? null,
+    category: db.category_snapshot ?? null,
+    packSize: db.pack_size_snapshot ?? null,
+    packQty: Number(db.pack_qty_snapshot ?? 1) || 1,
+    unit: db.unit ?? null,
+    expectedQty,
+    physicalQty,
+    physicalQtyEntered: Boolean(db.physical_qty_entered),
+    varianceQty,
+    variancePercent: expectedQty !== 0 ? (varianceQty / expectedQty) * 100 : null,
+    makingCost: Number(db.making_cost_snapshot ?? db.unit_cost ?? 0),
+    expectedValue: Number(db.expected_value ?? expectedQty * Number(db.making_cost_snapshot ?? db.unit_cost ?? 0)),
+    physicalValue: Number(db.physical_value ?? physicalQty * Number(db.making_cost_snapshot ?? db.unit_cost ?? 0)),
+    varianceValue: Number(db.variance_value ?? 0),
+    lastCountDate: db.last_count_date_snapshot ?? null,
+    notes: db.notes ?? null,
+    status: String(db.status ?? 'uncounted') as EnterpriseFgCountLine['status'],
+    postedMovementId: db.posted_movement_id != null ? Number(db.posted_movement_id) : null,
+  };
+};
+
+const FG_SESSION_SELECT = [
+  'id', 'count_date', 'business_date', 'session_name', 'location_id', 'location_name',
+  'count_type', 'status', 'notes', 'counter_name', 'counted_by_name', 'created_by',
+  'counted_by', 'created_at', 'updated_at', 'submitted_by_name', 'submitted_at',
+  'approved_by_name', 'approved_at', 'posted_by_name', 'posted_at', 'total_items',
+  'counted_items', 'variance_items', 'expected_value', 'physical_value',
+  'variance_value', 'gain_value', 'loss_value', 'posted_movement_count'
+].join(',');
+
+const FG_LINE_SELECT = [
+  'id', 'session_id', 'item_id', 'finished_good_id', 'item_name', 'sku_snapshot',
+  'category_snapshot', 'pack_size_snapshot', 'pack_qty_snapshot', 'unit',
+  'system_qty', 'expected_qty', 'physical_qty', 'physical_qty_entered',
+  'variance_qty', 'unit_cost', 'making_cost_snapshot', 'expected_value',
+  'physical_value', 'variance_value', 'last_count_date_snapshot', 'notes',
+  'status', 'posted_movement_id'
+].join(',');
+
+export async function loadEnterpriseFgCountSessions(opts?: {
+  status?: string;
+  locationId?: string;
+  businessDate?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  countType?: string;
+}): Promise<EnterpriseFgCountSession[]> {
+  let query = supabase
+    .from('fg_count_sessions')
+    .select(FG_SESSION_SELECT)
+    .order('business_date', { ascending: false })
+    .order('created_at', { ascending: false })
+    .range(0, 4999);
+
+  if (opts?.status && opts.status !== 'All') query = query.eq('status', opts.status.toLowerCase());
+  if (opts?.locationId && opts.locationId !== 'All') query = query.eq('location_id', opts.locationId);
+  if (opts?.businessDate) query = query.eq('business_date', opts.businessDate);
+  if (opts?.dateFrom) query = query.gte('business_date', opts.dateFrom);
+  if (opts?.dateTo) query = query.lte('business_date', opts.dateTo);
+  if (opts?.countType && opts.countType !== 'All') query = query.eq('count_type', opts.countType);
+
+  const { data, error } = await query;
+  if (error) {
+    console.error('[loadEnterpriseFgCountSessions]', error);
+    return [];
+  }
+  return (data ?? []).map(mapEnterpriseFgSession);
+}
+
+export async function loadEnterpriseFgCountSessionById(sessionId: string): Promise<EnterpriseFgCountSessionDetail | null> {
+  const [{ data: session, error: sessionError }, { data: lines, error: lineError }, { data: audit, error: auditError }] = await Promise.all([
+    supabase.from('fg_count_sessions').select(FG_SESSION_SELECT).eq('id', sessionId).maybeSingle(),
+    supabase.from('fg_count_lines').select(FG_LINE_SELECT).eq('session_id', sessionId).order('item_name', { ascending: true }).range(0, 9999),
+    supabase.from('fg_count_audit_log').select('id, session_id, action, actor_name, reason, metadata, created_at').eq('session_id', sessionId).order('created_at', { ascending: false }).range(0, 999),
+  ]);
+
+  if (sessionError || !session) {
+    if (sessionError) console.error('[loadEnterpriseFgCountSessionById]', sessionError);
+    return null;
+  }
+  if (lineError) console.error('[loadEnterpriseFgCountSessionById lines]', lineError);
+  if (auditError) console.error('[loadEnterpriseFgCountSessionById audit]', auditError);
+
+  return {
+    session: mapEnterpriseFgSession(session),
+    lines: (lines ?? []).map(mapEnterpriseFgLine),
+    audit: (audit ?? []).map((row: any): EnterpriseFgCountAuditLog => ({
+      id: row.id,
+      sessionId: row.session_id,
+      action: row.action,
+      actorName: row.actor_name ?? null,
+      reason: row.reason ?? null,
+      metadata: row.metadata ?? {},
+      createdAt: row.created_at,
+    })),
+  };
+}
+
+export async function createEnterpriseFgCountSession(params: {
+  locationId: string;
+  businessDate: string;
+  sessionName: string;
+  countType: string;
+  notes?: string | null;
+  counterName?: string | null;
+  createAdditional?: boolean;
+}): Promise<{ success: boolean; sessionId?: string; duplicate?: boolean; existingSessionId?: string; message?: string; error?: any }> {
+  const { data, error } = await supabase.rpc('create_fg_count_session', {
+    p_location_id: params.locationId,
+    p_business_date: params.businessDate,
+    p_session_name: params.sessionName,
+    p_count_type: params.countType,
+    p_notes: params.notes ?? null,
+    p_counter_name: params.counterName ?? null,
+    p_create_additional: Boolean(params.createAdditional),
+  });
+
+  if (error) return { success: false, error, message: error.message };
+  return {
+    success: Boolean(data?.success),
+    sessionId: data?.session_id ?? undefined,
+    duplicate: Boolean(data?.duplicate),
+    existingSessionId: data?.existing_session_id ?? undefined,
+    message: data?.message ?? undefined,
+  };
+}
+
+export async function saveEnterpriseFgCountDraft(params: {
+  sessionId: string;
+  notes?: string | null;
+  lines: Array<{ itemId: string; physicalQty: number | null; notes?: string | null }>;
+}): Promise<{ success: boolean; error?: any; message?: string }> {
+  const { error } = await supabase.rpc('save_fg_count_session_draft', {
+    p_session_id: params.sessionId,
+    p_notes: params.notes ?? null,
+    p_lines: params.lines.map(line => ({
+      item_id: line.itemId,
+      physical_qty: line.physicalQty,
+      notes: line.notes ?? null,
+    })),
+  });
+  if (error) return { success: false, error, message: error.message };
+  return { success: true };
+}
+
+export async function submitEnterpriseFgCountSession(sessionId: string): Promise<{ success: boolean; error?: any; message?: string }> {
+  const { error } = await supabase.rpc('submit_fg_count_session', { p_session_id: sessionId });
+  if (error) return { success: false, error, message: error.message };
+  return { success: true };
+}
+
+export async function approveAndPostEnterpriseFgCountSession(
+  sessionId: string,
+  reason?: string | null
+): Promise<{ success: boolean; movementCount?: number; error?: any; message?: string }> {
+  const { data, error } = await supabase.rpc('approve_and_post_fg_count_session', {
+    p_session_id: sessionId,
+    p_reason: reason ?? null,
+  });
+  if (error) return { success: false, error, message: error.message };
+  return { success: Boolean(data?.success), movementCount: Number(data?.movement_count ?? 0) };
+}
+
 export async function finalizeRequisitionFulfillment(
   requisitionId: string,
   lines: Array<{
