@@ -103,7 +103,8 @@ const COMMISSARY_COLORS: Record<string, string> = {
   "Veggie Paradise": "bg-success-50  text-success-700  border-success-200",
 };
 
-type RequisitionDatePreset = "custom" | "today" | "yesterday" | "last24" | "nextDay";
+type RequisitionDatePreset = "custom" | "today" | "thisWeek" | "thisMonth" | "yesterday" | "last24" | "nextDay";
+type RequisitionValuePeriod = "today" | "thisWeek" | "thisMonth";
 type FulfillmentMethod = "hq_delivery" | "store_pickup";
 type FulfillmentWindow = "morning" | "afternoon" | "evening" | "next_hq_run" | "asap_pickup";
 type ManualHqSupplyReason = "HQ physically supplied today" | "Temporary emergency supply" | "Catalog setup pending" | "Other";
@@ -293,6 +294,43 @@ function formatFilterDateTime(dateValue: string, timeValue: string, fallbackTime
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+function startOfLocalDay(date: Date): Date {
+  const next = new Date(date);
+  next.setHours(0, 0, 0, 0);
+  return next;
+}
+
+function endOfLocalDay(date: Date): Date {
+  const next = new Date(date);
+  next.setHours(23, 59, 0, 0);
+  return next;
+}
+
+function startOfCurrentWeek(date: Date): Date {
+  const next = startOfLocalDay(date);
+  const day = next.getDay();
+  const daysSinceMonday = (day + 6) % 7;
+  next.setDate(next.getDate() - daysSinceMonday);
+  return next;
+}
+
+function getRequisitionPeriodRange(period: RequisitionValuePeriod, now = new Date()) {
+  if (period === "today") {
+    return { from: startOfLocalDay(now), to: endOfLocalDay(now) };
+  }
+  if (period === "thisWeek") {
+    return { from: startOfCurrentWeek(now), to: endOfLocalDay(now) };
+  }
+  return { from: new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0), to: endOfLocalDay(now) };
+}
+
+function isWithinDateWindow(value: string | null | undefined, from: Date, to: Date): boolean {
+  if (!value) return false;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return false;
+  return date >= from && date <= to;
 }
 
 function Time12HourPicker({
@@ -2524,6 +2562,87 @@ function HQAdminView({
   const canUseManualHqSupplyOverride = canCompleteFulfillment && (isHqMaster(profile) || isHqOps(profile));
   const FULFILLED_STATUSES    = new Set(["fulfilled", "partially_fulfilled", "backordered", "partial"]);
   const PENDING_STATUSES      = new Set(["draft", "submitted"]);
+  const REQUISITION_VALUE_EXCLUDED_STATUSES = new Set(["draft", "rejected", "cancelled", "voided", "deleted"]);
+
+  const periodRanges = useMemo(() => ({
+    today: getRequisitionPeriodRange("today"),
+    thisWeek: getRequisitionPeriodRange("thisWeek"),
+    thisMonth: getRequisitionPeriodRange("thisMonth"),
+  }), []);
+
+  const requisitionsInLocationScope = useMemo(() => {
+    return requisitions.filter((r) => filterLocation === "All" || r.location_id === filterLocation);
+  }, [filterLocation, requisitions]);
+
+  const periodRequisitionIds = useMemo(() => {
+    const ids = new Set<string>();
+    Object.values(periodRanges).forEach(({ from, to }) => {
+      requisitionsInLocationScope.forEach((req) => {
+        const status = normalizeRequisitionStatus(req.status);
+        if (REQUISITION_VALUE_EXCLUDED_STATUSES.has(status)) return;
+        if (isWithinDateWindow(req.createdAt ?? req.created_at, from, to)) ids.add(req.id);
+      });
+    });
+    return Array.from(ids);
+  }, [periodRanges, requisitionsInLocationScope]);
+
+  useEffect(() => {
+    const missingIds = periodRequisitionIds.filter((id) => !reqItemsCache.has(id));
+    if (!missingIds.length) return;
+    let cancelled = false;
+    loadRequisitionItemsBatch(missingIds).then((map) => {
+      if (cancelled || map.size === 0) return;
+      setReqItemsCache((prev) => {
+        const next = new Map(prev);
+        map.forEach((items, id) => next.set(id, items));
+        return next;
+      });
+    });
+    return () => { cancelled = true; };
+  }, [periodRequisitionIds, reqItemsCache]);
+
+  const getLineFulfilledValue = (line: any): number => {
+    const quantityFulfilled = Number(line.quantityFulfilled ?? line.quantity_fulfilled ?? 0);
+    if (quantityFulfilled <= 0) return 0;
+    const fulfilledValue = line.fulfilledValue ?? line.fulfilled_value;
+    if (fulfilledValue != null) return Math.max(0, Number(fulfilledValue) || 0);
+    const lineTotal = line.lineTotal ?? line.line_total;
+    if (lineTotal != null) return Math.max(0, Number(lineTotal) || 0);
+    const unitPrice = Number(line.unitPrice ?? line.unit_price ?? 0);
+    return Math.max(0, quantityFulfilled * unitPrice);
+  };
+
+  const getPeriodSummary = (period: RequisitionValuePeriod) => {
+    const { from, to } = periodRanges[period];
+    const rows = requisitionsInLocationScope.filter((req) => {
+      const status = normalizeRequisitionStatus(req.status);
+      return !REQUISITION_VALUE_EXCLUDED_STATUSES.has(status)
+        && isWithinDateWindow(req.createdAt ?? req.created_at, from, to);
+    });
+
+    const requestedValue = rows.reduce((sum, req) => sum + getReqRequestedValue(req), 0);
+    const suppliedValue = rows.reduce((sum, req) => {
+      const items = reqItemsCache.get(req.id) ?? (req.id === selectedReq?.id ? hqReqItems : null);
+      if (items?.length) return sum + items.reduce((lineSum: number, line: any) => lineSum + getLineFulfilledValue(line), 0);
+      if (FULFILLED_STATUSES.has(normalizeRequisitionStatus(req.status))) {
+        return sum + Math.max(0, Number(req.totalAmount ?? req.total_amount ?? 0));
+      }
+      return sum;
+    }, 0);
+
+    return {
+      requestedValue,
+      suppliedValue,
+      outstandingValue: Math.max(0, requestedValue - suppliedValue),
+      requisitionCount: rows.length,
+    };
+  };
+
+  const periodSummaries = {
+    today: getPeriodSummary("today"),
+    thisWeek: getPeriodSummary("thisWeek"),
+    thisMonth: getPeriodSummary("thisMonth"),
+  };
 
   const pendingCount   = requisitions.filter((r) => PENDING_STATUSES.has((r.status ?? "").toLowerCase())).length;
   const backorderCount = backorders.filter((b) =>
@@ -2571,16 +2690,17 @@ function HQAdminView({
     if (preset === "custom") return;
 
     if (preset === "today") {
-      from = new Date(now);
-      from.setHours(0, 0, 0, 0);
-      to = new Date(now);
-      to.setHours(23, 59, 0, 0);
+      ({ from, to } = getRequisitionPeriodRange("today", now));
+    } else if (preset === "thisWeek") {
+      ({ from, to } = getRequisitionPeriodRange("thisWeek", now));
+    } else if (preset === "thisMonth") {
+      ({ from, to } = getRequisitionPeriodRange("thisMonth", now));
     } else if (preset === "yesterday") {
       from = new Date(now);
       from.setDate(from.getDate() - 1);
-      from.setHours(0, 0, 0, 0);
+      from = startOfLocalDay(from);
       to = new Date(from);
-      to.setHours(23, 59, 0, 0);
+      to = endOfLocalDay(to);
     } else if (preset === "last24") {
       from = new Date(now.getTime() - 24 * 60 * 60 * 1000);
       to = new Date(now);
@@ -3115,30 +3235,95 @@ function HQAdminView({
             </div>
           </div>
 
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-6">
             {[
               { label: "Pending Workflow", value: pendingCount.toString(), tone: "amber", icon: <Clock className="h-5 w-5" /> },
               { label: "Open Backorders", value: backorderCount.toString(), tone: "red", icon: <AlertCircle className="h-5 w-5" /> },
-              { label: "Top Consuming Location", value: topLocation, tone: "blue", icon: <MapPin className="h-5 w-5" /> },
+              {
+                label: "Today's Requisition Value",
+                value: `$${periodSummaries.today.requestedValue.toFixed(2)}`,
+                sub: `${periodSummaries.today.requisitionCount} requisition${periodSummaries.today.requisitionCount === 1 ? "" : "s"}`,
+                detail: `Supplied $${periodSummaries.today.suppliedValue.toFixed(2)} · Outstanding $${periodSummaries.today.outstandingValue.toFixed(2)}`,
+                tone: "blue",
+                icon: <CircleDollarSign className="h-5 w-5" />,
+                period: "today" as const,
+              },
+              {
+                label: "This Week's Requisition Value",
+                value: `$${periodSummaries.thisWeek.requestedValue.toFixed(2)}`,
+                sub: `${periodSummaries.thisWeek.requisitionCount} requisition${periodSummaries.thisWeek.requisitionCount === 1 ? "" : "s"}`,
+                detail: `Supplied $${periodSummaries.thisWeek.suppliedValue.toFixed(2)} · Outstanding $${periodSummaries.thisWeek.outstandingValue.toFixed(2)}`,
+                tone: "blue",
+                icon: <CircleDollarSign className="h-5 w-5" />,
+                period: "thisWeek" as const,
+              },
+              {
+                label: "This Month's Requisition Value",
+                value: `$${periodSummaries.thisMonth.requestedValue.toFixed(2)}`,
+                sub: `${periodSummaries.thisMonth.requisitionCount} requisition${periodSummaries.thisMonth.requisitionCount === 1 ? "" : "s"}`,
+                detail: `Supplied $${periodSummaries.thisMonth.suppliedValue.toFixed(2)} · Outstanding $${periodSummaries.thisMonth.outstandingValue.toFixed(2)}`,
+                tone: "blue",
+                icon: <CircleDollarSign className="h-5 w-5" />,
+                period: "thisMonth" as const,
+              },
               { label: "Total Value Supplied", value: `$${totalValueSupplied.toFixed(2)}`, tone: "emerald", icon: <CircleDollarSign className="h-5 w-5" /> },
-            ].map((stat, i) => (
-              <Card key={i} className="rounded-xl border-white/10 bg-[#111111] shadow-[0_18px_50px_rgba(0,0,0,0.28)]">
-                <CardContent className="flex items-start justify-between p-4">
+            ].map((stat, i) => {
+              const period = "period" in stat ? stat.period : null;
+              const isActivePeriod = period != null && filterDatePreset === period;
+              return (
+              <Card
+                key={i}
+                role={period ? "button" : undefined}
+                tabIndex={period ? 0 : undefined}
+                onClick={() => period && applyDatePreset(period)}
+                onKeyDown={(event) => {
+                  if (!period) return;
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    applyDatePreset(period);
+                  }
+                }}
+                className={`rounded-xl border-white/10 bg-[#111111] shadow-[0_18px_50px_rgba(0,0,0,0.28)] ${period ? "cursor-pointer transition-colors hover:bg-[#151515]" : ""} ${isActivePeriod ? "ring-2 ring-blue-500/70" : ""}`}
+              >
+                <CardContent className="flex h-full items-start justify-between gap-3 p-4">
                   <div>
                     <span className="block text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">{stat.label}</span>
                     <span className="mt-3 block text-2xl font-semibold tracking-tight text-white">{stat.value}</span>
+                    {"sub" in stat && <span className="mt-1 block text-xs font-medium text-zinc-400">{stat.sub}</span>}
+                    {"detail" in stat && <span className="mt-2 block text-[11px] leading-4 text-zinc-500">{stat.detail}</span>}
+                    {isActivePeriod && <span className="mt-2 inline-flex rounded-full border border-blue-400/30 bg-blue-500/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.14em] text-blue-200">Active</span>}
                   </div>
-                  <div className={`rounded-lg p-2 ${
+                  <div
+                    className={`rounded-lg p-2 ${
                     stat.tone === "emerald" ? "bg-emerald-500/15 text-emerald-300" :
                     stat.tone === "amber" ? "bg-amber-500/15 text-amber-300" :
                     stat.tone === "red" ? "bg-red-500/15 text-red-300" :
                     "bg-blue-500/15 text-blue-300"
-                  }`}>
+                  }`}
+                  >
                     {stat.icon}
                   </div>
                 </CardContent>
               </Card>
-            ))}
+              );
+            })}
+          </div>
+
+          <div className="flex flex-col gap-2 rounded-xl border border-white/10 bg-[#111111] px-4 py-3 text-sm text-zinc-400 shadow-[0_18px_50px_rgba(0,0,0,0.22)] sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-2">
+              <MapPin className="h-4 w-4 text-blue-300" />
+              <span className="font-semibold text-zinc-300">Top Consuming Location</span>
+              <span>{topLocation}</span>
+            </div>
+            {filterDatePreset !== "custom" && (
+              <button
+                type="button"
+                onClick={() => applyDatePreset("custom")}
+                className="inline-flex items-center gap-1 self-start rounded-lg border border-white/10 bg-[#151515] px-3 py-1.5 text-xs font-semibold text-zinc-300 hover:bg-[#202020] sm:self-auto"
+              >
+                <X className="h-3.5 w-3.5" /> Reset period
+              </button>
+            )}
           </div>
 
           <Card className="overflow-hidden rounded-xl border-white/10 bg-[#111111] shadow-[0_18px_50px_rgba(0,0,0,0.32)]">
@@ -3223,6 +3408,8 @@ function HQAdminView({
                 >
                   <option value="custom">Custom window</option>
                   <option value="today">Today</option>
+                  <option value="thisWeek">This week</option>
+                  <option value="thisMonth">This month</option>
                   <option value="yesterday">Yesterday</option>
                   <option value="last24">Last 24 hours</option>
                   <option value="nextDay">Next-day fulfillment window</option>
