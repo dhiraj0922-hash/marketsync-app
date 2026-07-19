@@ -216,20 +216,65 @@ export interface ProfitReport {
   totalCogs:    number;
   totalProfit:  number;
   avgMarginPct: number | null;   // null when no revenue rows
+  totalLines:   number;
+  displayedRows: number;
 }
 
-export async function getFulfillmentProfitReport(
+export interface ProfitReportSummary {
+  totalLines:   number;
+  totalRevenue: number;
+  totalCogs:    number;
+  totalProfit:  number;
+  avgMarginPct: number | null;
+}
+
+export async function getFulfillmentProfitReportSummary(
   filters: ReportFilters,
-): Promise<{ data: ProfitReport | null; error: string | null }> {
-  const { data, error } = await supabase.rpc("get_fulfillment_profit_report", {
+): Promise<{ data: ProfitReportSummary | null; error: string | null }> {
+  const { data, error } = await supabase.rpc("get_fulfillment_profit_report_summary", {
     p_location_id: filters.locationId ?? null,
     p_date_from:   filters.dateFrom   ?? isoDate(daysAgo(30)),
     p_date_to:     filters.dateTo     ?? isoDate(new Date()),
   });
 
   if (error) {
+    console.error("[reports] getFulfillmentProfitReportSummary:", error.message);
+    return { data: null, error: error.message };
+  }
+
+  const row = Array.isArray(data) ? data[0] : data;
+  return {
+    data: {
+      totalLines:   Number(row?.total_lines   ?? 0),
+      totalRevenue: Number(row?.total_revenue ?? 0),
+      totalCogs:    Number(row?.total_cogs    ?? 0),
+      totalProfit:  Number(row?.gross_profit  ?? 0),
+      avgMarginPct: row?.avg_margin != null ? Number(row.avg_margin) : null,
+    },
+    error: null,
+  };
+}
+
+export async function getFulfillmentProfitReport(
+  filters: ReportFilters,
+): Promise<{ data: ProfitReport | null; error: string | null }> {
+  const params = {
+    p_location_id: filters.locationId ?? null,
+    p_date_from:   filters.dateFrom   ?? isoDate(daysAgo(30)),
+    p_date_to:     filters.dateTo     ?? isoDate(new Date()),
+  };
+
+  const [{ data, error }, summaryResult] = await Promise.all([
+    supabase.rpc("get_fulfillment_profit_report", params),
+    getFulfillmentProfitReportSummary(filters),
+  ]);
+
+  if (error) {
     console.error("[reports] getFulfillmentProfitReport:", error.message);
     return { data: null, error: error.message };
+  }
+  if (summaryResult.error || !summaryResult.data) {
+    return { data: null, error: summaryResult.error ?? "Profit summary failed." };
   }
 
   const rows: ProfitRow[] = (data ?? []).map((r: any): ProfitRow => ({
@@ -247,16 +292,18 @@ export async function getFulfillmentProfitReport(
     margin_pct:    r.margin_pct != null ? Number(r.margin_pct) : null,
   }));
 
-  const totalRevenue = rows.reduce((s, r) => s + r.revenue, 0);
-  const totalCogs    = rows.reduce((s, r) => s + r.cogs,    0);
-  const totalProfit  = rows.reduce((s, r) => s + r.profit,  0);
-
-  // Average margin: weighted by revenue (not simple row average)
-  const avgMarginPct = totalRevenue > 0
-    ? (totalProfit / totalRevenue) * 100
-    : null;
-
-  return { data: { rows, totalRevenue, totalCogs, totalProfit, avgMarginPct }, error: null };
+  return {
+    data: {
+      rows,
+      totalRevenue: summaryResult.data.totalRevenue,
+      totalCogs: summaryResult.data.totalCogs,
+      totalProfit: summaryResult.data.totalProfit,
+      avgMarginPct: summaryResult.data.avgMarginPct,
+      totalLines: summaryResult.data.totalLines,
+      displayedRows: rows.length,
+    },
+    error: null,
+  };
 }
 
 

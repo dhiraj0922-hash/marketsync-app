@@ -641,6 +641,9 @@ function ProfitView({ report, locName }: { report: ProfitReport; locName: (id: s
   const avgDisplay = report.avgMarginPct != null
     ? `${fmt(report.avgMarginPct)}%`
     : "—";
+  const lineSub = report.totalLines > report.displayedRows
+    ? `${fmt(report.totalLines, 0)} fulfillment lines · showing ${fmt(report.displayedRows, 0)}`
+    : `${fmt(report.totalLines, 0)} fulfillment lines`;
 
   // Derive top / worst items from already-fetched rows — no extra RPC
   const insights: MarginInsights = deriveMarginInsights(report);
@@ -653,7 +656,7 @@ function ProfitView({ report, locName }: { report: ProfitReport; locName: (id: s
           icon={<DollarSign className="h-5 w-5 text-green-600" />}
           label="Total Revenue"
           value={$(report.totalRevenue)}
-          sub={`${report.rows.length} fulfillment lines`}
+          sub={lineSub}
           accent="green" />
         <SummaryCard
           icon={<TrendingDown className="h-5 w-5 text-red-500" />}

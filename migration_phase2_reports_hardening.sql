@@ -389,3 +389,104 @@ $$;
 
 REVOKE ALL     ON FUNCTION public.get_fulfillment_profit_report(TEXT, TEXT, TEXT) FROM PUBLIC;
 GRANT  EXECUTE ON FUNCTION public.get_fulfillment_profit_report(TEXT, TEXT, TEXT) TO authenticated;
+
+-- STEP 4: get_fulfillment_profit_report_summary
+-- Returns one aggregate row so Profit summary cards are not affected by
+-- Supabase/PostgREST detail-row response caps.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE OR REPLACE FUNCTION public.get_fulfillment_profit_report_summary(
+  p_location_id TEXT DEFAULT NULL,   -- nullable: NULL or '' -> all locations (HQ only)
+  p_date_from   TEXT DEFAULT NULL,   -- ISO date "YYYY-MM-DD" (inclusive lower bound)
+  p_date_to     TEXT DEFAULT NULL    -- ISO date "YYYY-MM-DD" (inclusive upper bound)
+)
+RETURNS TABLE (
+  total_lines   BIGINT,
+  total_revenue NUMERIC,
+  total_cogs    NUMERIC,
+  gross_profit  NUMERIC,
+  avg_margin    NUMERIC
+)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public, auth
+AS $$
+#variable_conflict use_column
+DECLARE
+  v_caller_role            TEXT;
+  v_caller_location_id     TEXT;
+  v_effective_location_id  TEXT;
+BEGIN
+  -- 1. Identify the authenticated user with fully qualified columns.
+  SELECT up.role, up.location_id INTO v_caller_role, v_caller_location_id
+  FROM public.user_profiles up
+  WHERE up.user_id = auth.uid() AND up.is_active = true;
+
+  IF v_caller_role IS NULL THEN
+    RAISE EXCEPTION 'Access Denied: User profile not found or inactive.';
+  END IF;
+
+  -- 2. Scoping validation. Keep this in sync with get_fulfillment_profit_report.
+  IF v_caller_role = 'hq_admin' THEN
+    v_effective_location_id := NULLIF(p_location_id, '');
+  ELSIF v_caller_role = 'location_manager' THEN
+    IF v_caller_location_id IS NULL THEN
+      RAISE EXCEPTION 'Access Denied: No location assigned to this user profile.';
+    END IF;
+
+    IF NULLIF(p_location_id, '') IS NOT NULL AND NULLIF(p_location_id, '') <> v_caller_location_id THEN
+      RAISE EXCEPTION 'Access Denied: You are not authorized to view reports for other locations.';
+    END IF;
+
+    v_effective_location_id := v_caller_location_id;
+  ELSE
+    RAISE EXCEPTION 'Access Denied: Unrecognized role %.', v_caller_role;
+  END IF;
+
+  -- 3. Return uncapped SQL totals using the same eligibility/date/cost rules
+  -- as get_fulfillment_profit_report.
+  RETURN QUERY
+  WITH eligible AS (
+    SELECT
+      COALESCE(ri.fulfilled_value, ri.line_total, ri.quantity_fulfilled * ri.unit_price) AS revenue,
+      ri.quantity_fulfilled
+        * COALESCE(NULLIF(ri.pack_qty_snapshot, 0), 1)
+        * COALESCE(hq.making_cost, 0) AS cogs
+    FROM public.requisition_items ri
+    INNER JOIN public.requisitions req
+            ON req.id = ri.requisition_id
+    INNER JOIN public.hq_sale_items hq
+            ON hq.id = ri.finished_good_id
+    WHERE
+      ri.quantity_fulfilled  > 0
+      AND ri.unit_price      IS NOT NULL
+      AND ri.finished_good_id IS NOT NULL
+      AND (p_date_from IS NULL OR ri.created_at >= p_date_from::DATE)
+      AND (p_date_to   IS NULL OR ri.created_at <  p_date_to::DATE + INTERVAL '1 day')
+      AND (v_effective_location_id IS NULL OR req.location_id = v_effective_location_id)
+  ),
+  totals AS (
+    SELECT
+      COUNT(*)::BIGINT AS total_lines,
+      COALESCE(SUM(revenue), 0)::NUMERIC AS total_revenue,
+      COALESCE(SUM(cogs), 0)::NUMERIC AS total_cogs,
+      COALESCE(SUM(revenue - cogs), 0)::NUMERIC AS gross_profit
+    FROM eligible
+  )
+  SELECT
+    totals.total_lines,
+    totals.total_revenue,
+    totals.total_cogs,
+    totals.gross_profit,
+    CASE
+      WHEN totals.total_revenue > 0
+        THEN ROUND((totals.gross_profit / totals.total_revenue) * 100, 2)
+      ELSE NULL
+    END AS avg_margin
+  FROM totals;
+END;
+$$;
+
+REVOKE ALL     ON FUNCTION public.get_fulfillment_profit_report_summary(TEXT, TEXT, TEXT) FROM PUBLIC;
+GRANT  EXECUTE ON FUNCTION public.get_fulfillment_profit_report_summary(TEXT, TEXT, TEXT) TO authenticated;
