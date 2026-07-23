@@ -157,7 +157,7 @@
   .print-table {
     width: 100% !important;
     border-collapse: collapse !important;
-    font-size: 7.5pt;
+    font-size: 7pt;
     margin-top: 10pt;
     page-break-inside: auto !important;
   }
@@ -263,11 +263,18 @@
   /* ── Qty columns ─────────────────────────────────────────────────────────── */
   .qty-em {
     color: #333;
+    font-size: 7pt;
+  }
+
+  /* ── Total Pick Qty column — bold, warehouse-readable ─────────────────────── */
+  .qty-total-pick {
+    font-weight: 700;
     font-size: 7.5pt;
+    color: #000;
   }
 
   .qty-backorder {
     font-weight: 700;
-    font-size: 7.5pt;
+    font-size: 7pt;
   }
 }

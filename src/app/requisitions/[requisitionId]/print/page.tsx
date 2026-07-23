@@ -25,6 +25,36 @@ function fmtQty(n: number | null, unit?: string | null): string {
   return unit ? `${s} ${unit}` : s;
 }
 
+/**
+ * Calculates and formats the total base quantity for the pick list.
+ *
+ * FG mode  : quantityRequested (packs) × packQtySnapshot (base units/pack)
+ *            → e.g. "2 packs × 3 kg / pack = 6 kg"
+ * Raw mode : quantityRequested × 1 (already in base unit)
+ *            → e.g. "4 kg" (no multiplication line needed)
+ * Missing  : "—"
+ */
+function fmtTotalPickQty(item: {
+  isFGMode: boolean;
+  quantityRequested: number;
+  packQtySnapshot: number | null;
+  unit: string | null;
+}): string {
+  const { isFGMode, quantityRequested, packQtySnapshot, unit } = item;
+
+  if (isFGMode) {
+    // Pack-based FG item — multiply packs × base units per pack
+    if (!packQtySnapshot || packQtySnapshot <= 0) return "—";
+    const total = quantityRequested * packQtySnapshot;
+    const totalStr = Number.isInteger(total) ? String(total) : total.toFixed(2).replace(/\.?0+$/, "");
+    return unit ? `${totalStr} ${unit}` : `${totalStr}`;
+  }
+
+  // Raw / non-FG item — quantity is already in base unit
+  if (!unit) return fmtQty(quantityRequested, null);
+  return fmtQty(quantityRequested, unit);
+}
+
 function fmtDateTime(iso: string | null | undefined): string {
   if (!iso) return "—";
   try {
@@ -167,7 +197,7 @@ function LineRow({ item }: { item: PrintLineItem }) {
       {/* Supplier */}
       <td className="text-xs">{item.supplier}</td>
 
-      {/* Unit / Pack */}
+      {/* Pack Size */}
       <td className="text-xs whitespace-nowrap">{item.unitPackLabel}</td>
 
       {/* Requested */}
@@ -175,6 +205,11 @@ function LineRow({ item }: { item: PrintLineItem }) {
         {item.isFGMode
           ? `${item.quantityRequested}${item.quantityRequested !== 1 ? " packs" : " pack"}`
           : fmtQty(item.quantityRequested, item.unit)}
+      </td>
+
+      {/* Total Pick Qty */}
+      <td className="qty-total-pick text-right tabular-nums">
+        {fmtTotalPickQty(item)}
       </td>
 
       {/* Approved */}
@@ -312,15 +347,16 @@ function PrintDocument({
             <tr>
               <th className="text-right w-6">#</th>
               <th className="text-left min-w-[120px]">Item</th>
-              <th className="text-left w-24">SKU / Item ID</th>
-              <th className="text-left w-32">Source</th>
-              <th className="text-left w-28">Supplier</th>
-              <th className="text-left w-24">Unit / Pack</th>
-              <th className="text-right w-16">Requested</th>
-              <th className="text-right w-16">Approved</th>
-              <th className="text-right w-20">Fulfilled / Picked</th>
-              <th className="text-right w-20">Backordered</th>
-              <th className="text-center w-10">✓ Check</th>
+              <th className="text-left w-20">SKU / Item ID</th>
+              <th className="text-left w-24">Source</th>
+              <th className="text-left w-24">Supplier</th>
+              <th className="text-left w-20">Pack Size</th>
+              <th className="text-right w-14">Requested</th>
+              <th className="text-right w-20">Total Pick Qty</th>
+              <th className="text-right w-14">Approved</th>
+              <th className="text-right w-18">Fulfilled / Picked</th>
+              <th className="text-right w-18">Backordered</th>
+              <th className="text-center w-8">✓ Check</th>
             </tr>
           </thead>
           <tbody>
