@@ -2583,6 +2583,11 @@ function HQAdminView({
         if (isWithinDateWindow(req.createdAt ?? req.created_at, from, to)) ids.add(req.id);
       });
     });
+    requisitionsInLocationScope.forEach((req) => {
+      const status = normalizeRequisitionStatus(req.status);
+      if (REQUISITION_VALUE_EXCLUDED_STATUSES.has(status)) return;
+      if (FULFILLED_STATUSES.has(status)) ids.add(req.id);
+    });
     return Array.from(ids);
   }, [periodRanges, requisitionsInLocationScope]);
 
@@ -2612,6 +2617,10 @@ function HQAdminView({
     return Math.max(0, quantityFulfilled * unitPrice);
   };
 
+  const getLineFulfilledAt = (line: any): string | null => {
+    return line.fulfilledAt ?? line.fulfilled_at ?? null;
+  };
+
   const getPeriodSummary = (period: RequisitionValuePeriod) => {
     const { from, to } = periodRanges[period];
     const rows = requisitionsInLocationScope.filter((req) => {
@@ -2621,10 +2630,17 @@ function HQAdminView({
     });
 
     const requestedValue = rows.reduce((sum, req) => sum + getReqRequestedValue(req), 0);
-    const suppliedValue = rows.reduce((sum, req) => {
+    const suppliedValue = requisitionsInLocationScope.reduce((sum, req) => {
+      const status = normalizeRequisitionStatus(req.status);
+      if (REQUISITION_VALUE_EXCLUDED_STATUSES.has(status)) return sum;
       const items = reqItemsCache.get(req.id) ?? (req.id === selectedReq?.id ? hqReqItems : null);
-      if (items?.length) return sum + items.reduce((lineSum: number, line: any) => lineSum + getLineFulfilledValue(line), 0);
-      if (FULFILLED_STATUSES.has(normalizeRequisitionStatus(req.status))) {
+      if (items?.length) {
+        return sum + items.reduce((lineSum: number, line: any) => {
+          if (!isWithinDateWindow(getLineFulfilledAt(line), from, to)) return lineSum;
+          return lineSum + getLineFulfilledValue(line);
+        }, 0);
+      }
+      if (FULFILLED_STATUSES.has(status) && isWithinDateWindow(req.fulfilledAt ?? req.fulfilled_at, from, to)) {
         return sum + Math.max(0, Number(req.totalAmount ?? req.total_amount ?? 0));
       }
       return sum;
@@ -3240,28 +3256,28 @@ function HQAdminView({
               { label: "Pending Workflow", value: pendingCount.toString(), tone: "amber", icon: <Clock className="h-5 w-5" /> },
               { label: "Open Backorders", value: backorderCount.toString(), tone: "red", icon: <AlertCircle className="h-5 w-5" /> },
               {
-                label: "Today's Requisition Value",
+                label: "Requested Today",
                 value: `$${periodSummaries.today.requestedValue.toFixed(2)}`,
                 sub: `${periodSummaries.today.requisitionCount} requisition${periodSummaries.today.requisitionCount === 1 ? "" : "s"}`,
-                detail: `Supplied $${periodSummaries.today.suppliedValue.toFixed(2)} · Outstanding $${periodSummaries.today.outstandingValue.toFixed(2)}`,
+                detail: `Supplied today $${periodSummaries.today.suppliedValue.toFixed(2)} · Outstanding from today's requests $${periodSummaries.today.outstandingValue.toFixed(2)}`,
                 tone: "blue",
                 icon: <CircleDollarSign className="h-5 w-5" />,
                 period: "today" as const,
               },
               {
-                label: "This Week's Requisition Value",
+                label: "Requested This Week",
                 value: `$${periodSummaries.thisWeek.requestedValue.toFixed(2)}`,
                 sub: `${periodSummaries.thisWeek.requisitionCount} requisition${periodSummaries.thisWeek.requisitionCount === 1 ? "" : "s"}`,
-                detail: `Supplied $${periodSummaries.thisWeek.suppliedValue.toFixed(2)} · Outstanding $${periodSummaries.thisWeek.outstandingValue.toFixed(2)}`,
+                detail: `Supplied this week $${periodSummaries.thisWeek.suppliedValue.toFixed(2)} · Outstanding from this week's requests $${periodSummaries.thisWeek.outstandingValue.toFixed(2)}`,
                 tone: "blue",
                 icon: <CircleDollarSign className="h-5 w-5" />,
                 period: "thisWeek" as const,
               },
               {
-                label: "This Month's Requisition Value",
+                label: "Requested This Month",
                 value: `$${periodSummaries.thisMonth.requestedValue.toFixed(2)}`,
                 sub: `${periodSummaries.thisMonth.requisitionCount} requisition${periodSummaries.thisMonth.requisitionCount === 1 ? "" : "s"}`,
-                detail: `Supplied $${periodSummaries.thisMonth.suppliedValue.toFixed(2)} · Outstanding $${periodSummaries.thisMonth.outstandingValue.toFixed(2)}`,
+                detail: `Supplied this month $${periodSummaries.thisMonth.suppliedValue.toFixed(2)} · Outstanding from this month's requests $${periodSummaries.thisMonth.outstandingValue.toFixed(2)}`,
                 tone: "blue",
                 icon: <CircleDollarSign className="h-5 w-5" />,
                 period: "thisMonth" as const,

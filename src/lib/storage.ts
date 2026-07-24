@@ -7006,7 +7006,7 @@ export async function updateRequisitionItemFulfilled(
   // Fetch finished_good_id alongside item_id to detect FG mode.
   const { data: currentRow, error: fetchCurrentError } = await supabase
     .from("requisition_items")
-    .select("item_id, finished_good_id, quantity_fulfilled, pack_qty_snapshot")
+    .select("item_id, finished_good_id, quantity_fulfilled, pack_qty_snapshot, fulfilled_at, unit_price")
     .eq("id", itemId)
     .single();
 
@@ -7222,10 +7222,34 @@ async function writeFulfilledAndRecalc(
   quantityFulfilled: number,
   requisitionId: string
 ): Promise<{ success: boolean; newStatus?: string; error?: any }> {
+  const { data: currentRow, error: currentError } = await supabase
+    .from("requisition_items")
+    .select("quantity_fulfilled, fulfilled_at, fulfilled_value, unit_price")
+    .eq("id", itemId)
+    .maybeSingle();
+
+  if (currentError) {
+    console.error("[Fulfillment] ✗ Step 8: could not read current fulfillment state", currentError);
+    return { success: false, error: currentError };
+  }
+
+  const previousFulfilled = Number(currentRow?.quantity_fulfilled ?? 0);
+  const fulfillmentIncreased = quantityFulfilled > previousFulfilled;
+  const writePatch: Record<string, any> = { quantity_fulfilled: quantityFulfilled };
+
+  if (quantityFulfilled > 0 && fulfillmentIncreased && !currentRow?.fulfilled_at) {
+    writePatch.fulfilled_at = new Date().toISOString();
+  }
+
+  const unitPrice = currentRow?.unit_price != null ? Number(currentRow.unit_price) : null;
+  if (quantityFulfilled > 0 && currentRow?.fulfilled_value == null && unitPrice != null && Number.isFinite(unitPrice)) {
+    writePatch.fulfilled_value = parseFloat((quantityFulfilled * unitPrice).toFixed(2));
+  }
+
   // ── 8. Write new quantity_fulfilled ────────────────────────────────────────────
   const { error: writeError } = await supabase
     .from("requisition_items")
-    .update({ quantity_fulfilled: quantityFulfilled })
+    .update(writePatch)
     .eq("id", itemId);
 
   if (writeError) {
